@@ -36,6 +36,8 @@ pub struct RpcExecutionOutput {
     pub data: serde_json::Value,
     #[serde(default)]
     pub set_cookies: Vec<SetCookieInfo>,
+    #[serde(default)]
+    pub queries: Vec<serde_json::Value>,
 }
 
 #[derive(Debug, Serialize)]
@@ -100,10 +102,25 @@ class LoggingConnection implements DatabaseConnection {
     const { sql: sqlStr, parameters } = compiledQuery;
     try {
       const res = await this.inner.executeQuery<R>(compiledQuery);
-      const duration = (performance.now() - start).toFixed(2);
+      const duration = Number((performance.now() - start).toFixed(2));
       const rows = res.rows || [];
       const rowCount = Array.isArray(rows) ? rows.length : (res.numAffectedRows !== undefined ? Number(res.numAffectedRows) : 0);
       
+      const queryLog = {
+        id: "sql_" + Math.random().toString(36).slice(2, 9),
+        type: "sql",
+        sql: sqlStr,
+        parameters: parameters || [],
+        response: rows,
+        rowCount: rowCount,
+        duration_ms: duration,
+        status: "success",
+        error: null,
+        timestamp: new Date().toISOString()
+      };
+      const logStore = (globalThis as any).__NATA_QUERY_LOGS__ || ((globalThis as any).__NATA_QUERY_LOGS__ = []);
+      logStore.push(queryLog);
+
       if (process.env.DEBUG_SQL === "true" || process.env.DEBUG_SQL === "1") {
         const paramStr = parameters && parameters.length > 0 ? ` [${parameters.map(p => JSON.stringify(p)).join(", ")}]` : "";
         console.log(`\x1b[36m⚡ [SQL]\x1b[0m \x1b[1m${sqlStr}\x1b[0m\x1b[90m${paramStr} (${duration}ms)\x1b[0m`);
@@ -126,8 +143,24 @@ class LoggingConnection implements DatabaseConnection {
       }
       return res;
     } catch (err: any) {
-      const duration = (performance.now() - start).toFixed(2);
+      const duration = Number((performance.now() - start).toFixed(2));
       const paramStr = parameters && parameters.length > 0 ? ` [${parameters.map(p => JSON.stringify(p)).join(", ")}]` : "";
+      
+      const queryLog = {
+        id: "sql_" + Math.random().toString(36).slice(2, 9),
+        type: "sql",
+        sql: sqlStr,
+        parameters: parameters || [],
+        response: null,
+        rowCount: 0,
+        duration_ms: duration,
+        status: "error",
+        error: err?.message || String(err),
+        timestamp: new Date().toISOString()
+      };
+      const logStore = (globalThis as any).__NATA_QUERY_LOGS__ || ((globalThis as any).__NATA_QUERY_LOGS__ = []);
+      logStore.push(queryLog);
+
       console.error(`\x1b[31m✖ [SQL Error]\x1b[0m \x1b[1m${sqlStr}\x1b[0m\x1b[90m${paramStr} (${duration}ms)\x1b[0m`);
       console.error(`\x1b[31m  ↳ Error:\x1b[0m ${err?.message || err}`);
       throw err;
@@ -859,6 +892,7 @@ async function run() {{
   }}
   globalThis.__NATA_COOKIES__ = cookieMap;
   globalThis.__NATA_SET_COOKIES__ = [];
+  globalThis.__NATA_QUERY_LOGS__ = [];
 
   let target = (actionName === "default") ? (mod.default || mod) : mod[actionName];
   if (!target && mod.default && typeof mod.default === "object" && mod.default[actionName]) {{
@@ -908,9 +942,11 @@ async function run() {{
   }}
 
   const setCookies = Array.isArray(globalThis.__NATA_SET_COOKIES__) ? globalThis.__NATA_SET_COOKIES__ : [];
+  const queries = Array.isArray(globalThis.__NATA_QUERY_LOGS__) ? globalThis.__NATA_QUERY_LOGS__ : [];
   const outPayload = {{
     __nata_rpc_data__: res ?? null,
-    __nata_set_cookies__: setCookies
+    __nata_set_cookies__: setCookies,
+    __nata_queries__: queries
   }};
 
   process.stdout.write(RPC_DELIM_START + JSON.stringify(outPayload) + RPC_DELIM_END + "\n", () => {{
@@ -920,9 +956,11 @@ async function run() {{
 }}
 
 run().catch(err => {{
+  const queries = Array.isArray(globalThis.__NATA_QUERY_LOGS__) ? globalThis.__NATA_QUERY_LOGS__ : [];
   const errPayload = {{
     error: err?.message || String(err),
-    stack: err?.stack || undefined
+    stack: err?.stack || undefined,
+    __nata_queries__: queries
   }};
   process.stdout.write(RPC_DELIM_START + JSON.stringify(errPayload) + RPC_DELIM_END + "\n", () => {{
     process.exit(1);
@@ -1093,21 +1131,24 @@ run().catch(err => {{
         let parsed: serde_json::Value = serde_json::from_str(json_str)
             .unwrap_or_else(|_| serde_json::Value::String(json_str.to_string()));
 
-        let (data, set_cookies) = if let Some(obj) = parsed.as_object() {
+        let (data, set_cookies, queries) = if let Some(obj) = parsed.as_object() {
             if obj.contains_key("__nata_rpc_data__") {
                 let d = obj.get("__nata_rpc_data__").cloned().unwrap_or(serde_json::Value::Null);
                 let sc: Vec<SetCookieInfo> = obj.get("__nata_set_cookies__")
                     .and_then(|v| serde_json::from_value(v.clone()).ok())
                     .unwrap_or_default();
-                (d, sc)
+                let q: Vec<serde_json::Value> = obj.get("__nata_queries__")
+                    .and_then(|v| serde_json::from_value(v.clone()).ok())
+                    .unwrap_or_default();
+                (d, sc, q)
             } else {
-                (parsed, vec![])
+                (parsed, vec![], vec![])
             }
         } else {
-            (parsed, vec![])
+            (parsed, vec![], vec![])
         };
 
-        Ok(RpcExecutionOutput { data, set_cookies })
+        Ok(RpcExecutionOutput { data, set_cookies, queries })
     }
 
     /// Dispatches a Server Action / Backend Module execution request using Bun runtime (data only)

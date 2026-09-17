@@ -8,8 +8,8 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use std::{path::PathBuf, sync::Arc};
-use tokio::sync::broadcast;
+use std::{collections::VecDeque, path::PathBuf, sync::Arc};
+use tokio::sync::{broadcast, RwLock};
 use tower_http::cors::CorsLayer;
 
 use crate::{
@@ -25,6 +25,7 @@ pub struct AppState {
     pub router: Arc<AppRouter>,
     pub hmr_tx: broadcast::Sender<String>,
     pub target: String,
+    pub query_logs: Arc<RwLock<VecDeque<serde_json::Value>>>,
 }
 
 pub struct DevServer;
@@ -41,6 +42,7 @@ impl DevServer {
 
         let router = Arc::new(AppRouter::scan(&root_dir));
         let (hmr_tx, _) = broadcast::channel::<String>(100);
+        let query_logs = Arc::new(RwLock::new(VecDeque::with_capacity(500)));
 
         // Start native file system watcher for live HMR & CSS hot reload
         crate::watcher::ProjectWatcher::start(&root_dir, hmr_tx.clone());
@@ -50,12 +52,14 @@ impl DevServer {
             router: router.clone(),
             hmr_tx: hmr_tx.clone(),
             target: target.clone(),
+            query_logs: query_logs.clone(),
         };
 
         let app = Router::new()
             .route("/_hmr", get(ws_hmr_handler))
             .route("/favicon.ico", get(favicon_handler))
             .route("/_nata/rpc", post(rpc_handler))
+            .route("/_nata/logs", get(logs_handler).delete(clear_logs_handler))
             .route("/_nata/route_info", get(route_info_handler))
             .route("/_nata/styles.css", get(styles_handler))
             .route("/_nata/shims/{*path}", get(shims_handler))
@@ -158,6 +162,7 @@ async fn rpc_handler(
 ) -> impl IntoResponse {
     let mod_name = payload.module.clone();
     let action_name = payload.action.clone().unwrap_or_else(|| "default".to_string());
+    let rpc_start = std::time::Instant::now();
 
     if payload.cookies.is_none() {
         if let Some(cookie_hdr) = req_headers.get("x-nata-cookies").or_else(|| req_headers.get(header::COOKIE)) {
@@ -167,8 +172,48 @@ async fn rpc_handler(
         }
     }
 
-    match RpcExecutor::execute_full(&state.root_dir, payload).await {
+    match RpcExecutor::execute_full(&state.root_dir, payload.clone()).await {
         Ok(output) => {
+            let rpc_duration = (rpc_start.elapsed().as_secs_f64() * 1000.0 * 100.0).round() / 100.0;
+            let now_iso = format_iso_now();
+            let rpc_id = format!("rpc_{:x}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos());
+            let rpc_log = serde_json::json!({
+                "id": rpc_id,
+                "type": "rpc",
+                "module": mod_name,
+                "action": action_name,
+                "parameters": payload.args,
+                "response": output.data,
+                "duration_ms": rpc_duration,
+                "status": "success",
+                "error": null,
+                "timestamp": now_iso,
+                "queries": output.queries
+            });
+
+            // Store logs into ring buffer
+            {
+                let mut logs = state.query_logs.write().await;
+                for q in &output.queries {
+                    if logs.len() >= 500 {
+                        logs.pop_front();
+                    }
+                    logs.push_back(q.clone());
+                }
+                if logs.len() >= 500 {
+                    logs.pop_front();
+                }
+                logs.push_back(rpc_log.clone());
+            }
+
+            // Real-time broadcast to connected browsers
+            let ws_event = serde_json::json!({
+                "type": "query_log",
+                "log": rpc_log,
+                "queries": output.queries
+            });
+            let _ = state.hmr_tx.send(ws_event.to_string());
+
             let mut res_headers = HeaderMap::new();
             res_headers.insert(header::CONTENT_TYPE, "application/json; charset=utf-8".parse().unwrap());
 
@@ -204,6 +249,38 @@ async fn rpc_handler(
             (StatusCode::OK, res_headers, Json(output.data)).into_response()
         }
         Err(err) => {
+            let rpc_duration = (rpc_start.elapsed().as_secs_f64() * 1000.0 * 100.0).round() / 100.0;
+            let now_iso = format_iso_now();
+            let rpc_id = format!("rpc_{:x}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos());
+            let rpc_log = serde_json::json!({
+                "id": rpc_id,
+                "type": "rpc",
+                "module": mod_name.clone(),
+                "action": action_name.clone(),
+                "parameters": payload.args,
+                "response": null,
+                "duration_ms": rpc_duration,
+                "status": "error",
+                "error": err,
+                "timestamp": now_iso,
+                "queries": []
+            });
+
+            {
+                let mut logs = state.query_logs.write().await;
+                if logs.len() >= 500 {
+                    logs.pop_front();
+                }
+                logs.push_back(rpc_log.clone());
+            }
+
+            let ws_event = serde_json::json!({
+                "type": "query_log",
+                "log": rpc_log,
+                "queries": []
+            });
+            let _ = state.hmr_tx.send(ws_event.to_string());
+
             eprintln!("  \x1b[1;31m✖ [RPC Error: {}::{}]\x1b[0m {}", mod_name, action_name, err);
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -212,6 +289,61 @@ async fn rpc_handler(
                 .into_response()
         }
     }
+}
+
+async fn logs_handler(State(state): State<AppState>) -> impl IntoResponse {
+    let logs = state.query_logs.read().await;
+    let list: Vec<serde_json::Value> = logs.iter().cloned().collect();
+    let mut headers = HeaderMap::new();
+    headers.insert(header::CONTENT_TYPE, "application/json; charset=utf-8".parse().unwrap());
+    headers.insert(header::CACHE_CONTROL, "no-cache".parse().unwrap());
+    (StatusCode::OK, headers, Json(serde_json::json!({ "logs": list }))).into_response()
+}
+
+async fn clear_logs_handler(State(state): State<AppState>) -> impl IntoResponse {
+    let mut logs = state.query_logs.write().await;
+    logs.clear();
+    let mut headers = HeaderMap::new();
+    headers.insert(header::CONTENT_TYPE, "application/json; charset=utf-8".parse().unwrap());
+    (StatusCode::OK, headers, Json(serde_json::json!({ "cleared": true }))).into_response()
+}
+
+fn format_iso_now() -> String {
+    let now = std::time::SystemTime::now();
+    let duration = now.duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+    let secs = duration.as_secs();
+    let millis = duration.subsec_millis();
+    let days = secs / 86400;
+    let rem_secs = secs % 86400;
+    let hours = rem_secs / 3600;
+    let mins = (rem_secs % 3600) / 60;
+    let s = rem_secs % 60;
+
+    let mut year = 1970;
+    let mut day_count = days as i64;
+    loop {
+        let is_leap = (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0);
+        let days_in_year = if is_leap { 366 } else { 365 };
+        if day_count < days_in_year {
+            break;
+        }
+        day_count -= days_in_year;
+        year += 1;
+    }
+    let is_leap = (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0);
+    let month_days = [
+        31, if is_leap { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31
+    ];
+    let mut month = 1;
+    for &d in &month_days {
+        if day_count < d {
+            break;
+        }
+        day_count -= d;
+        month += 1;
+    }
+    let day = day_count + 1;
+    format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z", year, month, day, hours, mins, s, millis)
 }
 
 fn escape_cookie_val(s: &str) -> String {
