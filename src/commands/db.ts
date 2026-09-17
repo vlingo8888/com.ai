@@ -923,9 +923,14 @@ export async function introspectAndGenerateSchema(
 
   // 3. Update AGENTS.md
   const agentsGuidePath = join(projectDir, "AGENTS.md");
-  let agentsContent = "";
-  if (existsSync(agentsGuidePath)) {
-    agentsContent = readFileSync(agentsGuidePath, "utf-8");
+  let agentsContent = existsSync(agentsGuidePath) ? readFileSync(agentsGuidePath, "utf-8") : "";
+  if (!agentsContent || !agentsContent.includes("Clean Architecture & AI Coding Guidelines") || !agentsContent.includes("Testing Standards")) {
+    const { generateAgentsGuide } = await import("../templates/ai_guidelines");
+    const { getLocalViewConfig } = await import("../core/config");
+    const localView = getLocalViewConfig(projectDir);
+    const projectName = localView?.name || projectDir.split("/").filter(Boolean).pop() || "com-project";
+    const viewId = localView?.viewId || 1;
+    agentsContent = generateAgentsGuide(projectName, viewId);
   }
   const updatedAgents = updateAgentsMarkdown(agentsContent, schema);
   await Bun.write(agentsGuidePath, updatedAgents);

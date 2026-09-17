@@ -125,21 +125,23 @@ export async function syncCommand(options: SyncOptions = {}): Promise<SyncResult
     }
   }
 
-  // 2. Ensure AGENTS.md exists & is up to date
+  // 2. Ensure AGENTS.md exists & is up to date with full guidelines
   const agentsPath = join(projectDir, "AGENTS.md");
-  if (!existsSync(agentsPath)) {
-    const agentsContent = generateAgentsGuide(projectName, viewId || 1);
-    await Bun.write(agentsPath, agentsContent);
-    // If DB is available, update with live schema
-    if (dbUrl && dbSynced) {
-      try {
-        const { introspectPostgres, updateAgentsMarkdown } = await import("./db");
-        const schema = await introspectPostgres(dbUrl);
-        const updated = updateAgentsMarkdown(agentsContent, schema);
-        await Bun.write(agentsPath, updated);
-      } catch {}
-    }
+  let currentAgents = existsSync(agentsPath) ? readFileSync(agentsPath, "utf-8") : "";
+  if (!currentAgents || !currentAgents.includes("Testing Standards") || !currentAgents.includes("Clean Architecture & AI Coding Guidelines")) {
+    const fullTemplate = generateAgentsGuide(projectName, viewId || 1);
+    currentAgents = fullTemplate;
   }
+
+  // Inject or update live database schema into AGENTS.md if DB was synced
+  if (dbUrl && dbSynced) {
+    try {
+      const { introspectPostgres, updateAgentsMarkdown } = await import("./db");
+      const schema = await introspectPostgres(dbUrl);
+      currentAgents = updateAgentsMarkdown(currentAgents, schema);
+    } catch {}
+  }
+  await Bun.write(agentsPath, currentAgents);
 
   // 3. Scan & Sync Dependencies (package.json & tsconfig.json)
   const scanResult = scanFilesForDependencies(scannedFiles, projectDir);
