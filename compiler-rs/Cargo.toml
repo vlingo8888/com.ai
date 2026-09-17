@@ -1,0 +1,45 @@
+[package]
+name = "compiler-rs"
+version = "0.1.0"
+edition = "2021"
+description = "High-performance App Router & Server Actions compiler & preview server for Com.AI.VN / NATA"
+
+[lib]
+name = "compiler_rs"
+path = "src/lib.rs"
+
+[[bin]]
+name = "com-compiler"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { version = "1.43", features = ["full"] }
+axum = { version = "0.8", features = ["ws"] }
+tower-http = { version = "0.6", features = ["cors", "trace", "fs"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+regex = "1.11"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+clap = { version = "4.5", features = ["derive"] }
+futures-util = "0.3"
+walkdir = "2.5"
+lightningcss = "1.0.0-alpha.72"
+notify = "6.1"
+swc_core = { version = "79.0.0", features = [
+    "common",
+    "ecma_ast",
+    "ecma_visit",
+    "ecma_parser",
+    "ecma_parser_typescript",
+    "ecma_transforms_react",
+    "ecma_transforms_typescript",
+    "ecma_codegen",
+] }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

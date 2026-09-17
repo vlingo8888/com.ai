@@ -1,0 +1,24 @@
+{
+  "name": "@com.ai.vn/cli",
+  "version": "1.0.0",
+  "description": "Com.AI.VN Command Line Interface & High-Performance Rust Compiler Engine",
+  "bin": {
+    "com": "./bin/cli.ts",
+    "cai": "./bin/cli.ts",
+    "aivn": "./bin/cli.ts"
+  },
+  "scripts": {
+    "start": "bun ./bin/cli.ts",
+    "test": "bun test",
+    "build:rust": "cd compiler-rs && cargo build --release",
+    "build:cli": "bun build --compile --minify ./bin/cli.ts --outfile com",
+    "build": "bun run build:rust && bun run build:cli"
+  },
+  "dependencies": {
+    "@types/qrcode-terminal": "^0.12.2",
+    "qrcode-terminal": "^0.12.0"
+  },
+  "devDependencies": {
+    "@types/bun": "latest"
+  }
+}

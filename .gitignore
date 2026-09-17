@@ -1,0 +1,82 @@
+# Dependencies
+node_modules/
+.pnp/
+.pnp.js
+
+# Build Outputs & Compiled Binaries
+dist/
+build/
+out/
+/com
+/aivn
+/cai
+*.exe
+*.dll
+*.dylib
+*.so
+
+# TypeScript
+*.tsbuildinfo
+tsconfig.tsbuildinfo
+
+# Rust / Cargo
+target/
+**/target/
+**/*.rs.bk
+Cargo.lock.orig
+
+# Environment & Secrets
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+.env.*.local
+*.pem
+*.key
+!env.example
+!.env.example
+
+# Logs & Debug
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+bun.lockb.debug
+
+# Testing & Coverage
+coverage/
+.nyc_output/
+*.lcov
+
+# Cache & Temporary
+.cache/
+.bun/
+temp/
+tmp/
+
+# Operating System Files
+# macOS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+# Windows
+Thumbs.db
+ehthumbs.db
+[Dd]esktop.ini
+# Linux
+*~
+
+# IDEs & Code Editors
+.idea/
+*.sublime-workspace
+*.sublime-project
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
