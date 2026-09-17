@@ -187,3 +187,39 @@ export async function resolveOrPromptAppId(projectDir: string, explicitAppId?: s
 
   return await promptZaloAppId(projectDir);
 }
+
+/**
+ * Ensures hr.config.json and hrr.config.json exist in the project root directory
+ */
+export function ensureHrConfigFile(projectDir: string): void {
+  const hrPath = join(projectDir, "hr.config.json");
+  const hrrPath = join(projectDir, "hrr.config.json");
+
+  const defaultContent = JSON.stringify(
+    {
+      listCSS: [{ src: "/assets/app.css" }],
+      listJS: [
+        {
+          src: "/assets/app.js",
+          type: "text/javascript",
+          async: true,
+        },
+      ],
+    },
+    null,
+    2
+  );
+
+  if (!existsSync(hrPath)) {
+    try {
+      writeFileSync(hrPath, defaultContent, "utf-8");
+    } catch {}
+  }
+
+  if (!existsSync(hrrPath)) {
+    try {
+      writeFileSync(hrrPath, defaultContent, "utf-8");
+    } catch {}
+  }
+}
+

@@ -10,6 +10,8 @@ out/
 /com
 /aivn
 /cai
+com-compiler
+bin/com-compiler
 *.exe
 *.dll
 *.dylib

@@ -38,6 +38,7 @@ impl DevServer {
 
         if target == "zalo" {
             let _ = crate::zmp::ZmpConfigGenerator::ensure_app_config(&root_dir);
+            crate::zmp::ZmpConfigGenerator::ensure_hr_config(&root_dir);
         }
 
         let router = Arc::new(AppRouter::scan(&root_dir));
@@ -64,6 +65,14 @@ impl DevServer {
             .route("/_nata/styles.css", get(styles_handler))
             .route("/_nata/shims/{*path}", get(shims_handler))
             .route("/_bundle/{*path}", get(bundle_handler))
+            .route("/app-config.json", get(zmp_app_config_handler))
+            .route("/app.config.json", get(zmp_app_config_handler))
+            .route("/hr.config.json", get(zmp_hr_config_handler))
+            .route("/hrr.config.json", get(zmp_hr_config_handler))
+            .route("/zmp.json", get(zmp_app_config_handler))
+            .route("/assets/app.css", get(zmp_css_handler))
+            .route("/assets/app.js", get(zmp_js_handler))
+            .route("/src/app.js", get(zmp_js_handler))
             .fallback(get(app_router_fallback_handler))
             .layer(CorsLayer::permissive())
             .with_state(state);
@@ -435,6 +444,163 @@ async fn favicon_handler(
     headers.insert(header::CONTENT_TYPE, "image/svg+xml".parse().unwrap());
     (StatusCode::OK, headers, default_svg.as_bytes().to_vec()).into_response()
 }
+
+async fn zmp_app_config_handler(State(state): State<AppState>) -> impl IntoResponse {
+    let mut headers = HeaderMap::new();
+    headers.insert(header::CONTENT_TYPE, "application/json; charset=utf-8".parse().unwrap());
+    headers.insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*".parse().unwrap());
+
+    let candidates = ["app-config.json", "zmp.json", "app.config.json"];
+    for cand in &candidates {
+        let p = state.root_dir.join(cand);
+        if p.exists() {
+            if let Ok(content) = tokio::fs::read_to_string(&p).await {
+                return (StatusCode::OK, headers, content).into_response();
+            }
+        }
+    }
+
+    let default_config = crate::zmp::ZmpConfigGenerator::ensure_app_config(&state.root_dir).unwrap_or_default();
+    let json_str = serde_json::to_string_pretty(&default_config).unwrap_or_else(|_| "{}".to_string());
+    (StatusCode::OK, headers, json_str).into_response()
+}
+
+async fn zmp_hr_config_handler(State(state): State<AppState>) -> impl IntoResponse {
+    let mut headers = HeaderMap::new();
+    headers.insert(header::CONTENT_TYPE, "application/json; charset=utf-8".parse().unwrap());
+    headers.insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*".parse().unwrap());
+    headers.insert(header::ACCESS_CONTROL_ALLOW_METHODS, "GET, HEAD, OPTIONS".parse().unwrap());
+
+    // 1. Check hrr.config.json or hr.config.json on disk
+    let hrr_path = state.root_dir.join("hrr.config.json");
+    if hrr_path.exists() {
+        if let Ok(content) = tokio::fs::read_to_string(&hrr_path).await {
+            return (StatusCode::OK, headers, content).into_response();
+        }
+    }
+    let hr_path = state.root_dir.join("hr.config.json");
+    if hr_path.exists() {
+        if let Ok(content) = tokio::fs::read_to_string(&hr_path).await {
+            return (StatusCode::OK, headers, content).into_response();
+        }
+    }
+
+    // 2. Otherwise, check app-config.json for listCSS and listJS / listSyncJS
+    let mut list_css = Vec::new();
+    let mut list_js = Vec::new();
+
+    let app_config_path = state.root_dir.join("app-config.json");
+    if app_config_path.exists() {
+        if let Ok(content) = tokio::fs::read_to_string(&app_config_path).await {
+            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&content) {
+                if let Some(css_arr) = parsed.get("listCSS").and_then(|v| v.as_array()) {
+                    for item in css_arr {
+                        if let Some(s) = item.as_str() {
+                            let src = if s.starts_with('/') { s.to_string() } else { format!("/{}", s) };
+                            list_css.push(serde_json::json!({ "src": src }));
+                        } else if item.is_object() {
+                            list_css.push(item.clone());
+                        }
+                    }
+                }
+                if let Some(js_arr) = parsed.get("listSyncJS").or_else(|| parsed.get("listJS")).and_then(|v| v.as_array()) {
+                    for item in js_arr {
+                        if let Some(s) = item.as_str() {
+                            let src = if s.starts_with('/') { s.to_string() } else { format!("/{}", s) };
+                            list_js.push(serde_json::json!({ "src": src, "type": "text/javascript", "async": true }));
+                        } else if item.is_object() {
+                            list_js.push(item.clone());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if list_css.is_empty() {
+        list_css.push(serde_json::json!({ "src": "/assets/app.css" }));
+    }
+
+    if list_js.is_empty() {
+        list_js.push(serde_json::json!({
+            "src": "/assets/app.js",
+            "type": "text/javascript",
+            "async": true
+        }));
+    }
+
+    let response_json = serde_json::json!({
+        "listCSS": list_css,
+        "listJS": list_js
+    });
+
+    (StatusCode::OK, headers, response_json.to_string()).into_response()
+}
+
+async fn zmp_css_handler(State(state): State<AppState>) -> impl IntoResponse {
+    let mut headers = HeaderMap::new();
+    headers.insert(header::CONTENT_TYPE, "text/css; charset=utf-8".parse().unwrap());
+    headers.insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*".parse().unwrap());
+
+    // If assets/app.css exists on disk, serve it
+    let file_path = state.root_dir.join("assets/app.css");
+    if file_path.exists() {
+        if let Ok(content) = tokio::fs::read_to_string(&file_path).await {
+            return (StatusCode::OK, headers, content).into_response();
+        }
+    }
+
+    // Otherwise serve compiled custom CSS (Tailwind / globals.css)
+    let custom_css = crate::css_compiler::CssCompiler::find_and_load_custom_css(&state.root_dir);
+    (StatusCode::OK, headers, custom_css).into_response()
+}
+
+async fn zmp_js_handler(State(state): State<AppState>) -> impl IntoResponse {
+    let mut headers = HeaderMap::new();
+    headers.insert(header::CONTENT_TYPE, "application/javascript; charset=utf-8".parse().unwrap());
+    headers.insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*".parse().unwrap());
+
+    // 1. If assets/app.js or src/app.js exists on disk, serve it
+    for cand in &["assets/app.js", "src/app.js", "src/app.ts", "app.js"] {
+        let p = state.root_dir.join(cand);
+        if p.exists() {
+            if let Ok(content) = tokio::fs::read_to_string(&p).await {
+                return (StatusCode::OK, headers, content).into_response();
+            }
+        }
+    }
+
+    // 2. Otherwise serve universal Zalo Mini App bootstrap bridge
+    let bootstrap_js = r#"// Com.AI.VN Zalo Mini App Native Runtime Bridge
+(function() {
+  try {
+    if (window.ZaloJavaScriptBridge && typeof window.ZaloJavaScriptBridge.closeLoading === 'function') {
+      window.ZaloJavaScriptBridge.closeLoading();
+    }
+  } catch(e) {}
+
+  function mountZaloApp() {
+    var container = document.getElementById("app") || document.body;
+    if (!document.getElementById("_nata_zalo_frame")) {
+      var iframe = document.createElement("iframe");
+      iframe.id = "_nata_zalo_frame";
+      iframe.src = window.location.origin + window.location.pathname + window.location.search;
+      iframe.style.cssText = "position:fixed;top:0;left:0;width:100%;height:100%;border:none;margin:0;padding:0;overflow:hidden;z-index:999999;background:#fff;";
+      iframe.allow = "camera; microphone; geolocation; clipboard-read; clipboard-write;";
+      container.appendChild(iframe);
+    }
+  }
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", mountZaloApp);
+  } else {
+    mountZaloApp();
+  }
+})();
+"#;
+    (StatusCode::OK, headers, bootstrap_js.to_string()).into_response()
+}
+
 
 async fn shims_handler(
     Path(path): Path<String>,
@@ -847,6 +1013,21 @@ async fn app_router_fallback_handler(
     req: axum::extract::Request,
 ) -> impl IntoResponse {
     let path = req.uri().path();
+
+    // Defense check: ZMP config and assets must never fall through to HTML
+    let clean_path = path.trim_end_matches('/');
+    if clean_path == "/hr.config.json" || clean_path == "/hrr.config.json" {
+        return zmp_hr_config_handler(State(state)).await.into_response();
+    }
+    if clean_path == "/app-config.json" || clean_path == "/zmp.json" || clean_path == "/app.config.json" {
+        return zmp_app_config_handler(State(state)).await.into_response();
+    }
+    if clean_path == "/assets/app.css" {
+        return zmp_css_handler(State(state)).await.into_response();
+    }
+    if clean_path == "/assets/app.js" || clean_path == "/src/app.js" {
+        return zmp_js_handler(State(state)).await.into_response();
+    }
 
     // Redirect CDN internal module assets to esm.sh
     if path.starts_with("/react@")

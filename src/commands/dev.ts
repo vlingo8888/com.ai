@@ -155,7 +155,7 @@ async function detectDatabaseStatus(projectDir: string): Promise<{ label: string
   };
 }
 
-import { getLocalNetworkIp, generateZaloDeepLink, printZaloDevQrCode, resolveOrPromptAppId, setupAdbReverse } from "../zalominiapp/dev";
+import { getLocalNetworkIp, generateZaloDeepLink, printZaloDevQrCode, resolveOrPromptAppId, setupAdbReverse, ensureHrConfigFile } from "../zalominiapp/dev";
 
 export async function devCommand(options: DevOptions = {}) {
   logger.hero();
@@ -176,6 +176,7 @@ export async function devCommand(options: DevOptions = {}) {
   let zaloAppId: string | null = null;
   if (target === "zalo") {
     zaloAppId = await resolveOrPromptAppId(projectDir);
+    ensureHrConfigFile(projectDir);
   }
 
   // Locate the standalone Rust compiler binary

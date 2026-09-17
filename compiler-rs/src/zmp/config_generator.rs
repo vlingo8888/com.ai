@@ -132,4 +132,34 @@ impl ZmpConfigGenerator {
 
         Ok(config)
     }
+
+    /// Ensures that hr.config.json and hrr.config.json exist in the project directory
+    pub fn ensure_hr_config<P: AsRef<Path>>(root_dir: P) {
+        let root = root_dir.as_ref();
+        let hr_path = root.join("hr.config.json");
+        let hrr_path = root.join("hrr.config.json");
+
+        let default_hr_content = serde_json::json!({
+            "listCSS": [
+                { "src": "/assets/app.css" }
+            ],
+            "listJS": [
+                {
+                    "src": "/assets/app.js",
+                    "type": "text/javascript",
+                    "async": true
+                }
+            ]
+        });
+
+        if let Ok(json_str) = serde_json::to_string_pretty(&default_hr_content) {
+            if !hr_path.exists() {
+                let _ = fs::write(&hr_path, &json_str);
+            }
+            if !hrr_path.exists() {
+                let _ = fs::write(&hrr_path, &json_str);
+            }
+        }
+    }
 }
+

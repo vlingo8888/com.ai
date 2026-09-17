@@ -1,4 +1,6 @@
 import { describe, it, expect } from "bun:test";
+import { existsSync, mkdirSync, readFileSync, rmSync } from "fs";
+import { join } from "path";
 import {
   loadZmpConfig,
   resolveAppId,
@@ -9,6 +11,7 @@ import {
   getLocalNetworkIp,
   startZmpDev,
   validateZaloAppId,
+  ensureHrConfigFile,
 } from "../src/zalominiapp/dev";
 import { findAvailablePort } from "../src/commands/dev";
 
@@ -105,4 +108,27 @@ describe("Zalo Mini App Dev Engine (zalominiapp/dev)", () => {
     expect(ctx.deepLinkUrl).toContain("9876543210123");
     expect(ctx.deepLinkUrl).toContain("8899");
   });
+
+  it("ensureHrConfigFile creates hr.config.json and hrr.config.json on disk", () => {
+    const testDir = join(import.meta.dir, ".test-hr-dir");
+    mkdirSync(testDir, { recursive: true });
+
+    try {
+      ensureHrConfigFile(testDir);
+      const hrPath = join(testDir, "hr.config.json");
+      const hrrPath = join(testDir, "hrr.config.json");
+
+      expect(existsSync(hrPath)).toBe(true);
+      expect(existsSync(hrrPath)).toBe(true);
+
+      const parsed = JSON.parse(readFileSync(hrrPath, "utf-8"));
+      expect(Array.isArray(parsed.listCSS)).toBe(true);
+      expect(Array.isArray(parsed.listJS)).toBe(true);
+      expect(parsed.listCSS[0].src).toBe("/assets/app.css");
+      expect(parsed.listJS[0].src).toBe("/assets/app.js");
+    } finally {
+      rmSync(testDir, { recursive: true, force: true });
+    }
+  });
 });
+
