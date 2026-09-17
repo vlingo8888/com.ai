@@ -136,9 +136,11 @@ export async function cloneView(viewIdArg: string | number, options: CloneOption
     await Bun.write(readmePath, readmeContent);
   }
 
-  // Generate AGENTS.md (Comprehensive AI Assistant Guidelines & Architecture Guide)
+  // Generate .antigravityrules & AGENTS.md (Comprehensive AI Assistant Guidelines & Architecture Guide)
+  const antigravityRulesPath = join(targetDir, ".antigravityrules");
   const agentsGuidePath = join(targetDir, "AGENTS.md");
   const agentsGuideContent = generateAgentsGuide(viewDetails?.name || `View #${viewId}`, viewId);
+  await Bun.write(antigravityRulesPath, agentsGuideContent);
   await Bun.write(agentsGuidePath, agentsGuideContent);
 
   // Auto-introspect database schema if DATABASE_URL is available
@@ -161,7 +163,7 @@ export async function cloneView(viewIdArg: string | number, options: CloneOption
     { label: "Files Extracted", value: `${files.length} files (${(totalBytes / 1024).toFixed(1)} KB)` },
     { label: "Runtime Mode", value: options.install ? "Local node_modules" : "ESM Zero-Install (Instant)", color: colors.emerald },
     { label: "Database Schema", value: dbStatusLabel, color: colors.yellow },
-    { label: "AI Guide", value: "AGENTS.md (Created)", color: colors.bold + colors.cyan },
+    { label: "AI Guide", value: ".antigravityrules (Created)", color: colors.bold + colors.cyan },
     { label: "Target Directory", value: relTargetDir, color: colors.green },
     { label: "Environment Status", value: "Ready for development", color: colors.emerald },
   ]);

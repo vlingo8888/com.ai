@@ -38,6 +38,10 @@ describe("Com Sync Command", () => {
     expect(syncResult).toBeDefined();
     expect(syncResult.agentsPath).toBe(join(testDir, "AGENTS.md"));
     expect(existsSync(syncResult.agentsPath)).toBe(true);
+    expect(existsSync(join(testDir, ".antigravityrules"))).toBe(true);
+    expect(existsSync(join(testDir, "CLAUDE.md"))).toBe(true);
+    expect(existsSync(join(testDir, ".cursorrules"))).toBe(true);
+    expect(existsSync(join(testDir, ".github", "copilot-instructions.md"))).toBe(true);
 
     const agentsContent = readFileSync(syncResult.agentsPath, "utf-8");
     expect(agentsContent).toContain("# Clean Architecture & AI Coding Guidelines");

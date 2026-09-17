@@ -125,15 +125,19 @@ export async function syncCommand(options: SyncOptions = {}): Promise<SyncResult
     }
   }
 
-  // 2. Ensure AGENTS.md exists & is up to date with full guidelines
+  // 2. Ensure .antigravityrules & AGENTS.md exist & are up to date with full guidelines
+  const antigravityRulesPath = join(projectDir, ".antigravityrules");
   const agentsPath = join(projectDir, "AGENTS.md");
-  let currentAgents = existsSync(agentsPath) ? readFileSync(agentsPath, "utf-8") : "";
+  let currentAgents = existsSync(antigravityRulesPath)
+    ? readFileSync(antigravityRulesPath, "utf-8")
+    : (existsSync(agentsPath) ? readFileSync(agentsPath, "utf-8") : "");
+
   if (!currentAgents || !currentAgents.includes("Testing Standards") || !currentAgents.includes("Clean Architecture & AI Coding Guidelines")) {
     const fullTemplate = generateAgentsGuide(projectName, viewId || 1);
     currentAgents = fullTemplate;
   }
 
-  // Inject or update live database schema into AGENTS.md if DB was synced
+  // Inject or update live database schema into AI rules if DB was synced
   if (dbUrl && dbSynced) {
     try {
       const { introspectPostgres, updateAgentsMarkdown } = await import("./db");
@@ -141,6 +145,7 @@ export async function syncCommand(options: SyncOptions = {}): Promise<SyncResult
       currentAgents = updateAgentsMarkdown(currentAgents, schema);
     } catch {}
   }
+  await Bun.write(antigravityRulesPath, currentAgents);
   await Bun.write(agentsPath, currentAgents);
 
   // Mirror guidelines to standard files for other AI editors (Claude, Cursor, Copilot)

@@ -921,9 +921,13 @@ export async function introspectAndGenerateSchema(
   const sqlContent = generateSqlDdl(schema);
   await Bun.write(schemaPath, sqlContent);
 
-  // 3. Update AGENTS.md
+  // 3. Update .antigravityrules & AGENTS.md
+  const antigravityRulesPath = join(projectDir, ".antigravityrules");
   const agentsGuidePath = join(projectDir, "AGENTS.md");
-  let agentsContent = existsSync(agentsGuidePath) ? readFileSync(agentsGuidePath, "utf-8") : "";
+  let agentsContent = existsSync(antigravityRulesPath)
+    ? readFileSync(antigravityRulesPath, "utf-8")
+    : (existsSync(agentsGuidePath) ? readFileSync(agentsGuidePath, "utf-8") : "");
+
   if (!agentsContent || !agentsContent.includes("Clean Architecture & AI Coding Guidelines") || !agentsContent.includes("Testing Standards")) {
     const { generateAgentsGuide } = await import("../templates/ai_guidelines");
     const { getLocalViewConfig } = await import("../core/config");
@@ -933,6 +937,7 @@ export async function introspectAndGenerateSchema(
     agentsContent = generateAgentsGuide(projectName, viewId);
   }
   const updatedAgents = updateAgentsMarkdown(agentsContent, schema);
+  await Bun.write(antigravityRulesPath, updatedAgents);
   await Bun.write(agentsGuidePath, updatedAgents);
 
   return {
