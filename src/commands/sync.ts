@@ -5,6 +5,7 @@ import { findDatabaseUrl, introspectAndGenerateSchema } from "./db";
 import { getLocalViewConfig, saveLocalViewConfig } from "../core/config";
 import { generateAgentsGuide } from "../templates/ai_guidelines";
 import { scanFilesForDependencies, createPackageManifest, createTsConfigManifest } from "../package-manager";
+import { ensureRuntimeEnvironment } from "../core/runtime";
 
 export interface SyncOptions {
   dir?: string;
@@ -103,6 +104,11 @@ export async function syncCommand(options: SyncOptions = {}): Promise<SyncResult
     : logger.spinner("Scanning project structure, dependencies & database schema...");
 
   const scannedFiles = scanProjectFiles(projectDir);
+
+  // Ensure .nata/core.ts & node_modules/core are up to date with latest @pglite/core engine
+  try {
+    ensureRuntimeEnvironment(projectDir);
+  } catch {}
 
   // 1. Database Schema Introspection & Sync (types/db.d.ts, schema.sql, AGENTS.md injection)
   const dbUrl = options.dbUrl || findDatabaseUrl(projectDir, options.env);
