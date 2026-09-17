@@ -238,11 +238,12 @@ export async function introspectPostgres(dbUrl: string): Promise<DatabaseSchema>
       const tableCommentRows = await sql`
         SELECT 
           c.relname AS table_name,
-          pg_catalog.obj_description(c.oid, 'pg_class') AS table_comment
+          COALESCE(d.description, pg_catalog.obj_description(c.oid, 'pg_class')) AS table_comment
         FROM pg_catalog.pg_class c
         JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+        LEFT JOIN pg_catalog.pg_description d ON d.objoid = c.oid AND d.objsubid = 0
         WHERE n.nspname = 'public' 
-          AND c.relkind = 'r';
+          AND c.relkind IN ('r', 'p');
       `;
       for (const row of tableCommentRows) {
         if (row.table_comment) {
@@ -258,12 +259,13 @@ export async function introspectPostgres(dbUrl: string): Promise<DatabaseSchema>
         SELECT 
           c.relname AS table_name,
           a.attname AS column_name,
-          pg_catalog.col_description(c.oid, a.attnum) AS column_comment
+          COALESCE(d.description, pg_catalog.col_description(c.oid, a.attnum)) AS column_comment
         FROM pg_catalog.pg_class c
         JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
         JOIN pg_catalog.pg_attribute a ON a.attrelid = c.oid
+        LEFT JOIN pg_catalog.pg_description d ON d.objoid = c.oid AND d.objsubid = a.attnum
         WHERE n.nspname = 'public'
-          AND c.relkind = 'r'
+          AND c.relkind IN ('r', 'p')
           AND a.attnum > 0
           AND NOT a.attisdropped;
       `;
@@ -427,15 +429,27 @@ export function generateTypeScriptTypes(schema: DatabaseSchema): string {
 export function generateSqlDdl(schema: DatabaseSchema): string {
   const lines: string[] = [];
 
+  lines.push("-- ============================================================================");
   lines.push("-- Auto-generated Database Schema for Com.AI.VN Project");
   lines.push(`-- Last synchronized: ${schema.introspectedAt}`);
+  lines.push(`-- Total Tables: ${schema.tables.length}`);
+  lines.push("-- ============================================================================");
   lines.push("");
 
   for (const table of schema.tables) {
+    lines.push("-- ----------------------------------------------------------------------------");
+    lines.push(`-- Table: ${table.name}`);
+    if (table.comment) {
+      lines.push(`-- Description: ${table.comment}`);
+    }
+    lines.push("-- ----------------------------------------------------------------------------");
     lines.push(`CREATE TABLE IF NOT EXISTS "${table.name}" (`);
-    const colDefs: string[] = [];
 
-    for (const col of table.columns) {
+    const colDefs: string[] = [];
+    const totalCols = table.columns.length;
+
+    for (let i = 0; i < totalCols; i++) {
+      const col = table.columns[i];
       let def = `  "${col.name}" ${col.dataType.toUpperCase()}`;
       if (col.columnDefault) {
         def += ` DEFAULT ${col.columnDefault}`;
@@ -449,19 +463,31 @@ export function generateSqlDdl(schema: DatabaseSchema): string {
       if (col.foreignKey) {
         def += ` REFERENCES "${col.foreignKey.foreignTable}"("${col.foreignKey.foreignColumn}")`;
       }
-      colDefs.push(def);
+
+      const isLast = i === totalCols - 1;
+      const comma = isLast ? "" : ",";
+
+      // Inline comment
+      const commentBadges: string[] = [];
+      if (col.isPrimaryKey) commentBadges.push("🔑 PK");
+      if (col.foreignKey) commentBadges.push(`🔗 FK -> ${col.foreignKey.foreignTable}.${col.foreignKey.foreignColumn}`);
+      if (col.comment) commentBadges.push(col.comment);
+
+      const inlineComment = commentBadges.length > 0 ? ` -- ${commentBadges.join(" | ")}` : "";
+      colDefs.push(`${def}${comma}${inlineComment}`);
     }
 
-    lines.push(colDefs.join(",\n"));
+    lines.push(colDefs.join("\n"));
     lines.push(");");
+    lines.push("");
 
-    // Add table comment
+    // Add standard PostgreSQL COMMENT ON TABLE
     if (table.comment) {
       const escapedComment = table.comment.replace(/'/g, "''");
       lines.push(`COMMENT ON TABLE "${table.name}" IS '${escapedComment}';`);
     }
 
-    // Add column comments
+    // Add standard PostgreSQL COMMENT ON COLUMN
     for (const col of table.columns) {
       if (col.comment) {
         const escapedColComment = col.comment.replace(/'/g, "''");
