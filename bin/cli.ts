@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 import { cloneView } from "../src/commands/clone";
 import { devCommand } from "../src/commands/dev";
+import { tunnelCommand } from "../src/commands/tunnel";
 import { buildCommand } from "../src/commands/build";
 import { testCommand } from "../src/commands/test";
 import { syncCommand } from "../src/commands/sync";
@@ -27,6 +28,7 @@ function printHelp() {
     ${colors.green}logout${colors.reset}                Log out and revoke local credentials
     ${colors.green}clone${colors.reset}  ${colors.sky}<viewId>${colors.reset}       Download project source code by View ID
     ${colors.green}dev${colors.reset}                   Start local development server with Hot Reload
+    ${colors.green}tunnel${colors.reset}                Expose local port to the internet via tunnel-rs
     ${colors.green}build${colors.reset}                 Package project for Production or Zalo Mini App
     ${colors.green}test | t${colors.reset}  ${colors.sky}[pattern]${colors.reset}   Run unit, integration & component tests with Bun Test
     ${colors.green}sync | pull${colors.reset}             Sync database schema, types/db.d.ts, AGENTS.md & dependencies
@@ -45,6 +47,8 @@ function printHelp() {
     ${colors.yellow}--filter${colors.reset}      ${colors.darkGray}<pattern>${colors.reset}  Run only tests matching description pattern
     ${colors.yellow}--timeout${colors.reset}     ${colors.darkGray}<ms>${colors.reset}       Per-test timeout in milliseconds
     ${colors.yellow}--target, -t${colors.reset} ${colors.darkGray}<web|zalo>${colors.reset} Target runtime mode (auto-detects Zalo Mini App)
+    ${colors.yellow}--tunnel, -T${colors.reset}                  Auto-create public tunnel & QR code during dev
+    ${colors.yellow}--subdomain, -s${colors.reset} ${colors.darkGray}<name>${colors.reset}   Custom subdomain for tunnel
     ${colors.yellow}--dir${colors.reset}        ${colors.darkGray}<path>${colors.reset}     Target directory (default: current directory)
     ${colors.yellow}--port, -p${colors.reset}   ${colors.darkGray}<port>${colors.reset}     Port to listen on in dev mode (default: 3000)
     ${colors.yellow}--api${colors.reset}        ${colors.darkGray}<url>${colors.reset}      Custom backend API URL (default: https://base.myworkbeast.com)
@@ -194,6 +198,9 @@ async function main() {
       let dir: string | undefined;
       let engine: "rust" | "bun" | undefined;
       let target: "web" | "zalo" | undefined;
+      let tunnel = false;
+      let subdomain: string | undefined;
+      let server: string | undefined;
       for (let i = 1; i < args.length; i++) {
         if ((args[i] === "--port" || args[i] === "-p") && args[i + 1]) {
           port = args[++i];
@@ -205,9 +212,35 @@ async function main() {
         } else if (args[i] === "--engine" && args[i + 1]) {
           const val = args[++i].toLowerCase();
           if (val === "rust" || val === "bun") engine = val;
+        } else if (args[i] === "--tunnel" || args[i] === "-T") {
+          tunnel = true;
+        } else if ((args[i] === "--subdomain" || args[i] === "-s") && args[i + 1]) {
+          subdomain = args[++i];
+        } else if (args[i] === "--server" && args[i + 1]) {
+          server = args[++i];
         }
       }
-      await devCommand({ port, dir, engine, target });
+      await devCommand({ port, dir, engine, target, tunnel, subdomain, server });
+      break;
+    }
+
+    case "tunnel": {
+      let port: string | number = 3000;
+      let subdomain: string | undefined;
+      let server: string | undefined;
+      let showQr = true;
+      for (let i = 1; i < args.length; i++) {
+        if ((args[i] === "--port" || args[i] === "-p") && args[i + 1]) {
+          port = args[++i];
+        } else if ((args[i] === "--subdomain" || args[i] === "-s") && args[i + 1]) {
+          subdomain = args[++i];
+        } else if (args[i] === "--server" && args[i + 1]) {
+          server = args[++i];
+        } else if (args[i] === "--no-qr") {
+          showQr = false;
+        }
+      }
+      await tunnelCommand({ port, subdomain, server, showQr });
       break;
     }
 

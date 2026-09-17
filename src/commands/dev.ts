@@ -1,13 +1,34 @@
 import { existsSync, readFileSync } from "fs";
 import { join, resolve } from "path";
-import { createConnection } from "net";
+import { createConnection, createServer } from "net";
 import { logger, colors } from "../core/logger";
+import { startTunnelBackground, printTunnelQrCode } from "./tunnel";
+
+export async function findAvailablePort(startPort: number): Promise<number> {
+  let port = startPort;
+  while (port < startPort + 50) {
+    const isAvailable = await new Promise<boolean>((resolve) => {
+      const server = createServer();
+      server.once("error", () => resolve(false));
+      server.once("listening", () => {
+        server.close(() => resolve(true));
+      });
+      server.listen(port, "0.0.0.0");
+    });
+    if (isAvailable) return port;
+    port++;
+  }
+  return startPort;
+}
 
 export interface DevOptions {
   port?: string | number;
   dir?: string;
   engine?: "rust" | "bun";
   target?: "web" | "zalo";
+  tunnel?: boolean;
+  subdomain?: string;
+  server?: string;
 }
 
 export function isZaloMiniAppProject(projectDir: string): boolean {
@@ -133,44 +154,27 @@ async function detectDatabaseStatus(projectDir: string): Promise<{ label: string
   };
 }
 
-import { networkInterfaces } from "os";
-import qrcode from "qrcode-terminal";
-
-function getLocalNetworkIp(): string | null {
-  const nets = networkInterfaces();
-  for (const name of Object.keys(nets)) {
-    for (const net of nets[name] || []) {
-      if (net.family === "IPv4" && !net.internal) {
-        return net.address;
-      }
-    }
-  }
-  return null;
-}
-
-function printZaloQrCode(url: string) {
-  try {
-    qrcode.generate(url, { small: true }, (qr: string) => {
-      console.log(`\n  ${colors.bold}${colors.cyan}📱 QUÉT MÃ QR BẰNG ZALO HOẶC CAMERA ĐỂ MỞ TRÊN ĐIỆN THOẠI:${colors.reset}\n`);
-      const lines = qr.split("\n");
-      for (const line of lines) {
-        console.log(`    ${line}`);
-      }
-      console.log(`\n    ${colors.bold}${colors.white}Mobile URL:${colors.reset} ${colors.bold}${colors.green}${url}${colors.reset}\n`);
-    });
-  } catch {}
-}
+import { getLocalNetworkIp, generateZaloDeepLink, printZaloDevQrCode, resolveOrPromptAppId, setupAdbReverse } from "../zalominiapp/dev";
 
 export async function devCommand(options: DevOptions = {}) {
   logger.hero();
 
   const projectDir = resolve(process.cwd(), options.dir || ".");
-  const port = Number(options.port || process.env.PORT || 3000);
+  const requestedPort = Number(options.port || process.env.PORT || 3000);
+  const port = await findAvailablePort(requestedPort);
+  if (port !== requestedPort) {
+    logger.warn(`Port ${requestedPort} is in use, automatically switched to port ${port}`);
+  }
 
   // Target selection: CLI option -> Interactive Prompt if ZMP detected -> default "web"
   let target: "web" | "zalo" = options.target || "web";
   if (!options.target && isZaloMiniAppProject(projectDir)) {
     target = await promptTargetSelection();
+  }
+
+  let zaloAppId: string | null = null;
+  if (target === "zalo") {
+    zaloAppId = await resolveOrPromptAppId(projectDir);
   }
 
   // Locate the standalone Rust compiler binary
@@ -242,7 +246,23 @@ export async function devCommand(options: DevOptions = {}) {
     }
   }
 
-  logger.card("RUST DEV ENGINE STARTING", [
+  let tunnelUrl: string | null = null;
+  if (options.tunnel) {
+    try {
+      logger.info("Initializing public tunnel via tunnel-rs...");
+      const tunnel = await startTunnelBackground({
+        port,
+        subdomain: options.subdomain,
+        server: options.server,
+      });
+      tunnelUrl = tunnel.publicUrl;
+      logger.info(`Public Tunnel Active: ${colors.bold}${colors.green}${tunnelUrl}${colors.reset}`);
+    } catch (err: any) {
+      logger.warn(`Could not start tunnel: ${err.message}`);
+    }
+  }
+
+  const cardItems = [
     { label: "Engine", value: "🦀 Pure Rust (Axum + App Router Matcher)", color: colors.bold + colors.green },
     { label: "Project Path", value: projectDir, color: colors.cyan },
     {
@@ -250,14 +270,33 @@ export async function devCommand(options: DevOptions = {}) {
       value: target === "zalo" ? "📱 Zalo Mini App (ZMP Simulator)" : "🌐 Standard Web App",
       color: colors.bold + (target === "zalo" ? colors.cyan : colors.emerald),
     },
+  ];
+
+  if (target === "zalo" && zaloAppId) {
+    cardItems.push({ label: "Zalo App ID", value: zaloAppId, color: colors.bold + colors.yellow });
+  }
+
+  cardItems.push(
     { label: "Local URL", value: `http://localhost:${port}`, color: colors.bold + colors.sky },
+    ...(tunnelUrl ? [{ label: "Public Tunnel", value: tunnelUrl, color: colors.bold + colors.emerald }] : []),
     { label: "Network URL", value: networkUrl, color: colors.bold + colors.green },
     { label: "Database", value: dbStatus.label, color: dbStatus.color },
-    { label: "HMR WebSocket", value: "● Active (/_hmr)", color: colors.emerald },
-  ]);
+    { label: "HMR WebSocket", value: "● Active (/_hmr)", color: colors.emerald }
+  );
 
-  if (target === "zalo") {
-    printZaloQrCode(networkUrl);
+  logger.card("RUST DEV ENGINE STARTING", cardItems);
+
+  if (target === "zalo" && zaloAppId) {
+    const clientEndpoint = tunnelUrl || networkUrl;
+    const deepLinkUrl = generateZaloDeepLink(zaloAppId, clientEndpoint, port);
+    if (!tunnelUrl) {
+      try {
+        await setupAdbReverse(port);
+      } catch {}
+    }
+    printZaloDevQrCode(deepLinkUrl, zaloAppId, clientEndpoint);
+  } else if (tunnelUrl) {
+    printTunnelQrCode(tunnelUrl);
   }
 
   // Launch Rust binary directly with interactive IO and target flag
