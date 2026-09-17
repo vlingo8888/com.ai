@@ -1,0 +1,24 @@
+{
+  "compilerOptions": {
+    "baseUrl": ".",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "paths": {
+      "@/*": [
+        "./*",
+        "./src/*"
+      ],
+      "core": [
+        "./.nata/core.ts"
+      ],
+      "next/headers": [
+        "./.nata/headers.ts"
+      ],
+      "~/*": [
+        "./*",
+        "./src/*"
+      ]
+    },
+    "target": "ESNext"
+  }
+}

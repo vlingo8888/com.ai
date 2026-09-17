@@ -38,6 +38,8 @@ describe("Dependency Scanner - normalizePackageName", () => {
     expect(normalizePackageName("~/lib/utils")).toBeNull();
     expect(normalizePackageName("#internal/config")).toBeNull();
     expect(normalizePackageName("src/modules/news")).toBeNull();
+    expect(normalizePackageName("core")).toBeNull();
+    expect(normalizePackageName("core/db")).toBeNull();
   });
 
   it("should ignore Node and Bun built-in modules", () => {

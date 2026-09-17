@@ -849,7 +849,7 @@ exports.default = {
         project_dir: P,
         payload: RpcPayload,
     ) -> Result<RpcExecutionOutput, String> {
-        let root_canon = project_dir.as_ref().canonicalize().unwrap_or_else(|_| project_dir.as_ref().to_path_buf());
+        let root_canon = dunce_canonicalize(project_dir.as_ref());
         let root = &root_canon;
         
         // Ensure runtime environment (.nata/core.ts, node_modules/core shim, tsconfig paths)
@@ -968,7 +968,7 @@ run().catch(err => {{
   setTimeout(() => process.exit(1), 10);
 }});
 "#,
-            ts_path.to_string_lossy().replace('\\', "/"),
+            clean_path(&ts_path),
             args_json,
             action,
             incoming_cookies,
@@ -984,13 +984,20 @@ run().catch(err => {{
         // Inject full PATH including ~/.bun/bin, /opt/homebrew/bin, /usr/local/bin
         if let Ok(curr_path) = std::env::var("PATH") {
             let mut paths = vec![];
+            if let Some(userprofile) = std::env::var_os("USERPROFILE") {
+                paths.push(std::path::PathBuf::from(userprofile).join(".bun/bin").to_string_lossy().to_string());
+            }
             if let Some(home) = std::env::var_os("HOME") {
                 paths.push(std::path::PathBuf::from(home).join(".bun/bin").to_string_lossy().to_string());
             }
-            paths.push("/opt/homebrew/bin".to_string());
-            paths.push("/usr/local/bin".to_string());
+            #[cfg(unix)]
+            {
+                paths.push("/opt/homebrew/bin".to_string());
+                paths.push("/usr/local/bin".to_string());
+            }
             paths.push(curr_path);
-            cmd.env("PATH", paths.join(":"));
+            let sep = if cfg!(windows) { ";" } else { ":" };
+            cmd.env("PATH", paths.join(sep));
         }
 
         // Inject project .env, .env.development, .env.local variables into child process
@@ -1238,6 +1245,16 @@ pub fn format_module_path(clean: &str) -> String {
 }
 
 pub fn find_bun_bin() -> std::path::PathBuf {
+    if let Some(userprofile) = std::env::var_os("USERPROFILE") {
+        let p = std::path::PathBuf::from(userprofile).join(".bun/bin/bun.exe");
+        if p.exists() {
+            return p;
+        }
+        let p_no_ext = std::path::PathBuf::from(&p).with_extension("");
+        if p_no_ext.exists() {
+            return p_no_ext;
+        }
+    }
     if let Some(home) = std::env::var_os("HOME") {
         let p = std::path::PathBuf::from(home).join(".bun/bin/bun");
         if p.exists() {
@@ -1255,5 +1272,35 @@ pub fn find_bun_bin() -> std::path::PathBuf {
         }
     }
     std::path::PathBuf::from("bun")
+}
+
+pub fn clean_path<P: AsRef<Path>>(p: P) -> String {
+    let mut s = p.as_ref().to_string_lossy().to_string();
+    if s.starts_with(r"\\?\UNC\") {
+        s = format!(r"\\{}", &s[8..]);
+    } else if s.starts_with(r"\\?\") {
+        s = s[4..].to_string();
+    } else if s.starts_with("//?/UNC/") {
+        s = format!(r"//{}", &s[8..]);
+    } else if s.starts_with("//?/") {
+        s = s[4..].to_string();
+    }
+    s.replace('\\', "/")
+}
+
+pub fn dunce_canonicalize<P: AsRef<Path>>(p: P) -> std::path::PathBuf {
+    match p.as_ref().canonicalize() {
+        Ok(canon) => {
+            let s = canon.to_string_lossy();
+            if s.starts_with(r"\\?\UNC\") {
+                std::path::PathBuf::from(format!(r"\\{}", &s[8..]))
+            } else if s.starts_with(r"\\?\") {
+                std::path::PathBuf::from(&s[4..])
+            } else {
+                canon
+            }
+        }
+        Err(_) => p.as_ref().to_path_buf(),
+    }
 }
 

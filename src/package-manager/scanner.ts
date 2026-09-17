@@ -30,7 +30,9 @@ export function normalizePackageName(specifier: string): string | null {
     trimmed.startsWith("@/") ||
     trimmed.startsWith("~/") ||
     trimmed.startsWith("#") ||
-    trimmed.startsWith("src/")
+    trimmed.startsWith("src/") ||
+    trimmed === "core" ||
+    trimmed.startsWith("core/")
   ) {
     return null;
   }

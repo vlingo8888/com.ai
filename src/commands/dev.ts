@@ -174,11 +174,15 @@ export async function devCommand(options: DevOptions = {}) {
   }
 
   // Locate the standalone Rust compiler binary
+  const exeExt = process.platform === "win32" ? ".exe" : "";
   const rustBinCandidates = [
-    join(__dirname, "../compiler-rs/target/release/com-compiler"),
-    join(__dirname, "../../compiler-rs/target/release/com-compiler"),
-    join(process.cwd(), "compiler-rs/target/release/com-compiler"),
-    "/usr/local/bin/com-compiler",
+    join(__dirname, `../compiler-rs/target/release/com-compiler${exeExt}`),
+    join(__dirname, `../../compiler-rs/target/release/com-compiler${exeExt}`),
+    join(process.cwd(), `compiler-rs/target/release/com-compiler${exeExt}`),
+    join(__dirname, `../com-compiler${exeExt}`),
+    join(__dirname, `../../com-compiler${exeExt}`),
+    `/usr/local/bin/com-compiler${exeExt}`,
+    `com-compiler${exeExt}`,
     "com-compiler",
   ];
 
@@ -191,17 +195,30 @@ export async function devCommand(options: DevOptions = {}) {
   }
 
   if (!rustBinPath) {
+    const whichPath = Bun.which(`com-compiler${exeExt}`) || Bun.which("com-compiler");
+    if (whichPath && existsSync(whichPath)) {
+      rustBinPath = whichPath;
+    }
+  }
+
+  if (!rustBinPath) {
     const buildSpinner = logger.spinner("Compiling Rust App Router Engine (first-time build)...");
     const compilerDir = join(__dirname, "../compiler-rs");
     try {
-      const buildProc = Bun.spawn(["cargo", "build", "--release"], {
+      const cargoCmd = process.platform === "win32" ? "cargo.exe" : "cargo";
+      const buildProc = Bun.spawn([cargoCmd, "build", "--release"], {
         cwd: compilerDir,
         stdout: "ignore",
         stderr: "ignore",
       });
       await buildProc.exited;
-      rustBinPath = join(compilerDir, "target/release/com-compiler");
-      buildSpinner.stop(true, "Rust Engine compiled successfully");
+      const builtPath = join(compilerDir, `target/release/com-compiler${exeExt}`);
+      if (existsSync(builtPath)) {
+        rustBinPath = builtPath;
+        buildSpinner.stop(true, "Rust Engine compiled successfully");
+      } else {
+        throw new Error(`Target binary not found at ${builtPath}`);
+      }
     } catch (err: any) {
       buildSpinner.stop(false, "Failed to compile Rust engine");
       logger.error("Could not locate or build Rust binary 'com-compiler'", err.message);

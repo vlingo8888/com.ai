@@ -54,6 +54,7 @@ coverage/
 # Cache & Temporary
 .cache/
 .bun/
+.nata/
 temp/
 tmp/
 

@@ -17,29 +17,29 @@ impl SsrWorker {
         let start_instant = std::time::Instant::now();
 
         // 1. Ensure runtime environment exists
+        let root_canon = crate::rpc::dunce_canonicalize(root);
+        let root = &root_canon;
         crate::rpc::RpcExecutor::ensure_runtime_env(root);
 
         // 2. Prepare path parameters and JSON strings
-        let page_path_str = if request.page_file.is_absolute() {
-            request.page_file.to_string_lossy().to_string()
+        let page_path = crate::rpc::clean_path(if request.page_file.is_absolute() {
+            request.page_file.clone()
         } else {
-            root.join(&request.page_file).to_string_lossy().to_string()
-        };
+            root.join(&request.page_file)
+        });
 
-        let layout_paths_json = serde_json::to_string(
-            &request
-                .layout_files
-                .iter()
-                .map(|p| {
-                    if p.is_absolute() {
-                        p.to_string_lossy().to_string()
-                    } else {
-                        root.join(p).to_string_lossy().to_string()
-                    }
+        let layout_paths_vec: Vec<String> = request
+            .layout_files
+            .iter()
+            .map(|p| {
+                crate::rpc::clean_path(if p.is_absolute() {
+                    p.clone()
+                } else {
+                    root.join(p)
                 })
-                .collect::<Vec<_>>(),
-        )
-        .unwrap_or_else(|_| "[]".to_string());
+            })
+            .collect();
+        let layout_paths_json = serde_json::to_string(&layout_paths_vec).unwrap_or_else(|_| "[]".to_string());
 
         let params_json = serde_json::to_string(&request.params).unwrap_or_else(|_| "{}".to_string());
         let search_params_json = serde_json::to_string(&request.search_params).unwrap_or_else(|_| "{}".to_string());
@@ -62,8 +62,8 @@ await runSsr({{
   urlPath: {url_path}
 }});
 "#,
-            runtime_path = root.join(".nata/ssr_runtime.ts").to_string_lossy(),
-            page_path = page_path_str.replace('\\', "/"),
+            runtime_path = crate::rpc::clean_path(root.join(".nata/ssr_runtime.ts")),
+            page_path = page_path,
             layout_paths = layout_paths_json,
             params = params_json,
             search_params = search_params_json,
@@ -87,13 +87,20 @@ await runSsr({{
         // Inject full PATH including ~/.bun/bin, /opt/homebrew/bin, /usr/local/bin
         if let Ok(curr_path) = std::env::var("PATH") {
             let mut paths = vec![];
+            if let Some(userprofile) = std::env::var_os("USERPROFILE") {
+                paths.push(std::path::PathBuf::from(userprofile).join(".bun/bin").to_string_lossy().to_string());
+            }
             if let Some(home) = std::env::var_os("HOME") {
                 paths.push(std::path::PathBuf::from(home).join(".bun/bin").to_string_lossy().to_string());
             }
-            paths.push("/opt/homebrew/bin".to_string());
-            paths.push("/usr/local/bin".to_string());
+            #[cfg(unix)]
+            {
+                paths.push("/opt/homebrew/bin".to_string());
+                paths.push("/usr/local/bin".to_string());
+            }
             paths.push(curr_path);
-            cmd.env("PATH", paths.join(":"));
+            let sep = if cfg!(windows) { ";" } else { ":" };
+            cmd.env("PATH", paths.join(sep));
         }
 
         // Inject project .env variables
