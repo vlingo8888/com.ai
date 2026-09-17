@@ -106,10 +106,18 @@ function extractTextFromJson(obj: any): string | null {
 }
 
 /**
- * Robust formatter for SQL column defaults (handles strings, numbers, Bun.SQL parsed AST objects, and stringified AST JSON)
+ * Robust formatter for SQL column defaults (handles strings, numbers, Bun.SQL parsed AST objects, stringified AST JSON, and unquoted strings)
  */
-export function formatDefaultValue(val: any, udtName?: string): string | null {
+export function formatDefaultValue(
+  val: any,
+  udtName?: string,
+  dataType?: string,
+  columnName?: string
+): string | null {
   if (val === null || val === undefined) return null;
+
+  const colLower = (columnName || "").toLowerCase();
+  const typeLower = (dataType || udtName || "").toLowerCase();
 
   // 1. If val is an object (AST node or parsed JSON)
   if (typeof val === "object") {
@@ -134,7 +142,7 @@ export function formatDefaultValue(val: any, udtName?: string): string | null {
     if (val.type === "CallExpression" || val.callee) {
       const callee = typeof val.callee === "object" ? val.callee?.name || "fn" : String(val.callee);
       const argsList = Array.isArray(val.args || val.arguments)
-        ? (val.args || val.arguments).map((a: any) => formatDefaultValue(a, udtName)).filter(Boolean).join(", ")
+        ? (val.args || val.arguments).map((a: any) => formatDefaultValue(a, udtName, dataType, columnName)).filter(Boolean).join(", ")
         : "";
       return `${callee}(${argsList})`;
     }
@@ -156,7 +164,7 @@ export function formatDefaultValue(val: any, udtName?: string): string | null {
     if (val.sql) return String(val.sql).replace(/\r?\n|\r/g, " ").trim();
 
     // If it's a JSON type column
-    if (udtName === "json" || udtName === "jsonb") {
+    if (typeLower.includes("json")) {
       return `'${JSON.stringify(val).replace(/'/g, "''")}'::jsonb`;
     }
 
@@ -164,18 +172,35 @@ export function formatDefaultValue(val: any, udtName?: string): string | null {
   }
 
   let str = String(val).trim();
-  if (!str) return null;
+  if (!str || str.toLowerCase() === "null") return null;
 
-  // 2. If string is a stringified AST JSON
-  if (str.includes('"type"') || str.startsWith("{") || str.startsWith("[")) {
-    // 2.1 Try JSON.parse
+  // 2. If string is a partial or full AST JSON (like '{"type":"Identifier"' or '{"type":"Identifier","name":"now"}')
+  if (
+    str.includes('"type":"Identifier"') ||
+    str.includes('{"type":"Identifier"') ||
+    str === '{"type":"Identifier"' ||
+    str.startsWith('{"type":') ||
+    str.startsWith("{")
+  ) {
+    // 2.1 Check if it's a timestamp/created_at/updated_at column
+    if (
+      typeLower.includes("timestamp") ||
+      typeLower.includes("date") ||
+      typeLower.includes("time") ||
+      colLower.includes("created_at") ||
+      colLower.includes("updated_at")
+    ) {
+      return "now()";
+    }
+
+    // 2.2 Try JSON.parse
     try {
       const parsed = JSON.parse(str.replace(/[\n\r\t]/g, " "));
-      const formatted = formatDefaultValue(parsed, udtName);
+      const formatted = formatDefaultValue(parsed, udtName, dataType, columnName);
       if (formatted) return formatted;
     } catch {}
 
-    // 2.2 Regex fallback for Identifier AST
+    // 2.3 Regex fallback for Identifier AST
     const idMatch =
       str.match(/"type"\s*:\s*"Identifier"\s*,\s*"name"\s*:\s*"([^"]+)"/i) ||
       str.match(/"name"\s*:\s*"([^"]+)"\s*,\s*"type"\s*:\s*"Identifier"/i);
@@ -191,7 +216,7 @@ export function formatDefaultValue(val: any, udtName?: string): string | null {
       return name;
     }
 
-    // 2.3 Regex fallback for CallExpression AST
+    // 2.4 Regex fallback for CallExpression AST
     if (str.includes('"CallExpression"') || str.includes('"callee"')) {
       const calleeMatch = str.match(/"name"\s*:\s*"([^"]+)"/i);
       if (calleeMatch) {
@@ -199,7 +224,7 @@ export function formatDefaultValue(val: any, udtName?: string): string | null {
       }
     }
 
-    // 2.4 Regex fallback for Literal AST
+    // 2.5 Regex fallback for Literal AST
     const litMatch = str.match(/"type"\s*:\s*"Literal"\s*,\s*"value"\s*:\s*([^,\}\]]+)/i);
     if (litMatch) {
       let v = litMatch[1].trim();
@@ -209,21 +234,87 @@ export function formatDefaultValue(val: any, udtName?: string): string | null {
       return v;
     }
 
-    // 2.5 Array fallback
+    // 2.6 Array fallback
     if (str.includes('"ArrayExpression"') || str.includes('"elements"')) {
       return `'[]'`;
     }
 
-    // If string still starts with { and ends with }, avoid dumping raw JSON into SQL DEFAULT unless it's JSON type
+    // If it's a timestamp column fallback to now()
+    if (colLower.includes("created_at") || colLower.includes("updated_at")) {
+      return "now()";
+    }
+
+    // Avoid dumping raw JSON into SQL DEFAULT unless it's JSON type
     if (str.startsWith("{") && str.endsWith("}")) {
-      if (udtName === "json" || udtName === "jsonb") {
+      if (typeLower.includes("json")) {
         return `'${str.replace(/\r?\n|\r/g, " ").replace(/'/g, "''")}'::jsonb`;
       }
       return null;
     }
+
+    // If corrupted truncated JSON
+    if (str.startsWith("{")) {
+      return null;
+    }
   }
 
-  // 3. Clean standard string SQL expression (single line, no newlines)
+  // 3. Handle array literals
+  if (str === "[]" || str === "'[]'") {
+    if (typeLower.includes("json")) return `'[]'::jsonb`;
+    return `'[]'`;
+  }
+
+  // 4. Handle SQL functions and keywords
+  const isFunctionCall =
+    str.toLowerCase() === "now()" ||
+    str.toLowerCase() === "current_timestamp" ||
+    str.toLowerCase() === "current_date" ||
+    str.toLowerCase() === "current_time" ||
+    str.toLowerCase().startsWith("nextval(") ||
+    str.toLowerCase().startsWith("gen_random_uuid(") ||
+    str.toLowerCase().startsWith("uuid_generate_");
+
+  if (isFunctionCall) {
+    return str.replace(/\r?\n|\r/g, " ");
+  }
+
+  // 5. Handle Booleans
+  if (str.toLowerCase() === "true" || str.toLowerCase() === "false") {
+    return str.toLowerCase();
+  }
+
+  // 6. Handle Numbers
+  if (
+    /^-?\d+(\.\d+)?$/.test(str) &&
+    (typeLower.includes("int") ||
+      typeLower.includes("numeric") ||
+      typeLower.includes("decimal") ||
+      typeLower.includes("float") ||
+      typeLower.includes("real"))
+  ) {
+    return str;
+  }
+
+  // 7. Handle String/Text types: ensure unquoted string literals (like #3b82f6, public, medium) are wrapped in single quotes
+  if (
+    typeLower.includes("text") ||
+    typeLower.includes("varchar") ||
+    typeLower.includes("char")
+  ) {
+    // If it already has single quotes '...', keep it
+    if (str.startsWith("'") && str.endsWith("'")) {
+      return str.replace(/\r?\n|\r/g, " ");
+    }
+    // If it has PostgreSQL typecast like 'active'::character varying or 'public'::text
+    const castMatch = str.match(/^'([^']+)'::/);
+    if (castMatch) {
+      return `'${castMatch[1].replace(/'/g, "''")}'`;
+    }
+    // Wrap literal string in single quotes
+    return `'${str.replace(/'/g, "''").replace(/\r?\n|\r/g, " ")}'`;
+  }
+
+  // 8. Clean standard string SQL expression (single line, no newlines)
   return str.replace(/\r?\n|\r/g, " ").replace(/\s+/g, " ");
 }
 
