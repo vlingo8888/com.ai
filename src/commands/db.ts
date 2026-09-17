@@ -28,6 +28,84 @@ export interface DatabaseSchema {
 }
 
 /**
+ * Parses table & column comments that may be stored as stringified JSON objects
+ * and extracts a clean, human-readable description string without newlines.
+ */
+export function parseJsonComment(raw: any): string | null {
+  if (raw === null || raw === undefined) return null;
+
+  if (typeof raw === "object") {
+    return extractTextFromJson(raw);
+  }
+
+  let str = String(raw).trim();
+  if (!str) return null;
+
+  if ((str.startsWith("{") && str.endsWith("}")) || (str.startsWith("[") && str.endsWith("]"))) {
+    try {
+      const parsed = JSON.parse(str);
+      const text = extractTextFromJson(parsed);
+      if (text) return text;
+    } catch {}
+
+    try {
+      const sanitized = str.replace(/[\n\r\t]/g, " ");
+      const parsed = JSON.parse(sanitized);
+      const text = extractTextFromJson(parsed);
+      if (text) return text;
+    } catch {}
+  }
+
+  // Remove any newline characters and collapse multiple spaces
+  const clean = str.replace(/\r?\n|\r/g, " ").replace(/\s+/g, " ").trim();
+  return clean || null;
+}
+
+function extractTextFromJson(obj: any): string | null {
+  if (!obj || typeof obj !== "object") return null;
+
+  if (Array.isArray(obj)) {
+    const items = obj
+      .map((item) => (typeof item === "string" ? item : extractTextFromJson(item)))
+      .filter(Boolean);
+    return items.length > 0 ? items.join(", ") : null;
+  }
+
+  // Common metadata keys used in fullstack frameworks:
+  const parts: string[] = [];
+  if (obj.title) parts.push(String(obj.title).trim());
+  if (obj.label && obj.label !== obj.title) parts.push(String(obj.label).trim());
+  if (
+    obj.description &&
+    obj.description !== obj.title &&
+    obj.description !== obj.label
+  ) {
+    parts.push(String(obj.description).trim());
+  }
+  if (obj.comment && !parts.includes(obj.comment)) parts.push(String(obj.comment).trim());
+  if (obj.summary && !parts.includes(obj.summary)) parts.push(String(obj.summary).trim());
+  if (obj.note && !parts.includes(obj.note)) parts.push(String(obj.note).trim());
+  if (obj.name && parts.length === 0 && !["Identifier", "Literal", "CallExpression"].includes(obj.name)) {
+    parts.push(String(obj.name).trim());
+  }
+
+  if (parts.length > 0) {
+    return parts.join(" - ").replace(/\r?\n|\r/g, " ").replace(/\s+/g, " ");
+  }
+
+  // Fallback: collect meaningful non-technical string values
+  const stringVals = Object.entries(obj)
+    .filter(([k, v]) => typeof v === "string" && v.trim() && !["type", "dataType", "udtName", "kind"].includes(k))
+    .map(([_, v]) => String(v).trim());
+
+  if (stringVals.length > 0) {
+    return stringVals.join(" - ").replace(/\r?\n|\r/g, " ").replace(/\s+/g, " ");
+  }
+
+  return null;
+}
+
+/**
  * Robust formatter for SQL column defaults (handles strings, numbers, and Bun.SQL parsed AST objects)
  */
 export function formatDefaultValue(val: any): string | null {
@@ -35,7 +113,12 @@ export function formatDefaultValue(val: any): string | null {
 
   // If val is an AST object parsed by Bun.SQL or database driver
   if (typeof val === "object") {
-    // 1. Identifier node (e.g. { type: "Identifier", name: "CURRENT_TIMESTAMP" } or { name: "now" })
+    // 1. Array
+    if (Array.isArray(val)) {
+      return `'[]'`;
+    }
+
+    // 2. Identifier node (e.g. { type: "Identifier", name: "CURRENT_TIMESTAMP" } or { name: "now" })
     if (val.type === "Identifier" || val.name || val.identifier) {
       const name = String(val.name || val.identifier || "").trim();
       const lower = name.toLowerCase();
@@ -43,11 +126,11 @@ export function formatDefaultValue(val: any): string | null {
       if (lower === "current_timestamp") return "CURRENT_TIMESTAMP";
       if (lower === "current_date") return "CURRENT_DATE";
       if (lower === "current_time") return "CURRENT_TIME";
-      if (lower === "gen_random_uuid") return "gen_random_uuid()";
+      if (lower === "gen_random_uuid" || lower === "uuid_generate_v4") return `${name}()`;
       return name;
     }
 
-    // 2. CallExpression / Function call node
+    // 3. CallExpression / Function call node
     if (val.type === "CallExpression" || val.callee) {
       const callee = typeof val.callee === "object" ? val.callee.name || "fn" : val.callee;
       const argsList = Array.isArray(val.args || val.arguments)
@@ -56,18 +139,19 @@ export function formatDefaultValue(val: any): string | null {
       return `${callee}(${argsList})`;
     }
 
-    // 3. Literal node
+    // 4. Literal node
     if (val.type === "Literal" || val.value !== undefined) {
       if (typeof val.value === "string") return `'${val.value.replace(/'/g, "''")}'`;
+      if (Array.isArray(val.value)) return `'[]'`;
       return String(val.value);
     }
 
-    // 4. Raw expression or SQL string
+    // 5. Raw expression or SQL string
     if (val.raw) return String(val.raw).trim().replace(/\r?\n|\r/g, " ");
     if (val.sql) return String(val.sql).trim().replace(/\r?\n|\r/g, " ");
 
     // Fallback for object: clean single line JSON
-    return JSON.stringify(val);
+    return JSON.stringify(val).replace(/\r?\n|\r/g, " ");
   }
 
   let str = String(val).trim();
@@ -76,12 +160,13 @@ export function formatDefaultValue(val: any): string | null {
   if (str.startsWith("{") && str.endsWith("}")) {
     try {
       const parsed = JSON.parse(str);
-      return formatDefaultValue(parsed);
+      const formatted = formatDefaultValue(parsed);
+      if (formatted) return formatted;
     } catch {}
   }
 
   // Ensure single line string
-  return str.replace(/\r?\n|\r/g, " ");
+  return str.replace(/\r?\n|\r/g, " ").replace(/\s+/g, " ");
 }
 
 /**
@@ -298,7 +383,8 @@ export async function introspectPostgres(dbUrl: string): Promise<DatabaseSchema>
       const key = `${col.table_name}.${col.column_name}`;
       const isPk = primaryKeyMap.has(key);
       const fk = fkMap.get(key);
-      const comment = columnCommentsMap.get(key) || null;
+      const rawComment = columnCommentsMap.get(key) || null;
+      const comment = parseJsonComment(rawComment);
       const formattedDefault = formatDefaultValue(col.column_default);
 
       const colMeta: ColumnMeta = {
@@ -320,7 +406,8 @@ export async function introspectPostgres(dbUrl: string): Promise<DatabaseSchema>
 
     const tables: TableMeta[] = [];
     for (const [name, columns] of tablesMap.entries()) {
-      const tableComment = tableCommentsMap.get(name) || null;
+      const rawTableComment = tableCommentsMap.get(name) || null;
+      const tableComment = parseJsonComment(rawTableComment);
       tables.push({ name, comment: tableComment, columns });
     }
 

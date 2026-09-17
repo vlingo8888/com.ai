@@ -3,6 +3,7 @@ import {
   mapSqlTypeToTs,
   toPascalCase,
   formatDefaultValue,
+  parseJsonComment,
   generateTypeScriptTypes,
   generateSqlDdl,
   updateAgentsMarkdown,
@@ -10,6 +11,16 @@ import {
 } from "../src/commands/db";
 
 describe("Database Schema Generator", () => {
+  it("parses stringified JSON comments into clean human-readable descriptions", () => {
+    expect(parseJsonComment(null)).toBe(null);
+    expect(parseJsonComment("")).toBe(null);
+    expect(parseJsonComment("Mô tả bình thường")).toBe("Mô tả bình thường");
+    expect(parseJsonComment('{"title": "Danh sách khách", "description": "Quản lý khách mời"}')).toBe("Danh sách khách - Quản lý khách mời");
+    expect(parseJsonComment('{"label": "Tên khách", "name": "name"}')).toBe("Tên khách");
+    expect(parseJsonComment('{"description": "Ghi chú nhiều dòng\nTiếp theo"}')).toBe("Ghi chú nhiều dòng Tiếp theo");
+    expect(parseJsonComment('["Tag 1", "Tag 2"]')).toBe("Tag 1, Tag 2");
+  });
+
   it("formats SQL column defaults properly including AST objects", () => {
     expect(formatDefaultValue(null)).toBe(null);
     expect(formatDefaultValue(undefined)).toBe(null);
