@@ -5,6 +5,7 @@ import { buildCommand } from "../src/commands/build";
 import { dbPullCommand } from "../src/commands/db";
 import { loginCommand, logoutCommand, whoamiCommand } from "../src/commands/login";
 import { logger, colors } from "../src/core/logger";
+import packageJson from "../package.json";
 
 function printHelp() {
   logger.hero();
@@ -20,6 +21,7 @@ function printHelp() {
     ${colors.green}dev${colors.reset}                   Start local development server with Hot Reload
     ${colors.green}build${colors.reset}                 Package project for Production or Zalo Mini App
     ${colors.green}db pull | db sync${colors.reset}     Introspect database schema & generate types/db.d.ts for AI
+    ${colors.green}version | -v${colors.reset}          Display system, CLI, and runtime engine versions
     ${colors.green}push | sync | save${colors.reset}    Synchronize local changes back to the Cloud
 
   ${colors.bold}${colors.white}OPTIONS:${colors.reset}
@@ -42,8 +44,8 @@ function printHelp() {
     ${colors.darkGray}# 2. Introspect database schema and generate types for AI coding${colors.reset}
     ${colors.cyan}$ com db pull${colors.reset}
 
-    ${colors.darkGray}# 3. Force start in Zalo Mini App simulation mode${colors.reset}
-    ${colors.cyan}$ com dev --target zalo${colors.reset}
+    ${colors.darkGray}# 3. Check CLI and engine versions${colors.reset}
+    ${colors.cyan}$ com --version${colors.reset}
 
     ${colors.darkGray}# 4. Clone View by ID (e.g. 105)${colors.reset}
     ${colors.cyan}$ com clone 105${colors.reset}
@@ -59,8 +61,42 @@ async function main() {
     return;
   }
 
-  if (command === "--version" || command === "-v") {
-    console.log(`\n  ${colors.bold}${colors.cyan}@com.ai.vn/cli${colors.reset} ${colors.green}v1.0.0${colors.reset} (Bun ${Bun.version})\n`);
+  if (
+    command === "--version" ||
+    command === "-v" ||
+    command === "-V" ||
+    command === "version" ||
+    args.includes("--version") ||
+    args.includes("-v")
+  ) {
+    logger.hero();
+    logger.card("COM.AI.VN SYSTEM VERSION", [
+      {
+        label: "CLI Package",
+        value: `@com.ai.vn/cli v${packageJson.version}`,
+        color: colors.bold + colors.cyan,
+      },
+      {
+        label: "Compiler Engine",
+        value: "compiler-rs (Rust v0.1.0)",
+        color: colors.bold + colors.green,
+      },
+      {
+        label: "Bun Runtime",
+        value: `v${Bun.version} (${process.arch}-${process.platform})`,
+        color: colors.yellow,
+      },
+      {
+        label: "Database Engine",
+        value: "Bun.SQL Postgres Introspector",
+        color: colors.sky,
+      },
+      {
+        label: "Zero-Install ESM",
+        value: "Active",
+        color: colors.emerald,
+      },
+    ]);
     return;
   }
 

@@ -1,6 +1,6 @@
 {
   "name": "@com.ai.vn/cli",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Com.AI.VN Command Line Interface & High-Performance Rust Compiler Engine",
   "bin": {
     "com": "./bin/cli.ts",
