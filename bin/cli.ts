@@ -2,6 +2,7 @@
 import { cloneView } from "../src/commands/clone";
 import { devCommand } from "../src/commands/dev";
 import { buildCommand } from "../src/commands/build";
+import { dbPullCommand } from "../src/commands/db";
 import { loginCommand, logoutCommand, whoamiCommand } from "../src/commands/login";
 import { logger, colors } from "../src/core/logger";
 
@@ -18,6 +19,7 @@ function printHelp() {
     ${colors.green}clone${colors.reset}  ${colors.sky}<viewId>${colors.reset}       Download project source code by View ID
     ${colors.green}dev${colors.reset}                   Start local development server with Hot Reload
     ${colors.green}build${colors.reset}                 Package project for Production or Zalo Mini App
+    ${colors.green}db pull | db sync${colors.reset}     Introspect database schema & generate types/db.d.ts for AI
     ${colors.green}push | sync | save${colors.reset}    Synchronize local changes back to the Cloud
 
   ${colors.bold}${colors.white}OPTIONS:${colors.reset}
@@ -25,6 +27,8 @@ function printHelp() {
     ${colors.yellow}--dir${colors.reset}        ${colors.darkGray}<path>${colors.reset}     Target directory (default: current directory)
     ${colors.yellow}--port, -p${colors.reset}   ${colors.darkGray}<port>${colors.reset}     Port to listen on in dev mode (default: 3000)
     ${colors.yellow}--api${colors.reset}        ${colors.darkGray}<url>${colors.reset}      Custom backend API URL (default: https://base.myworkbeast.com)
+    ${colors.yellow}--url${colors.reset}        ${colors.darkGray}<url>${colors.reset}      Database connection URL for db pull
+    ${colors.yellow}--env${colors.reset}        ${colors.darkGray}<file>${colors.reset}     Custom env file path for db pull
     ${colors.yellow}--token${colors.reset}      ${colors.darkGray}<token>${colors.reset}    Pass an access token manually
     ${colors.yellow}--force, -f${colors.reset}            Overwrite existing non-empty directory on clone
     ${colors.yellow}--install${colors.reset}              Explicitly install local node_modules (optional; default is ESM zero-install)
@@ -35,11 +39,11 @@ function printHelp() {
     ${colors.darkGray}# 1. Start local dev server (auto-detects Web or Zalo Mini App)${colors.reset}
     ${colors.cyan}$ com dev${colors.reset}
 
-    ${colors.darkGray}# 2. Force start in Zalo Mini App simulation mode${colors.reset}
-    ${colors.cyan}$ com dev --target zalo${colors.reset}
+    ${colors.darkGray}# 2. Introspect database schema and generate types for AI coding${colors.reset}
+    ${colors.cyan}$ com db pull${colors.reset}
 
-    ${colors.darkGray}# 3. Build static package for Zalo Mini App deployment${colors.reset}
-    ${colors.cyan}$ com build --target zalo${colors.reset}
+    ${colors.darkGray}# 3. Force start in Zalo Mini App simulation mode${colors.reset}
+    ${colors.cyan}$ com dev --target zalo${colors.reset}
 
     ${colors.darkGray}# 4. Clone View by ID (e.g. 105)${colors.reset}
     ${colors.cyan}$ com clone 105${colors.reset}
@@ -154,6 +158,34 @@ async function main() {
         }
       }
       await buildCommand({ dir, target, outDir });
+      break;
+    }
+
+    case "db": {
+      const subCommand = args[1] || "pull";
+      let dir: string | undefined;
+      let env: string | undefined;
+      let dbUrl: string | undefined;
+
+      for (let i = 1; i < args.length; i++) {
+        if (args[i] === "--dir" && args[i + 1]) {
+          dir = args[++i];
+        } else if (args[i] === "--env" && args[i + 1]) {
+          env = args[++i];
+        } else if (args[i] === "--url" && args[i + 1]) {
+          dbUrl = args[++i];
+        }
+      }
+
+      if (subCommand === "pull" || subCommand === "sync" || subCommand === "introspect" || subCommand.startsWith("-")) {
+        await dbPullCommand({ dir, env, dbUrl });
+      } else {
+        logger.error(
+          `Unknown db subcommand: "${subCommand}"`,
+          "Usage: com db pull\n    Or: com db sync"
+        );
+        process.exit(1);
+      }
       break;
     }
 

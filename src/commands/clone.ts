@@ -141,12 +141,26 @@ export async function cloneView(viewIdArg: string | number, options: CloneOption
   const agentsGuideContent = generateAgentsGuide(viewDetails?.name || `View #${viewId}`, viewId);
   await Bun.write(agentsGuidePath, agentsGuideContent);
 
+  // Auto-introspect database schema if DATABASE_URL is available
+  let dbStatusLabel = "No database configured";
+  if (viewDetails?.db_code) {
+    const dbUrl = `postgresql://postgres:postgres@27.71.25.205:5433/${viewDetails.db_code}`;
+    try {
+      const { introspectAndGenerateSchema } = await import("./db");
+      const res = await introspectAndGenerateSchema(targetDir, dbUrl);
+      dbStatusLabel = `${res.tableCount} tables synced (types/db.d.ts)`;
+    } catch {
+      dbStatusLabel = "Configured (.env) - Run `com db pull` to sync types";
+    }
+  }
+
   // Summary Card
   logger.card("PROJECT SUMMARY", [
     { label: "View Name", value: viewDetails?.name || `View #${viewId}`, color: colors.bold + colors.white },
     { label: "View ID", value: String(viewId), color: colors.sky },
     { label: "Files Extracted", value: `${files.length} files (${(totalBytes / 1024).toFixed(1)} KB)` },
     { label: "Runtime Mode", value: options.install ? "Local node_modules" : "ESM Zero-Install (Instant)", color: colors.emerald },
+    { label: "Database Schema", value: dbStatusLabel, color: colors.yellow },
     { label: "AI Guide", value: "AGENTS.md (Created)", color: colors.bold + colors.cyan },
     { label: "Target Directory", value: relTargetDir, color: colors.green },
     { label: "Environment Status", value: "Ready for development", color: colors.emerald },

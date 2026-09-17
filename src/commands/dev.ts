@@ -213,6 +213,18 @@ export async function devCommand(options: DevOptions = {}) {
   const localIp = getLocalNetworkIp() || "localhost";
   const networkUrl = `http://${localIp}:${port}`;
 
+  // If types/db.d.ts is missing and DATABASE_URL is set, auto-generate types in background
+  const typesPath = join(projectDir, "types", "db.d.ts");
+  if (!existsSync(typesPath)) {
+    const dbUrl = process.env.DATABASE_URL || process.env.POSTGRES_URL;
+    if (dbUrl) {
+      try {
+        const { introspectAndGenerateSchema } = await import("./db");
+        await introspectAndGenerateSchema(projectDir, dbUrl);
+      } catch {}
+    }
+  }
+
   logger.card("RUST DEV ENGINE STARTING", [
     { label: "Engine", value: "🦀 Pure Rust (Axum + App Router Matcher)", color: colors.bold + colors.green },
     { label: "Project Path", value: projectDir, color: colors.cyan },

@@ -36,6 +36,9 @@ The codebase is strictly separated into **4 architectural layers**:
 │       ├── presentation/ # Server Actions & Controller endpoints
 │       └── index.ts      # Exported Server Actions for frontend consumption
 │
+├── types/                # TypeScript global type definitions
+│   └── db.d.ts           # Auto-generated Kysely Database Schema types (run \`com db pull\`)
+├── schema.sql            # Auto-generated database DDL schema for AI context
 ├── components/           # 4. Shared UI Design System Primitives
 │   └── ui/               # Generic reusable components (Button, Dialog, Input, Table, DatePicker)
 ├── lib/                  # Shared utilities (cn, date formatters, math helpers)
@@ -131,7 +134,17 @@ const result = await upload(file, { folder: "news_thumbnails" });
 
 ---
 
-## 3. Backend Clean Architecture (\`modules/<domain>/\`)
+<!-- DATABASE_SCHEMA_START -->
+## 3. Database Schema Overview (Live Synced)
+
+> **Database Types:** \`types/db.d.ts\` | **Schema DDL:** \`schema.sql\`  
+> AI coding assistants should reference \`types/db.d.ts\` for exact table interfaces and column types when writing database queries.  
+> Run \`com db pull\` to refresh this section and update TypeScript definitions whenever database migrations occur.
+<!-- DATABASE_SCHEMA_END -->
+
+---
+
+## 4. Backend Clean Architecture (\`modules/<domain>/\`)
 
 All database operations and business logic MUST live inside \`modules/<domain>/\`.
 
