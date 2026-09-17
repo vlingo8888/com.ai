@@ -90,22 +90,56 @@ cd my-app
 com dev
 ```
 
+### 5. `com test [pattern] [options]`
+Executes project unit, integration, and component tests with sub-millisecond execution via the built-in Bun Test engine.
+
+```bash
+# Run all project test suites
+com test
+
+# Target a specific domain or file
+com test news
+com test modules/payroll/use-cases/calculate-salary.use-case.test.ts
+
+# Live TDD Watch Mode
+com test --watch
+
+# Filter test case by description
+com test --filter "calculateNetSalary"
+
+# Generate code coverage report
+com test --coverage
+```
+
+### 6. `com sync` (or `com pull`)
+Synchronizes the entire project environment in one command:
+- 🔄 **Database Introspection (`com db pull`)**: Connects to PostgreSQL, regenerates `types/db.d.ts` (Kysely types with comments) and `schema.sql`.
+- 🤖 **AI Guidelines Sync (`AGENTS.md`)**: Injects live database table descriptions, clean architecture rules, and testing standards for AI coding assistants (Antigravity/Cursor/Copilot).
+- 📦 **Dependency AST Scanner**: Scans all project files, discovers third-party npm imports, and synchronizes `package.json` and `tsconfig.json`.
+
+```bash
+# Sync database schema, AGENTS.md, and project dependencies
+com sync
+```
+
 ---
 
 ## 🧪 Testing
 
-### Rust Compiler & Router Tests (288 tests)
+### Rust Compiler & Router Tests (319 tests)
 ```bash
 cd compiler-rs
 cargo test
 ```
 
-### TypeScript Package Manager Tests (18 tests)
+### TypeScript CLI & Framework Tests (36 tests)
 ```bash
-bun test
+com test
+# or: bun test
 ```
 
 ---
 
 ## 📄 License
 MIT © Com.AI.VN / NATA Team
+

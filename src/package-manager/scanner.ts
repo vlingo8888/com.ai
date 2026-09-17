@@ -23,7 +23,7 @@ export function normalizePackageName(specifier: string): string | null {
   const trimmed = specifier.trim();
   if (!trimmed) return null;
 
-  // 1. Ignore relative paths and internal aliases
+  // 1. Ignore relative paths, URLs, and internal aliases
   if (
     trimmed.startsWith(".") ||
     trimmed.startsWith("/") ||
@@ -31,8 +31,14 @@ export function normalizePackageName(specifier: string): string | null {
     trimmed.startsWith("~/") ||
     trimmed.startsWith("#") ||
     trimmed.startsWith("src/") ||
+    trimmed.startsWith("modules/") ||
+    trimmed.startsWith("features/") ||
+    trimmed.startsWith("app/") ||
+    trimmed.startsWith("components/") ||
     trimmed === "core" ||
-    trimmed.startsWith("core/")
+    trimmed.startsWith("core/") ||
+    trimmed.includes("://") ||
+    trimmed.includes(":")
   ) {
     return null;
   }
@@ -44,15 +50,24 @@ export function normalizePackageName(specifier: string): string | null {
   }
 
   // 3. Extract scoped (@org/pkg) or un-scoped package name
+  let candidate: string;
   if (trimmed.startsWith("@")) {
     const segments = trimmed.split("/");
     if (segments.length >= 2) {
-      return `${segments[0]}/${segments[1]}`;
+      candidate = `${segments[0]}/${segments[1]}`;
+    } else {
+      candidate = segments[0];
     }
-    return segments[0];
+  } else {
+    candidate = trimmed.split("/")[0];
   }
 
-  return trimmed.split("/")[0];
+  // Validate npm package name pattern
+  if (!/^(?:@[a-z0-9-~][a-z0-9-._~]*\/)?[a-z0-9-~][a-z0-9-._~]*$/i.test(candidate)) {
+    return null;
+  }
+
+  return candidate;
 }
 
 /**
