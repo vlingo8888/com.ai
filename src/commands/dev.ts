@@ -278,7 +278,7 @@ export async function devCommand(options: DevOptions = {}) {
   let tunnelUrl: string | null = null;
   if (isTunnel) {
     try {
-      const provider = options.provider || (target === "zalo" ? "123c" : "rs");
+      const provider = options.provider || "rs";
       const tunnel = await startTunnelBackground({
         port,
         subdomain: options.subdomain,

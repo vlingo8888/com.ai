@@ -89,6 +89,10 @@ export async function start123cTunnel(options: TunnelOptions = {}): Promise<{
 export async function locateOrBuildTunnelBinary(): Promise<string> {
   const home = process.env.HOME || "";
   const candidates = [
+    join(__dirname, "../tunnel-rs"),
+    join(__dirname, "../../tunnel-rs"),
+    join(__dirname, "../bin/tunnel-rs"),
+    join(__dirname, "../../bin/tunnel-rs"),
     join(home, "Documents/GitHub/NATA/backend/tunnel-rs/target/release/tunnel-rs"),
     join(home, "Documents/GitHub/NATA/backend/tunnel-rs/target/debug/tunnel-rs"),
     join(__dirname, "../../../NATA/backend/tunnel-rs/target/release/tunnel-rs"),

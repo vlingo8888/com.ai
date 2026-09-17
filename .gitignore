@@ -12,6 +12,8 @@ out/
 /cai
 com-compiler
 bin/com-compiler
+tunnel-rs
+bin/tunnel-rs
 *.exe
 *.dll
 *.dylib
