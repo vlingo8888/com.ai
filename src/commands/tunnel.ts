@@ -93,6 +93,8 @@ export async function locateOrBuildTunnelBinary(): Promise<string> {
     join(__dirname, "../../tunnel-rs"),
     join(__dirname, "../bin/tunnel-rs"),
     join(__dirname, "../../bin/tunnel-rs"),
+    join(process.cwd(), "bin/tunnel-rs"),
+    join(process.cwd(), "tunnel-rs"),
     join(home, "Documents/GitHub/NATA/backend/tunnel-rs/target/release/tunnel-rs"),
     join(home, "Documents/GitHub/NATA/backend/tunnel-rs/target/debug/tunnel-rs"),
     join(__dirname, "../../../NATA/backend/tunnel-rs/target/release/tunnel-rs"),

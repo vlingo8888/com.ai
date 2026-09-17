@@ -601,6 +601,9 @@ async fn zmp_js_handler(State(state): State<AppState>) -> impl IntoResponse {
   // 1. Resolve Server Origin accurately from script tag URL
   var currentScript = document.currentScript || document.querySelector('script[src*="app.js"]');
   var serverOrigin = currentScript ? new URL(currentScript.src, window.location.href).origin : (window.location.origin && window.location.origin !== "null" && !window.location.origin.startsWith("file:") ? window.location.origin : "");
+  var configuredBackend = "__COM_BACKEND_PLACEHOLDER__";
+  var backendOrigin = (configuredBackend && !configuredBackend.startsWith("__") ? configuredBackend : (window.__COM_BACKEND_URL__ || serverOrigin));
+  window.__COM_BACKEND_URL__ = backendOrigin;
 
   // 2. Dismiss Zalo loading indicator
   function dismissLoading() {
@@ -612,15 +615,15 @@ async fn zmp_js_handler(State(state): State<AppState>) -> impl IntoResponse {
   }
   dismissLoading();
 
-  // 3. Hook fetch to automatically resolve relative URLs (e.g. /_nata/rpc, /api) against serverOrigin
-  if (serverOrigin && !window.__nata_fetch_hooked) {
+  // 3. Hook fetch to automatically resolve relative URLs (e.g. /_nata/rpc, /api) against backendOrigin
+  if (backendOrigin && !window.__nata_fetch_hooked) {
     window.__nata_fetch_hooked = true;
     var originalFetch = window.fetch;
     window.fetch = function(input, init) {
       if (typeof input === "string" && input.startsWith("/")) {
-        input = serverOrigin + input;
+        input = backendOrigin + input;
       } else if (input && typeof input.url === "string" && input.url.startsWith("/")) {
-        input = new Request(serverOrigin + input.url, input);
+        input = new Request(backendOrigin + input.url, input);
       }
       return originalFetch.call(this, input, init);
     };
@@ -906,7 +909,9 @@ async fn zmp_js_handler(State(state): State<AppState>) -> impl IntoResponse {
   }
 })();
 "###;
-    (StatusCode::OK, headers, bootstrap_js.to_string()).into_response()
+    let backend_url = std::env::var("COM_BACKEND_URL").unwrap_or_default();
+    let rendered_js = bootstrap_js.replace("__COM_BACKEND_PLACEHOLDER__", &backend_url);
+    (StatusCode::OK, headers, rendered_js).into_response()
 }
 
 

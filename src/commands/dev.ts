@@ -273,30 +273,65 @@ export async function devCommand(options: DevOptions = {}) {
     }
   }
 
-  // Zalo target automatically enables public tunnel (no extra --tunnel flag required)
+  // Zalo target automatically enables public tunnels (no extra --tunnel flag required)
   const isTunnel = options.tunnel !== undefined ? options.tunnel : (target === "zalo");
-  let tunnelUrl: string | null = null;
+  let zaloTunnelUrl: string | null = null;
+  let backendTunnelUrl: string | null = null;
+
   if (isTunnel) {
-    try {
-      const provider = options.provider || "rs";
-      const tunnel = await startTunnelBackground({
-        port,
-        subdomain: options.subdomain,
-        server: options.server,
-        provider,
-      });
-      tunnelUrl = tunnel.publicUrl;
-    } catch (err: any) {
-      logger.warn(`Could not start tunnel: ${err.message}`);
+    if (target === "zalo") {
+      // 1. Zalo Mini App frontend tunnel via 123c (so Zalo mobile webview can load the app)
+      try {
+        const zTunnel = await startTunnelBackground({
+          port,
+          subdomain: options.subdomain,
+          provider: "123c",
+        });
+        zaloTunnelUrl = zTunnel.publicUrl;
+      } catch (err: any) {
+        logger.warn(`Could not start Zalo 123c tunnel: ${err.message}`);
+      }
+
+      // 2. High-performance backend tunnel via tunnel-rs (tunnel.myworkbeast.com) so Zalo calls backend APIs / RPC
+      try {
+        const bTunnel = await startTunnelBackground({
+          port,
+          server: options.server,
+          provider: "rs",
+        });
+        backendTunnelUrl = bTunnel.publicUrl;
+      } catch (err: any) {
+        // Fallback to zaloTunnelUrl if tunnel-rs relay fails
+        backendTunnelUrl = zaloTunnelUrl;
+      }
+    } else {
+      // Standard Web App tunnel via tunnel-rs (myworkbeast)
+      try {
+        const provider = options.provider || "rs";
+        const tunnel = await startTunnelBackground({
+          port,
+          subdomain: options.subdomain,
+          server: options.server,
+          provider,
+        });
+        backendTunnelUrl = tunnel.publicUrl;
+      } catch (err: any) {
+        logger.warn(`Could not start tunnel: ${err.message}`);
+      }
     }
   }
+
+  const effectiveBackendUrl = backendTunnelUrl || zaloTunnelUrl || networkUrl;
 
   console.log();
   console.log(`   ${colors.bold}▲ com.ai.vn${colors.reset}`);
   console.log(`   ${colors.dim}-${colors.reset} Local:        ${colors.cyan}http://localhost:${port}${colors.reset}`);
   console.log(`   ${colors.dim}-${colors.reset} Network:      ${colors.cyan}${networkUrl}${colors.reset}`);
-  if (tunnelUrl) {
-    console.log(`   ${colors.dim}-${colors.reset} Tunnel:       ${colors.green}${tunnelUrl}${colors.reset}`);
+  if (zaloTunnelUrl) {
+    console.log(`   ${colors.dim}-${colors.reset} Zalo Tunnel:  ${colors.green}${zaloTunnelUrl}${colors.reset}`);
+  }
+  if (backendTunnelUrl) {
+    console.log(`   ${colors.dim}-${colors.reset} Backend URL:  ${colors.green}${backendTunnelUrl}${colors.reset}`);
   }
   console.log(`   ${colors.dim}-${colors.reset} Target:       ${target === "zalo" ? "Zalo Mini App" : "Web App"}`);
   if (target === "zalo" && zaloAppId) {
@@ -308,19 +343,20 @@ export async function devCommand(options: DevOptions = {}) {
   console.log();
 
   if (target === "zalo" && zaloAppId) {
-    const clientEndpoint = tunnelUrl || networkUrl;
+    // Zalo opens via 123c tunnel
+    const clientEndpoint = zaloTunnelUrl || networkUrl;
     const deepLinkUrl = generateZaloDeepLink(zaloAppId, clientEndpoint, port);
-    if (!tunnelUrl) {
+    if (!zaloTunnelUrl) {
       try {
         await setupAdbReverse(port);
       } catch {}
     }
     printZaloDevQrCode(deepLinkUrl, zaloAppId, clientEndpoint);
-  } else if (tunnelUrl) {
-    printTunnelQrCode(tunnelUrl);
+  } else if (backendTunnelUrl) {
+    printTunnelQrCode(backendTunnelUrl);
   }
 
-  // Launch Rust binary directly with interactive IO and target flag
+  // Launch Rust binary directly with interactive IO, target flag and COM_BACKEND_URL
   const proc = Bun.spawn([rustBinPath, "dev", "--dir", projectDir, "--port", String(port), "--target", target], {
     stdout: "inherit",
     stderr: "inherit",
@@ -328,6 +364,8 @@ export async function devCommand(options: DevOptions = {}) {
     env: {
       ...process.env,
       COM_MANAGED: "1",
+      COM_BACKEND_URL: effectiveBackendUrl,
+      NEXT_PUBLIC_API_URL: effectiveBackendUrl,
     },
   });
 
