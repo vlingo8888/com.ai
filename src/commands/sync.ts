@@ -1,4 +1,4 @@
-import { existsSync, readdirSync, readFileSync, statSync } from "fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync } from "fs";
 import { join, resolve, relative } from "path";
 import { logger, colors } from "../core/logger";
 import { findDatabaseUrl, introspectAndGenerateSchema } from "./db";
@@ -142,6 +142,21 @@ export async function syncCommand(options: SyncOptions = {}): Promise<SyncResult
     } catch {}
   }
   await Bun.write(agentsPath, currentAgents);
+
+  // Mirror guidelines to standard files for other AI editors (Claude, Cursor, Copilot)
+  try {
+    const claudePath = join(projectDir, "CLAUDE.md");
+    const cursorRulesPath = join(projectDir, ".cursorrules");
+    const githubDir = join(projectDir, ".github");
+    const copilotPath = join(githubDir, "copilot-instructions.md");
+
+    await Bun.write(claudePath, currentAgents);
+    await Bun.write(cursorRulesPath, currentAgents);
+    if (!existsSync(githubDir)) {
+      mkdirSync(githubDir, { recursive: true });
+    }
+    await Bun.write(copilotPath, currentAgents);
+  } catch {}
 
   // 3. Scan & Sync Dependencies (package.json & tsconfig.json)
   const scanResult = scanFilesForDependencies(scannedFiles, projectDir);

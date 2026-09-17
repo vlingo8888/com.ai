@@ -5,6 +5,24 @@
 
 ---
 
+## 🚨 0. CRITICAL INVIOLABLE MANDATES FOR AI AGENTS (READ FIRST)
+
+As an AI coding assistant working on this repository, you **MUST STRICTLY FOLLOW** these rules without exception:
+
+1. **NO AD-HOC DATABASE CLIENTS**: NEVER install or instantiate `pg`, `postgres`, `prisma`, `drizzle`, or manual database connections. ALWAYS use `import { db, sql, HttpError, truncateTables } from "core"`.
+2. **CLEAN ARCHITECTURE SEPARATION**:
+   - Backend queries and domain business logic **MUST ALWAYS** live in `modules/<domain>/`.
+   - Feature UI components, state dialogs, forms, and hooks **MUST ALWAYS** live in `features/<feature>/`.
+   - Generic reusable UI primitives (Button, Input, Dialog, Table) **MUST ALWAYS** live in `components/ui/`.
+   - App Router routes (`app/[route]/page.tsx`) **MUST REMAIN THIN**; only import and compose features and modules.
+3. **ZERO-MOCK TESTING MANDATE**:
+   - When running tests via `com test` (or `bun test`), `core` automatically activates an **in-memory PostgreSQL engine (@pglite/core)** and auto-loads `schema.sql`.
+   - **DO NOT create manual mocks for database queries or Server Actions!** Import real Server Actions and use-cases directly in your test suites.
+   - Colocate tests: place `*.test.ts` directly next to the use-case or action being tested.
+4. **TYPE ACCURACY**: Reference `types/db.d.ts` and `schema.sql` for exact column names, nullability, and relations.
+
+---
+
 ## 1. Directory Structure & Clean Architecture Overview
 
 The Com.AI.VN codebase is strictly separated into **4 architectural layers**:
@@ -124,7 +142,7 @@ describe("Payroll Domain: calculateNetSalary", () => {
 ```
 
 ### C. Server Actions & Database Integration Tests (`modules/<domain>/presentation/*.test.ts`)
-When running `com test`, `core` **automatically activates an In-Memory Database Engine** and auto-loads `schema.sql`. You can **import real Server Actions & use-cases directly** without writing manual database mocks! Real SQL queries, constraints, and defaults execute in RAM at sub-millisecond speed:
+When running `com test` (or `bun test`), `core` **automatically activates an In-Memory PostgreSQL Database Engine (`@pglite/core`)** and auto-loads `schema.sql`. You can **import real Server Actions & use-cases directly** without writing manual database mocks! Real PostgreSQL queries, triggers, autoincrement IDs, constraints, and defaults execute in RAM at sub-millisecond speed:
 
 ```typescript
 import { describe, it, expect, beforeEach } from "bun:test";
