@@ -570,36 +570,290 @@ async fn zmp_js_handler(State(state): State<AppState>) -> impl IntoResponse {
         }
     }
 
-    // 2. Otherwise serve universal Zalo Mini App bootstrap bridge
-    let bootstrap_js = r#"// Com.AI.VN Zalo Mini App Native Runtime Bridge
+    // 2. Otherwise serve universal Zalo Mini App Native DOM Renderer
+    let bootstrap_js = r#"// Com.AI.VN Zalo Mini App Native DOM Runtime
 (function() {
-  try {
-    if (window.ZaloJavaScriptBridge && typeof window.ZaloJavaScriptBridge.closeLoading === 'function') {
-      window.ZaloJavaScriptBridge.closeLoading();
-    }
-  } catch(e) {}
+  console.log("[Com.AI.VN] Initializing Zalo Mini App Native DOM Runtime...");
 
-  function mountZaloApp() {
-    var container = document.getElementById("app") || document.body;
-    if (!document.getElementById("_nata_zalo_frame")) {
-      var iframe = document.createElement("iframe");
-      iframe.id = "_nata_zalo_frame";
-      iframe.src = window.location.origin + window.location.pathname + window.location.search;
-      iframe.style.cssText = "position:fixed;top:0;left:0;width:100%;height:100%;border:none;margin:0;padding:0;overflow:hidden;z-index:999999;background:#fff;";
-      iframe.allow = "camera; microphone; geolocation; clipboard-read; clipboard-write;";
-      container.appendChild(iframe);
+  // 1. Resolve Server Origin accurately from script tag URL
+  var currentScript = document.currentScript || document.querySelector('script[src*="app.js"]');
+  var serverOrigin = currentScript ? new URL(currentScript.src, window.location.href).origin : (window.location.origin && window.location.origin !== "null" && !window.location.origin.startsWith("file:") ? window.location.origin : "");
+
+  // 2. Dismiss Zalo loading indicator
+  function dismissLoading() {
+    try {
+      if (window.ZaloJavaScriptBridge && typeof window.ZaloJavaScriptBridge.closeLoading === 'function') {
+        window.ZaloJavaScriptBridge.closeLoading();
+      }
+    } catch(e) {}
+  }
+  dismissLoading();
+
+  // 3. Hook fetch to automatically resolve relative URLs (e.g. /_nata/rpc, /api) against serverOrigin
+  if (serverOrigin && !window.__nata_fetch_hooked) {
+    window.__nata_fetch_hooked = true;
+    var originalFetch = window.fetch;
+    window.fetch = function(input, init) {
+      if (typeof input === "string" && input.startsWith("/")) {
+        input = serverOrigin + input;
+      } else if (input && typeof input.url === "string" && input.url.startsWith("/")) {
+        input = new Request(serverOrigin + input.url, input);
+      }
+      return originalFetch.call(this, input, init);
+    };
+  }
+
+  // 4. Inject Mobile DevTools (Eruda) for live on-device debugging
+  if (!window.__eruda_injected) {
+    window.__eruda_injected = true;
+    var erudaScript = document.createElement("script");
+    erudaScript.src = "https://cdn.jsdelivr.net/npm/eruda";
+    erudaScript.onload = function() {
+      if (window.eruda) {
+        window.eruda.init({ tool: ["console", "network", "elements", "resources", "info"] });
+        console.log("[ZaloMiniApp] Eruda Mobile Console ready on device");
+      }
+    };
+    document.head.appendChild(erudaScript);
+  }
+
+  // 5. Inject Stylesheet if absent
+  if (!document.getElementById("_zmp_styles") && serverOrigin) {
+    var link = document.createElement("link");
+    link.id = "_zmp_styles";
+    link.rel = "stylesheet";
+    link.href = serverOrigin + "/assets/app.css";
+    document.head.appendChild(link);
+  }
+
+  // 6. Inject Tailwind Browser Engine
+  if (!document.getElementById("_zmp_tailwind")) {
+    var tw = document.createElement("script");
+    tw.id = "_zmp_tailwind";
+    tw.src = "https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4";
+    document.head.appendChild(tw);
+  }
+
+  // 7. Inject Import Map before module resolution
+  if (!document.querySelector('script[type="importmap"]')) {
+    var im = document.createElement("script");
+    im.type = "importmap";
+    im.textContent = JSON.stringify({
+      imports: {
+        "react": "https://esm.sh/react@18.3.1",
+        "react/jsx-runtime": "https://esm.sh/react@18.3.1/jsx-runtime",
+        "react-dom": "https://esm.sh/react-dom@18.3.1?external=react",
+        "react-dom/client": "https://esm.sh/react-dom@18.3.1/client?external=react",
+        "next/link": serverOrigin + "/_nata/shims/next/link",
+        "next/image": serverOrigin + "/_nata/shims/next/image",
+        "next/navigation": serverOrigin + "/_nata/shims/next/navigation",
+        "next/router": serverOrigin + "/_nata/shims/next/router",
+        "next/head": serverOrigin + "/_nata/shims/next/head",
+        "next/headers": serverOrigin + "/_nata/shims/next/headers",
+        "lucide-react": "https://esm.sh/lucide-react@0.460.0?external=react,react-dom",
+        "framer-motion": "https://esm.sh/framer-motion@11.11.17?external=react,react-dom",
+        "clsx": "https://esm.sh/clsx@2.1.1",
+        "tailwind-merge": "https://esm.sh/tailwind-merge@2.5.4",
+        "axios": "https://esm.sh/axios@1.7.7",
+        "date-fns": "https://esm.sh/date-fns@4.1.0",
+        "canvas-confetti": "https://esm.sh/canvas-confetti@1.9.4",
+        "@tanstack/react-query": "https://esm.sh/@tanstack/react-query@5.59.0?external=react,react-dom",
+        "@tanstack/react-table": "https://esm.sh/@tanstack/react-table@8.20.5?external=react,react-dom",
+        "zustand": "https://esm.sh/zustand@5.0.0?external=react,react-dom",
+        "jotai": "https://esm.sh/jotai@2.10.1?external=react,react-dom",
+        "swr": "https://esm.sh/swr@2.2.5?external=react,react-dom",
+        "zod": "https://esm.sh/zod@3.23.8",
+        "react-hook-form": "https://esm.sh/react-hook-form@7.53.0?external=react,react-dom",
+        "@hookform/resolvers": "https://esm.sh/@hookform/resolvers@3.9.0?external=react,react-dom",
+        "@hookform/resolvers/zod": "https://esm.sh/@hookform/resolvers@3.9.0/zod?external=react,react-dom,zod",
+        "sonner": "https://esm.sh/sonner@1.5.0?external=react,react-dom",
+        "react-hot-toast": "https://esm.sh/react-hot-toast@2.4.1?external=react,react-dom",
+        "next-themes": "https://esm.sh/next-themes@0.3.0?external=react,react-dom"
+      }
+    });
+    document.head.appendChild(im);
+  }
+
+  // 8. Native DOM Mounting & Hydration
+  async function bootApp() {
+    var container = document.getElementById("app") || document.getElementById("root");
+    if (!container) {
+      container = document.createElement("div");
+      container.id = "app";
+      document.body.appendChild(container);
+    }
+    container.style.cssText = "min-height:100vh;width:100%;display:flex;flex-direction:column;box-sizing:border-box;";
+
+    try {
+      // Import React and ReactDOM Client
+      var ReactMod = await import("https://esm.sh/react@18.3.1");
+      var React = ReactMod.default || ReactMod;
+      window.React = React;
+
+      var ReactDOMClient = await import("https://esm.sh/react-dom@18.3.1/client?external=react");
+      var ReactDOM = ReactDOMClient.default || ReactDOMClient;
+      window.ReactDOM = ReactDOM;
+
+      // Module loading cache
+      var moduleCache = new Map();
+      async function loadModule(specifier) {
+        var clean = specifier.trim();
+        if (clean.startsWith("/_bundle/")) clean = clean.slice(9);
+        var normKey = clean.replace(/^\/+/, "").split("?")[0];
+        if (moduleCache.has(normKey)) return moduleCache.get(normKey);
+
+        var targetUrl = serverOrigin + "/_bundle/" + normKey;
+        var mod = await import(targetUrl);
+        moduleCache.set(normKey, mod);
+        return mod;
+      }
+
+      function unwrapHtmlBody(node) {
+        if (!node) return node;
+        if (Array.isArray(node)) {
+          var unwrapped = node.map(unwrapHtmlBody).filter(Boolean);
+          if (unwrapped.length === 0) return null;
+          if (unwrapped.length === 1) return unwrapped[0];
+          return React.createElement(React.Fragment, null, ...unwrapped);
+        }
+        if (React.isValidElement(node)) {
+          var type = node.type;
+          var props = node.props || {};
+          if (type === "html" || (typeof type === "string" && type.toLowerCase() === "html")) {
+            return unwrapHtmlBody(props.children);
+          }
+          if (type === "body" || (typeof type === "string" && type.toLowerCase() === "body")) {
+            return unwrapHtmlBody(props.children);
+          }
+          if (type === "head" || (typeof type === "string" && type.toLowerCase() === "head")) {
+            return null;
+          }
+          return node;
+        }
+        return node;
+      }
+
+      function makeComponent(Comp) {
+        if (!Comp) return () => null;
+        var isAsync = Comp.constructor && (Comp.constructor.name === "AsyncFunction" || Comp[Symbol.toStringTag] === "AsyncFunction");
+        return function DynamicComponentWrapper(props) {
+          var safeProps = props || {};
+          if (isAsync) {
+            var [content, setContent] = React.useState(null);
+            var [err, setErr] = React.useState(null);
+            React.useEffect(() => {
+              var active = true;
+              Promise.resolve(Comp(safeProps)).then(res => {
+                if (active) setContent(unwrapHtmlBody(res));
+              }).catch(e => {
+                if (active) setErr(e);
+              });
+              return () => { active = false; };
+            }, [safeProps.children]);
+            if (err) throw err;
+            return content;
+          }
+          try {
+            var res = Comp(safeProps);
+            if (res instanceof Promise) {
+              var [pContent, setPContent] = React.useState(null);
+              var [pErr, setPErr] = React.useState(null);
+              React.useEffect(() => {
+                var pActive = true;
+                res.then(r => { if (pActive) setPContent(unwrapHtmlBody(r)); }).catch(e => { if (pActive) setPErr(e); });
+                return () => { pActive = false; };
+              }, []);
+              if (pErr) throw pErr;
+              return pContent;
+            }
+            return unwrapHtmlBody(res);
+          } catch(e) {
+            throw e;
+          }
+        };
+      }
+
+      var currentRoot = null;
+      async function renderNativeRoute(pageFile, layoutFiles, params) {
+        window.__NATA_PARAMS__ = params || {};
+        var pageMod = await loadModule(pageFile);
+        var Page = pageMod.default || Object.values(pageMod).find(v => typeof v === "function");
+        if (!Page) throw new Error("No React component found in " + pageFile);
+
+        var RootComponent = makeComponent(Page);
+
+        for (var i = (layoutFiles || []).length - 1; i >= 0; i--) {
+          try {
+            var layoutMod = await loadModule(layoutFiles[i]);
+            var Layout = layoutMod.default || Object.values(layoutMod).find(v => typeof v === "function");
+            if (Layout) {
+              var Child = RootComponent;
+              var WrappedLayout = makeComponent(Layout);
+              RootComponent = (props) => React.createElement(WrappedLayout, { ...(props || {}), children: React.createElement(Child, props || {}) });
+            }
+          } catch(e) {
+            console.warn("Could not wrap layout:", layoutFiles[i], e);
+          }
+        }
+
+        if (!currentRoot) {
+          container.innerHTML = "";
+          currentRoot = ReactDOM.createRoot(container);
+        }
+        currentRoot.render(React.createElement(RootComponent, {}));
+        dismissLoading();
+      }
+
+      // SPA Navigation function for Link & useRouter
+      async function navigateTo(targetPath) {
+        try {
+          var cleanPath = targetPath.split("?")[0] || "/";
+          var res = await fetch(serverOrigin + "/_nata/route_info?path=" + encodeURIComponent(cleanPath));
+          var info = await res.json();
+          if (info && info.found) {
+            await renderNativeRoute(info.page_file, info.layout_files || [], info.params || {});
+            window.scrollTo(0, 0);
+          }
+        } catch(e) {
+          console.error("Navigation error:", e);
+        }
+      }
+      window.__NATA_NAVIGATE__ = navigateTo;
+
+      // Fetch initial route info (defaults to root /)
+      var initialPath = "/";
+      var routeRes = await fetch(serverOrigin + "/_nata/route_info?path=" + encodeURIComponent(initialPath));
+      if (!routeRes.ok) {
+        throw new Error("Failed to fetch route info from " + serverOrigin);
+      }
+      var initialInfo = await routeRes.json();
+      if (!initialInfo || !initialInfo.found) {
+        throw new Error("No page found for route: " + initialPath);
+      }
+
+      await renderNativeRoute(initialInfo.page_file, initialInfo.layout_files || [], initialInfo.params || {});
+      console.log("[Com.AI.VN] Zalo Mini App Native DOM Rendered successfully!");
+    } catch(err) {
+      console.error("[Com.AI.VN] Native render error:", err);
+      dismissLoading();
+      container.innerHTML = '<div style="padding:24px;font-family:sans-serif;color:#f87171;background:#0f172a;min-height:100vh;">' +
+        '<h3 style="margin-top:0;font-size:18px;">⚠️ Lỗi Khởi Chạy Giao Diện Zalo</h3>' +
+        '<pre style="white-space:pre-wrap;word-break:break-all;font-size:12px;background:#020617;padding:12px;border-radius:8px;color:#fca5a5;">' + (err && err.stack ? err.stack : String(err)) + '</pre>' +
+        '<p style="font-size:12px;color:#94a3b8;">Bấm icon Eruda ở góc màn hình để kiểm tra chi tiết Console và Network log.</p>' +
+      '</div>';
     }
   }
 
   if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", mountZaloApp);
+    document.addEventListener("DOMContentLoaded", bootApp);
   } else {
-    mountZaloApp();
+    bootApp();
   }
 })();
 "#;
     (StatusCode::OK, headers, bootstrap_js.to_string()).into_response()
 }
+
 
 
 async fn shims_handler(
