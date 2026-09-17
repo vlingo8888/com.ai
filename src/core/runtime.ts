@@ -136,107 +136,7 @@ class LoggingDriver implements Driver {
 
 let dbInstance: Kysely<any> | null = null;
 let rawPgInstance: any = null;
-
-/**
- * Creates in-memory SQLite / PGlite database driver that runs SQL DDL from schema.sql
- */
-function createInMemoryDbDriver(): Driver {
-  let sqliteDb: any = null;
-  try {
-    const { Database: BunDatabase } = require("bun:sqlite");
-    sqliteDb = new BunDatabase(":memory:");
-  } catch {}
-
-  // Automatically execute schema.sql in memory if available
-  if (sqliteDb) {
-    const currentDir = typeof import.meta !== "undefined" && import.meta.dir ? import.meta.dir : (typeof __dirname !== "undefined" ? __dirname : process.cwd());
-    const candidatePaths = [
-      process.env.COM_SCHEMA_PATH,
-      join(currentDir, "..", "schema.sql"),
-      join(currentDir, "schema.sql"),
-      join(process.cwd(), "schema.sql"),
-      join(process.cwd(), "data", "schema.sql"),
-    ].filter(Boolean) as string[];
-
-    for (const fullPath of candidatePaths) {
-      if (existsSync(fullPath)) {
-        try {
-          let ddl = readFileSync(fullPath, "utf-8");
-          // Sanitize Postgres-specific DDL for in-memory SQLite compatibility
-          ddl = ddl
-            .replace(/COMMENT ON (TABLE|COLUMN)[^;]+;/gi, "")
-            .replace(/SERIAL PRIMARY KEY/gi, "INTEGER PRIMARY KEY AUTOINCREMENT")
-            .replace(/BIGSERIAL PRIMARY KEY/gi, "INTEGER PRIMARY KEY AUTOINCREMENT")
-            .replace(/SERIAL/gi, "INTEGER")
-            .replace(/BIGSERIAL/gi, "INTEGER")
-            .replace(/TIMESTAMP WITH(OUT)? TIME ZONE/gi, "TEXT")
-            .replace(/TIMESTAMPTZ/gi, "TEXT")
-            .replace(/TIMESTAMP/gi, "TEXT")
-            .replace(/JSONB?/gi, "TEXT")
-            .replace(/BOOLEAN/gi, "INTEGER")
-            .replace(/now\\(\\)/gi, "CURRENT_TIMESTAMP")
-            .replace(/gen_random_uuid\\(\\)/gi, "(hex(randomblob(16)))");
-          sqliteDb.exec(ddl);
-          break;
-        } catch {}
-      }
-    }
-  }
-
-  class InMemoryConnection implements DatabaseConnection {
-    async executeQuery<R>(compiledQuery: CompiledQuery): Promise<KyselyQueryResult<R>> {
-      const { sql: sqlStr, parameters } = compiledQuery;
-      if (!sqliteDb) return { rows: [] };
-
-      try {
-        let transformedSql = sqlStr;
-        // Transform postgres positional params $1, $2 to sqlite ?
-        transformedSql = transformedSql.replace(/\\$([0-9]+)/g, "?");
-        
-        // Handle RETURNING clause in SQLite
-        const isInsert = /^\\s*insert/i.test(transformedSql);
-        const isUpdate = /^\\s*update/i.test(transformedSql);
-        const isDelete = /^\\s*delete/i.test(transformedSql);
-
-        if (isInsert || isUpdate || isDelete) {
-          const stmt = sqliteDb.prepare(transformedSql.replace(/RETURNING\\s+.*?$/i, ""));
-          const res = stmt.run(...(parameters as any[]));
-          
-          if (/RETURNING/i.test(sqlStr)) {
-            const tableRegex = new RegExp('(?:into|update|from)\\\\s+["\\\`]?([a-zA-Z0-9_]+)', 'i');
-            const tableMatch = sqlStr.match(tableRegex);
-            if (tableMatch && isInsert && res.lastInsertRowid) {
-              const fetchStmt = sqliteDb.prepare("SELECT * FROM " + tableMatch[1] + " WHERE rowid = ?");
-              const row = fetchStmt.get(res.lastInsertRowid);
-              return { rows: row ? [row] as R[] : [], numAffectedRows: BigInt(res.changes || 1) };
-            }
-          }
-          return { rows: [] as R[], numAffectedRows: BigInt(res.changes || 0) };
-        }
-
-        const stmt = sqliteDb.prepare(transformedSql);
-        const rows = stmt.all(...(parameters as any[])) as R[];
-        return { rows: rows || [] };
-      } catch (err: any) {
-        // Fallback or rethrow
-        throw err;
-      }
-    }
-    async *streamQuery<R>(): AsyncIterableIterator<KyselyQueryResult<R>> {
-      throw new Error("streamQuery not supported on InMemoryConnection");
-    }
-  }
-
-  return {
-    async init() {},
-    async acquireConnection() { return new InMemoryConnection(); },
-    async releaseConnection() {},
-    async beginTransaction() {},
-    async commitTransaction() {},
-    async rollbackTransaction() {},
-    async destroy() {},
-  };
-}
+let schemaInitPromise: Promise<void> | null = null;
 
 function createDbInstance(): Kysely<any> {
   const isTestMode = process.env.NODE_ENV === "test" || process.env.COM_TEST === "true";
@@ -265,84 +165,87 @@ function createDbInstance(): Kysely<any> {
     } catch {}
   }
 
-  // PGlite or In-Memory MockDB engine
-  try {
-    let PGliteClass: any = null;
+  // @pglite/core Embedded & In-Memory Database Engine
+  let PGliteClass: any = null;
+  try { PGliteClass = require("@pglite/core").PGLite || require("@pglite/core").PGLiteNative; } catch {}
+  if (!PGliteClass) {
     try { PGliteClass = require("@electric-sql/pglite").PGlite; } catch {}
-    if (!PGliteClass) {
-      try { PGliteClass = require("@pglite/core").PGlite; } catch {}
+  }
+
+  const pgliteInstance = PGliteClass
+    ? (isTestMode ? new PGliteClass() : new PGliteClass(process.env.DB_PATH || "data/app.db"))
+    : null;
+  rawPgInstance = pgliteInstance;
+
+  async function initSchemaIfNeeded() {
+    if (!pgliteInstance) return;
+    const currentDir = typeof import.meta !== "undefined" && import.meta.dir ? import.meta.dir : (typeof __dirname !== "undefined" ? __dirname : process.cwd());
+    const candidatePaths = [
+      process.env.COM_SCHEMA_PATH,
+      join(currentDir, "..", "schema.sql"),
+      join(currentDir, "schema.sql"),
+      join(process.cwd(), "schema.sql"),
+      join(process.cwd(), "data", "schema.sql"),
+    ].filter(Boolean) as string[];
+
+    for (const sp of candidatePaths) {
+      if (existsSync(sp)) {
+        try {
+          const ddl = readFileSync(sp, "utf-8");
+          await pgliteInstance.exec(ddl);
+          break;
+        } catch (e: any) {
+          // Ignore table already exists or minor DDL warnings
+        }
+      }
     }
+  }
 
-    if (PGliteClass) {
-      const pgliteInstance = isTestMode ? new PGliteClass() : new PGliteClass(process.env.DB_PATH || "data/app.db");
-      rawPgInstance = pgliteInstance;
+  schemaInitPromise = initSchemaIfNeeded();
 
-      // Auto-load schema.sql in memory for tests
-      const currentDir = typeof import.meta !== "undefined" && import.meta.dir ? import.meta.dir : (typeof __dirname !== "undefined" ? __dirname : process.cwd());
-      const candidatePaths = [
-        process.env.COM_SCHEMA_PATH,
-        join(currentDir, "..", "schema.sql"),
-        join(currentDir, "schema.sql"),
-        join(process.cwd(), "schema.sql"),
-        join(process.cwd(), "data", "schema.sql"),
-      ].filter(Boolean) as string[];
-
-      for (const sp of candidatePaths) {
-        if (existsSync(sp)) {
-          try {
-            const ddl = readFileSync(sp, "utf-8");
-            pgliteInstance.exec(ddl).catch(() => {});
-            break;
-          } catch {}
-        }
+  class PGLiteConnection implements DatabaseConnection {
+    async executeQuery<R>(compiledQuery: CompiledQuery): Promise<KyselyQueryResult<R>> {
+      if (schemaInitPromise) {
+        await schemaInitPromise;
       }
-
-      class PGLiteConnection implements DatabaseConnection {
-        async executeQuery<R>(compiledQuery: CompiledQuery): Promise<KyselyQueryResult<R>> {
-          const { sql: sqlStr, parameters } = compiledQuery;
-          const res: any = await pgliteInstance.query(sqlStr, parameters as unknown[]);
-          const rows = (Array.isArray(res?.rows) ? res.rows : (Array.isArray(res) ? res : [])) as R[];
-          return {
-            rows,
-            numAffectedRows: res?.affectedRows !== undefined ? BigInt(res.affectedRows) : undefined,
-          };
-        }
-        async *streamQuery<R>(): AsyncIterableIterator<KyselyQueryResult<R>> {
-          throw new Error("PGLite streamQuery not supported");
-        }
+      if (!pgliteInstance) {
+        return { rows: [] };
       }
-
-      class PGLiteDriver implements Driver {
-        async init(): Promise<void> {}
-        async acquireConnection(): Promise<DatabaseConnection> { return new PGLiteConnection(); }
-        async releaseConnection(): Promise<void> {}
-        async beginTransaction(connection: DatabaseConnection): Promise<void> {
-          await connection.executeQuery({ sql: "BEGIN", parameters: [], query: {} as any });
-        }
-        async commitTransaction(connection: DatabaseConnection): Promise<void> {
-          await connection.executeQuery({ sql: "COMMIT", parameters: [], query: {} as any });
-        }
-        async rollbackTransaction(connection: DatabaseConnection): Promise<void> {
-          await connection.executeQuery({ sql: "ROLLBACK", parameters: [], query: {} as any });
-        }
-        async destroy(): Promise<void> {}
-      }
-
-      return new Kysely<any>({
-        dialect: {
-          createDriver: () => new LoggingDriver(new PGLiteDriver()),
-          createQueryCompiler: () => new PostgresQueryCompiler(),
-          createAdapter: () => new PostgresAdapter(),
-          createIntrospector: (d) => new PostgresIntrospector(d),
-        },
-      });
+      const { sql: sqlStr, parameters } = compiledQuery;
+      const res: any = await pgliteInstance.query(sqlStr, parameters as unknown[]);
+      const rows = (Array.isArray(res?.rows) ? res.rows : (Array.isArray(res) ? res : [])) as R[];
+      const numAffectedRows = res?.rowCount !== undefined ? BigInt(res.rowCount) : (res?.affectedRows !== undefined ? BigInt(res.affectedRows) : (Array.isArray(res) ? BigInt(res.length) : undefined));
+      return {
+        rows,
+        numAffectedRows,
+      };
     }
-  } catch {}
+    async *streamQuery<R>(): AsyncIterableIterator<KyselyQueryResult<R>> {
+      throw new Error("PGLite streamQuery not supported");
+    }
+  }
 
-  // Built-in Bun In-Memory SQLite Bridge
+  class PGLiteDriver implements Driver {
+    async init(): Promise<void> {
+      if (schemaInitPromise) await schemaInitPromise;
+    }
+    async acquireConnection(): Promise<DatabaseConnection> { return new PGLiteConnection(); }
+    async releaseConnection(): Promise<void> {}
+    async beginTransaction(connection: DatabaseConnection): Promise<void> {
+      await connection.executeQuery({ sql: "BEGIN", parameters: [], query: {} as any });
+    }
+    async commitTransaction(connection: DatabaseConnection): Promise<void> {
+      await connection.executeQuery({ sql: "COMMIT", parameters: [], query: {} as any });
+    }
+    async rollbackTransaction(connection: DatabaseConnection): Promise<void> {
+      await connection.executeQuery({ sql: "ROLLBACK", parameters: [], query: {} as any });
+    }
+    async destroy(): Promise<void> {}
+  }
+
   return new Kysely<any>({
     dialect: {
-      createDriver: () => new LoggingDriver(createInMemoryDbDriver()),
+      createDriver: () => new LoggingDriver(new PGLiteDriver()),
       createQueryCompiler: () => new PostgresQueryCompiler(),
       createAdapter: () => new PostgresAdapter(),
       createIntrospector: (d) => new PostgresIntrospector(d),
@@ -364,11 +267,19 @@ export const db = new Proxy({} as Kysely<any>, {
 export async function truncateTables(tableNames: string[]) {
   if (rawPgInstance) {
     for (const tbl of tableNames) {
-      await rawPgInstance.exec('TRUNCATE TABLE "' + tbl + '" CASCADE;');
+      try {
+        await rawPgInstance.exec("TRUNCATE TABLE " + tbl + ";");
+      } catch {
+        try {
+          await rawPgInstance.exec("DELETE FROM " + tbl + ";");
+        } catch {}
+      }
     }
   } else if (dbInstance) {
     for (const tbl of tableNames) {
-      await (dbInstance as any).deleteFrom(tbl).execute();
+      try {
+        await (dbInstance as any).deleteFrom(tbl).execute();
+      } catch {}
     }
   }
 }

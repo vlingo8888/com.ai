@@ -15,6 +15,7 @@
     "build": "bun run build:rust && bun run build:cli"
   },
   "dependencies": {
+    "@pglite/core": "^1.0.0",
     "@types/qrcode-terminal": "^0.12.2",
     "qrcode-terminal": "^0.12.0"
   },

@@ -110,8 +110,8 @@ export async function testCommand(rawArgs: string[] = [], options: TestOptions =
       {
         label: "Database Mode",
         value: hasSchema
-          ? "● In-Memory MockDB (Auto-loaded schema.sql)"
-          : "○ In-Memory Embedded SQLite/PGlite",
+          ? "● In-Memory Postgres MockDB (Auto-loaded schema.sql)"
+          : "○ In-Memory Embedded Postgres (@pglite/core)",
         color: hasSchema ? colors.bold + colors.emerald : colors.yellow,
       },
       {
