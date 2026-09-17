@@ -11,14 +11,15 @@ import {
 } from "../src/commands/db";
 
 describe("Database Schema Generator", () => {
-  it("parses stringified JSON comments into clean human-readable descriptions", () => {
+  it("preserves stringified JSON comments as-is while sanitizing newlines", () => {
     expect(parseJsonComment(null)).toBe(null);
     expect(parseJsonComment("")).toBe(null);
     expect(parseJsonComment("Mô tả bình thường")).toBe("Mô tả bình thường");
-    expect(parseJsonComment('{"title": "Danh sách khách", "description": "Quản lý khách mời"}')).toBe("Danh sách khách - Quản lý khách mời");
-    expect(parseJsonComment('{"label": "Tên khách", "name": "name"}')).toBe("Tên khách");
-    expect(parseJsonComment('{"description": "Ghi chú nhiều dòng\nTiếp theo"}')).toBe("Ghi chú nhiều dòng Tiếp theo");
-    expect(parseJsonComment('["Tag 1", "Tag 2"]')).toBe("Tag 1, Tag 2");
+    expect(parseJsonComment('{"title": "Danh sách khách", "description": "Quản lý khách mời"}')).toBe('{"title": "Danh sách khách", "description": "Quản lý khách mời"}');
+    expect(parseJsonComment('{"label": "Tên khách", "name": "name"}')).toBe('{"label": "Tên khách", "name": "name"}');
+    expect(parseJsonComment('{"description": "Ghi chú nhiều dòng\nTiếp theo"}')).toBe('{"description": "Ghi chú nhiều dòng Tiếp theo"}');
+    expect(parseJsonComment('["Tag 1", "Tag 2"]')).toBe('["Tag 1", "Tag 2"]');
+    expect(parseJsonComment({ label: "Tên", visible: true })).toBe('{"label":"Tên","visible":true}');
   });
 
   it("formats SQL column defaults properly including AST objects", () => {
@@ -153,13 +154,13 @@ describe("Database Schema Generator", () => {
     expect(sqlOutput).toContain('COMMENT ON COLUMN "posts"."id" IS \'Mã bài viết\';');
   });
 
-  it("injects and updates schema in AGENTS.md including comments", () => {
+  it("injects and updates compact schema and tools in AGENTS.md", () => {
     const mockSchema: DatabaseSchema = {
       introspectedAt: "2026-09-17T10:00:00.000Z",
       tables: [
         {
           name: "tasks",
-          comment: "Bảng công việc",
+          comment: '{"label": "Bảng công việc", "description": "Quản lý việc cần làm"}',
           columns: [
             {
               name: "id",
@@ -188,9 +189,11 @@ describe("Database Schema Generator", () => {
     const updated = updateAgentsMarkdown(initialMd, mockSchema);
 
     expect(updated).toContain("<!-- DATABASE_SCHEMA_START -->");
-    expect(updated).toContain("### Table: `tasks`");
-    expect(updated).toContain("> 📝 **Mô tả (Description):** Bảng công việc");
-    expect(updated).toContain("Tiêu đề công việc");
+    expect(updated).toContain("com db list");
+    expect(updated).toContain("com db describe <table_name>");
+    expect(updated).toContain("com db search <keyword>");
+    expect(updated).toContain("`tasks`");
+    expect(updated).toContain("Bảng công việc - Quản lý việc cần làm");
     expect(updated).toContain("<!-- DATABASE_SCHEMA_END -->");
   });
 });

@@ -2,7 +2,13 @@
 import { cloneView } from "../src/commands/clone";
 import { devCommand } from "../src/commands/dev";
 import { buildCommand } from "../src/commands/build";
-import { dbPullCommand } from "../src/commands/db";
+import {
+  dbPullCommand,
+  dbMigrateCommand,
+  dbListCommand,
+  dbDescribeCommand,
+  dbSearchCommand,
+} from "../src/commands/db";
 import { loginCommand, logoutCommand, whoamiCommand } from "../src/commands/login";
 import { logger, colors } from "../src/core/logger";
 import packageJson from "../package.json";
@@ -21,6 +27,10 @@ function printHelp() {
     ${colors.green}dev${colors.reset}                   Start local development server with Hot Reload
     ${colors.green}build${colors.reset}                 Package project for Production or Zalo Mini App
     ${colors.green}db pull | db sync${colors.reset}     Introspect database schema & generate types/db.d.ts for AI
+    ${colors.green}db list | tables${colors.reset}      List all database tables with business descriptions
+    ${colors.green}db describe${colors.reset} ${colors.sky}<table>${colors.reset}   Inspect columns, keys, types, and comments of a table
+    ${colors.green}db search${colors.reset} ${colors.sky}<query>${colors.reset}    Search database tables and columns by keyword
+    ${colors.green}migrate${colors.reset}  ${colors.sky}<sql|file>${colors.reset}  Execute SQL migration and auto-sync database schema
     ${colors.green}version | -v${colors.reset}          Display system, CLI, and runtime engine versions
     ${colors.green}push | sync | save${colors.reset}    Synchronize local changes back to the Cloud
 
@@ -29,8 +39,9 @@ function printHelp() {
     ${colors.yellow}--dir${colors.reset}        ${colors.darkGray}<path>${colors.reset}     Target directory (default: current directory)
     ${colors.yellow}--port, -p${colors.reset}   ${colors.darkGray}<port>${colors.reset}     Port to listen on in dev mode (default: 3000)
     ${colors.yellow}--api${colors.reset}        ${colors.darkGray}<url>${colors.reset}      Custom backend API URL (default: https://base.myworkbeast.com)
-    ${colors.yellow}--url${colors.reset}        ${colors.darkGray}<url>${colors.reset}      Database connection URL for db pull
-    ${colors.yellow}--env${colors.reset}        ${colors.darkGray}<file>${colors.reset}     Custom env file path for db pull
+    ${colors.yellow}--url${colors.reset}        ${colors.darkGray}<url>${colors.reset}      Database connection URL
+    ${colors.yellow}--env${colors.reset}        ${colors.darkGray}<file>${colors.reset}     Custom env file path
+    ${colors.yellow}--json${colors.reset}                 Output results in JSON format (for AI parsing)
     ${colors.yellow}--token${colors.reset}      ${colors.darkGray}<token>${colors.reset}    Pass an access token manually
     ${colors.yellow}--force, -f${colors.reset}            Overwrite existing non-empty directory on clone
     ${colors.yellow}--install${colors.reset}              Explicitly install local node_modules (optional; default is ESM zero-install)
@@ -41,14 +52,20 @@ function printHelp() {
     ${colors.darkGray}# 1. Start local dev server (auto-detects Web or Zalo Mini App)${colors.reset}
     ${colors.cyan}$ com dev${colors.reset}
 
-    ${colors.darkGray}# 2. Introspect database schema and generate types for AI coding${colors.reset}
-    ${colors.cyan}$ com db pull${colors.reset}
+    ${colors.darkGray}# 2. View all database tables and descriptions${colors.reset}
+    ${colors.cyan}$ com db list${colors.reset}
 
-    ${colors.darkGray}# 3. Check CLI and engine versions${colors.reset}
+    ${colors.darkGray}# 3. Inspect a specific table in detail${colors.reset}
+    ${colors.cyan}$ com db describe wellness_assessments${colors.reset}
+
+    ${colors.darkGray}# 4. Search tables/columns by keyword${colors.reset}
+    ${colors.cyan}$ com db search "khảo sát"${colors.reset}
+
+    ${colors.darkGray}# 5. Migrate database with SQL statement and auto-sync schema${colors.reset}
+    ${colors.cyan}$ com migrate "ALTER TABLE users ADD COLUMN phone TEXT;"${colors.reset}
+
+    ${colors.darkGray}# 6. Check CLI and engine versions${colors.reset}
     ${colors.cyan}$ com --version${colors.reset}
-
-    ${colors.darkGray}# 4. Clone View by ID (e.g. 105)${colors.reset}
-    ${colors.cyan}$ com clone 105${colors.reset}
 `);
 }
 
@@ -202,8 +219,52 @@ async function main() {
       let dir: string | undefined;
       let env: string | undefined;
       let dbUrl: string | undefined;
+      let json = false;
 
       for (let i = 1; i < args.length; i++) {
+        if (args[i] === "--dir" && args[i + 1]) {
+          dir = args[++i];
+        } else if (args[i] === "--env" && args[i + 1]) {
+          env = args[++i];
+        } else if (args[i] === "--url" && args[i + 1]) {
+          dbUrl = args[++i];
+        } else if (args[i] === "--json") {
+          json = true;
+        }
+      }
+
+      if (subCommand === "pull" || subCommand === "sync" || subCommand === "introspect") {
+        await dbPullCommand({ dir, env, dbUrl });
+      } else if (subCommand === "list" || subCommand === "tables" || subCommand === "ls") {
+        await dbListCommand({ dir, env, dbUrl, json });
+      } else if (subCommand === "describe" || subCommand === "show" || subCommand === "info" || subCommand === "desc") {
+        const tableName = args[2];
+        await dbDescribeCommand(tableName, { dir, env, dbUrl, json });
+      } else if (subCommand === "search" || subCommand === "find" || subCommand === "grep") {
+        const query = args[2];
+        await dbSearchCommand(query, { dir, env, dbUrl, json });
+      } else if (subCommand === "migrate") {
+        const sqlOrFile = args[2];
+        await dbMigrateCommand(sqlOrFile, { dir, env, dbUrl });
+      } else if (subCommand.startsWith("-")) {
+        await dbPullCommand({ dir, env, dbUrl });
+      } else {
+        logger.error(
+          `Unknown db subcommand: "${subCommand}"`,
+          "Available db subcommands:\n    com db list                  (List all tables)\n    com db describe <table_name> (Inspect a table)\n    com db search <keyword>      (Search tables/columns)\n    com db pull                  (Regenerate types/db.d.ts & schema.sql)\n    com db migrate \"<SQL>\"       (Execute SQL migration)"
+        );
+        process.exit(1);
+      }
+      break;
+    }
+
+    case "migrate": {
+      const sqlOrFile = args[1];
+      let dir: string | undefined;
+      let env: string | undefined;
+      let dbUrl: string | undefined;
+
+      for (let i = 2; i < args.length; i++) {
         if (args[i] === "--dir" && args[i + 1]) {
           dir = args[++i];
         } else if (args[i] === "--env" && args[i + 1]) {
@@ -213,15 +274,7 @@ async function main() {
         }
       }
 
-      if (subCommand === "pull" || subCommand === "sync" || subCommand === "introspect" || subCommand.startsWith("-")) {
-        await dbPullCommand({ dir, env, dbUrl });
-      } else {
-        logger.error(
-          `Unknown db subcommand: "${subCommand}"`,
-          "Usage: com db pull\n    Or: com db sync"
-        );
-        process.exit(1);
-      }
+      await dbMigrateCommand(sqlOrFile, { dir, env, dbUrl });
       break;
     }
 

@@ -28,82 +28,29 @@ export interface DatabaseSchema {
 }
 
 /**
- * Parses table & column comments that may be stored as stringified JSON objects
- * and extracts a clean, human-readable description string without newlines.
+ * Preserves the original comment string (including stringified JSON metadata)
+ * while ensuring it is cleanly formatted on a single line for SQL DDL and JSDoc.
  */
-export function parseJsonComment(raw: any): string | null {
+export function formatComment(raw: any): string | null {
   if (raw === null || raw === undefined) return null;
 
   if (typeof raw === "object") {
-    return extractTextFromJson(raw);
+    try {
+      return JSON.stringify(raw);
+    } catch {
+      return null;
+    }
   }
 
-  let str = String(raw).trim();
-  if (!str) return null;
+  const str = String(raw).trim();
+  if (!str || str.toLowerCase() === "null") return null;
 
-  if ((str.startsWith("{") && str.endsWith("}")) || (str.startsWith("[") && str.endsWith("]"))) {
-    try {
-      const parsed = JSON.parse(str);
-      const text = extractTextFromJson(parsed);
-      if (text) return text;
-    } catch {}
-
-    try {
-      const sanitized = str.replace(/[\n\r\t]/g, " ");
-      const parsed = JSON.parse(sanitized);
-      const text = extractTextFromJson(parsed);
-      if (text) return text;
-    } catch {}
-  }
-
-  // Remove any newline characters and collapse multiple spaces
+  // Collapse newlines and multiple spaces for single-line SQL/JSDoc compatibility
   const clean = str.replace(/\r?\n|\r/g, " ").replace(/\s+/g, " ").trim();
   return clean || null;
 }
 
-function extractTextFromJson(obj: any): string | null {
-  if (!obj || typeof obj !== "object") return null;
-
-  if (Array.isArray(obj)) {
-    const items = obj
-      .map((item) => (typeof item === "string" ? item : extractTextFromJson(item)))
-      .filter(Boolean);
-    return items.length > 0 ? items.join(", ") : null;
-  }
-
-  // Common metadata keys used in fullstack frameworks:
-  const parts: string[] = [];
-  if (obj.title) parts.push(String(obj.title).trim());
-  if (obj.label && obj.label !== obj.title) parts.push(String(obj.label).trim());
-  if (
-    obj.description &&
-    obj.description !== obj.title &&
-    obj.description !== obj.label
-  ) {
-    parts.push(String(obj.description).trim());
-  }
-  if (obj.comment && !parts.includes(obj.comment)) parts.push(String(obj.comment).trim());
-  if (obj.summary && !parts.includes(obj.summary)) parts.push(String(obj.summary).trim());
-  if (obj.note && !parts.includes(obj.note)) parts.push(String(obj.note).trim());
-  if (obj.name && parts.length === 0 && !["Identifier", "Literal", "CallExpression"].includes(obj.name)) {
-    parts.push(String(obj.name).trim());
-  }
-
-  if (parts.length > 0) {
-    return parts.join(" - ").replace(/\r?\n|\r/g, " ").replace(/\s+/g, " ");
-  }
-
-  // Fallback: collect meaningful non-technical string values
-  const stringVals = Object.entries(obj)
-    .filter(([k, v]) => typeof v === "string" && v.trim() && !["type", "dataType", "udtName", "kind"].includes(k))
-    .map(([_, v]) => String(v).trim());
-
-  if (stringVals.length > 0) {
-    return stringVals.join(" - ").replace(/\r?\n|\r/g, " ").replace(/\s+/g, " ");
-  }
-
-  return null;
-}
+export const parseJsonComment = formatComment;
 
 /**
  * Robust formatter for SQL column defaults (handles strings, numbers, Bun.SQL parsed AST objects, stringified AST JSON, and unquoted strings)
@@ -405,6 +352,22 @@ export function toPascalCase(str: string): string {
 }
 
 /**
+ * Formats column data type into clean SQL type for DDL
+ */
+export function formatSqlType(dataType: string, udtName: string): string {
+  const dt = (dataType || "").toUpperCase();
+  const udt = (udtName || "").toLowerCase();
+
+  if (dt === "ARRAY" && udt.startsWith("_")) {
+    return `${udt.slice(1).toUpperCase()}[]`;
+  }
+  if (dt === "USER-DEFINED" && udtName) {
+    return udtName;
+  }
+  return dt || udt.toUpperCase() || "TEXT";
+}
+
+/**
  * Connects to PostgreSQL and extracts schema metadata including table/column comments using native Bun.SQL
  */
 export async function introspectPostgres(dbUrl: string): Promise<DatabaseSchema> {
@@ -412,28 +375,64 @@ export async function introspectPostgres(dbUrl: string): Promise<DatabaseSchema>
   const sql = new Bun.SQL(dbUrl);
 
   try {
-    // 1. Fetch tables
-    const tableRows = await sql`
-      SELECT table_name 
-      FROM information_schema.tables 
-      WHERE table_schema = 'public' 
-        AND table_type = 'BASE TABLE'
-      ORDER BY table_name;
-    `;
+    // 1. Fetch tables (querying comment column from information_schema if available)
+    let tableRows: { table_name: string; comment?: string | null }[] = [];
+    try {
+      tableRows = await sql`
+        SELECT table_name, comment 
+        FROM information_schema.tables 
+        WHERE table_schema = 'public' 
+          AND table_type = 'BASE TABLE'
+        ORDER BY table_name;
+      `;
+    } catch {
+      tableRows = await sql`
+        SELECT table_name 
+        FROM information_schema.tables 
+        WHERE table_schema = 'public' 
+          AND table_type = 'BASE TABLE'
+        ORDER BY table_name;
+      `;
+    }
 
-    // 2. Fetch columns
-    const columnRows = await sql`
-      SELECT 
-        table_name,
-        column_name,
-        data_type,
-        udt_name,
-        is_nullable,
-        column_default
-      FROM information_schema.columns 
-      WHERE table_schema = 'public' 
-      ORDER BY table_name, ordinal_position;
-    `;
+    // 2. Fetch columns (querying comment column from information_schema if available)
+    let columnRows: {
+      table_name: string;
+      column_name: string;
+      data_type: string;
+      udt_name: string;
+      is_nullable: string;
+      column_default: any;
+      comment?: string | null;
+    }[] = [];
+    try {
+      columnRows = await sql`
+        SELECT 
+          table_name,
+          column_name,
+          data_type,
+          udt_name,
+          is_nullable,
+          column_default,
+          comment
+        FROM information_schema.columns 
+        WHERE table_schema = 'public' 
+        ORDER BY table_name, ordinal_position;
+      `;
+    } catch {
+      columnRows = await sql`
+        SELECT 
+          table_name,
+          column_name,
+          data_type,
+          udt_name,
+          is_nullable,
+          column_default
+        FROM information_schema.columns 
+        WHERE table_schema = 'public' 
+        ORDER BY table_name, ordinal_position;
+      `;
+    }
 
     // 3. Fetch primary keys
     const pkRows = await sql`
@@ -466,8 +465,13 @@ export async function introspectPostgres(dbUrl: string): Promise<DatabaseSchema>
         AND tc.table_schema = 'public';
     `;
 
-    // 5. Fetch Table Comments from PostgreSQL catalog
+    // 5. Fetch Table Comments from information_schema and pg_catalog
     let tableCommentsMap = new Map<string, string>();
+    for (const row of tableRows) {
+      if (row.comment) {
+        tableCommentsMap.set(row.table_name, String(row.comment).trim());
+      }
+    }
     try {
       const tableCommentRows = await sql`
         SELECT 
@@ -480,14 +484,19 @@ export async function introspectPostgres(dbUrl: string): Promise<DatabaseSchema>
           AND c.relkind IN ('r', 'p');
       `;
       for (const row of tableCommentRows) {
-        if (row.table_comment) {
+        if (row.table_comment && !tableCommentsMap.has(row.table_name)) {
           tableCommentsMap.set(row.table_name, String(row.table_comment).trim());
         }
       }
     } catch {}
 
-    // 6. Fetch Column Comments from PostgreSQL catalog
+    // 6. Fetch Column Comments from information_schema and pg_catalog
     let columnCommentsMap = new Map<string, string>();
+    for (const col of columnRows) {
+      if (col.comment) {
+        columnCommentsMap.set(`${col.table_name}.${col.column_name}`, String(col.comment).trim());
+      }
+    }
     try {
       const colCommentRows = await sql`
         SELECT 
@@ -504,8 +513,9 @@ export async function introspectPostgres(dbUrl: string): Promise<DatabaseSchema>
           AND NOT a.attisdropped;
       `;
       for (const row of colCommentRows) {
-        if (row.column_comment) {
-          columnCommentsMap.set(`${row.table_name}.${row.column_name}`, String(row.column_comment).trim());
+        const key = `${row.table_name}.${row.column_name}`;
+        if (row.column_comment && !columnCommentsMap.has(key)) {
+          columnCommentsMap.set(key, String(row.column_comment).trim());
         }
       }
     } catch {}
@@ -532,9 +542,14 @@ export async function introspectPostgres(dbUrl: string): Promise<DatabaseSchema>
       const key = `${col.table_name}.${col.column_name}`;
       const isPk = primaryKeyMap.has(key);
       const fk = fkMap.get(key);
-      const rawComment = columnCommentsMap.get(key) || null;
+      const rawComment = columnCommentsMap.get(key) || col.comment || null;
       const comment = parseJsonComment(rawComment);
-      const formattedDefault = formatDefaultValue(col.column_default, col.udt_name);
+      const formattedDefault = formatDefaultValue(
+        col.column_default,
+        col.udt_name,
+        col.data_type,
+        col.column_name
+      );
 
       const colMeta: ColumnMeta = {
         name: col.column_name,
@@ -686,7 +701,8 @@ export function generateSqlDdl(schema: DatabaseSchema): string {
 
     for (let i = 0; i < totalCols; i++) {
       const col = table.columns[i];
-      let def = `  "${col.name}" ${col.dataType.toUpperCase()}`;
+      const sqlType = formatSqlType(col.dataType, col.udtName);
+      let def = `  "${col.name}" ${sqlType}`;
       if (col.columnDefault) {
         def += ` DEFAULT ${col.columnDefault}`;
       }
@@ -742,11 +758,33 @@ export function generateSqlDdl(schema: DatabaseSchema): string {
 /**
  * Injects or updates the Database Schema Overview section in AGENTS.md
  */
+/**
+ * Extracts a clean, human-readable text from either a stringified JSON comment or plain text
+ */
+export function extractHumanComment(raw: string | null): string | null {
+  if (!raw) return null;
+  const str = raw.trim();
+  if (str.startsWith("{") && str.endsWith("}")) {
+    try {
+      const parsed = JSON.parse(str);
+      const parts: string[] = [];
+      if (parsed.label) parts.push(String(parsed.label).trim());
+      if (parsed.description && parsed.description !== parsed.label) parts.push(String(parsed.description).trim());
+      if (parsed.comment && !parts.includes(parsed.comment)) parts.push(String(parsed.comment).trim());
+      if (parts.length > 0) return parts.join(" - ");
+    } catch {}
+  }
+  return str;
+}
+
+/**
+ * Injects or updates the compact Database Schema Overview section in AGENTS.md
+ */
 export function updateAgentsMarkdown(
   existingContent: string,
   schema: DatabaseSchema
 ): string {
-  const sectionHeader = "## 3. Database Schema Overview (Live Synced)";
+  const sectionHeader = "## 3. Database Schema & Migration Guide (Live Synced)";
   const startTag = "<!-- DATABASE_SCHEMA_START -->";
   const endTag = "<!-- DATABASE_SCHEMA_END -->";
 
@@ -755,43 +793,48 @@ export function updateAgentsMarkdown(
     sectionHeader,
     "",
     `> **Last Synced:** \`${schema.introspectedAt}\` | **Total Tables:** \`${schema.tables.length}\``,
-    `> AI coding assistants should reference \`types/db.d.ts\` and the schema table below for exact table structures, column types, and business descriptions when writing database queries with \`import { db } from "core"\`.`,
+    `> When querying database in Server Actions or backend logic, always use \`import { db } from "core"\` and reference \`types/db.d.ts\` for full TypeScript auto-completion.`,
     "",
+    "### ⚡ On-Demand Database Tools for AI Coding Assistants",
+    "To save context tokens and explore tables on-demand, run these CLI commands:",
+    "- **List all tables & descriptions**: `com db list` (or `com db list --json`)",
+    "- **Inspect a specific table**: `com db describe <table_name>` (e.g. `com db describe wellness_assessments`)",
+    "- **Search tables/columns by keyword**: `com db search <keyword>` (e.g. `com db search \"khảo sát\"`)",
+    "- **Execute database migration**: `com migrate \"<SQL_STATEMENT>\"` (or `com migrate ./file.sql`) — automatically runs `com db pull` upon completion.",
+    "",
+    "### 📝 Metadata Comment Standards for Migrations",
+    "When creating or altering tables, always attach stringified JSON metadata comments:",
+    "- **Table Comment**:",
+    "  ```sql",
+    "  COMMENT ON TABLE \"table_name\" IS '{\"label\": \"Tên hiển thị\", \"description\": \"Mô tả nghiệp vụ chi tiết\"}';",
+    "  ```",
+    "- **Column Comment**:",
+    "  ```sql",
+    "  COMMENT ON COLUMN \"table_name\".\"col_name\" IS '{\"label\": \"Tên cột\", \"type\": \"short_text|long_text|number|decimal|boolean|datetime|select|json|foreign_key\", \"required\": true, \"description\": \"Mô tả ý nghĩa\", \"enums\": [{\"label\": \"Nhãn\", \"value\": \"gia_tri\"}]}';",
+    "  ```",
+    "",
+    "### 📊 Compact Database Tables Index",
+    "| Bảng (Table) | Mô tả nghiệp vụ (Description) | Cột (Cols) | Khóa ngoại chính (Foreign Keys) |",
+    "| :--- | :--- | :---: | :--- |",
   ];
 
   for (const table of schema.tables) {
-    schemaDocLines.push(`### Table: \`${table.name}\``);
-    if (table.comment) {
-      schemaDocLines.push(`> 📝 **Mô tả (Description):** ${table.comment}`);
-      schemaDocLines.push("");
-    }
-    schemaDocLines.push("| Cột (Column) | Kiểu (Type) | Nullable | Khóa & Mặc định (Keys & Defaults) | Ghi chú (Description) |");
-    schemaDocLines.push("| :--- | :--- | :---: | :--- | :--- |");
+    const desc = extractHumanComment(table.comment) || "-";
+    const fkSummary =
+      table.columns
+        .filter((c) => c.foreignKey)
+        .map((c) => `\`${c.name}\` -> \`${c.foreignKey!.foreignTable}\``)
+        .join(", ") || "-";
 
-    for (const col of table.columns) {
-      const tsType = mapSqlTypeToTs(col.udtName, col.dataType);
-      const nullableBadge = col.isNullable ? "✅ Có" : "❌ Không";
-      const details: string[] = [];
-
-      if (col.isPrimaryKey) details.push("🔑 **Khóa chính (PK)**");
-      if (col.foreignKey) {
-        details.push(
-          `🔗 FK \`-> ${col.foreignKey.foreignTable}.${col.foreignKey.foreignColumn}\``
-        );
-      }
-      if (col.columnDefault) {
-        details.push(`Default: \`${col.columnDefault}\``);
-      }
-
-      const commentText = col.comment ? col.comment : "-";
-
-      schemaDocLines.push(
-        `| \`${col.name}\` | \`${col.dataType}\` (\`${tsType}\`) | ${nullableBadge} | ${details.join(", ") || "-"} | ${commentText} |`
-      );
-    }
-    schemaDocLines.push("");
+    schemaDocLines.push(
+      `| \`${table.name}\` | ${desc} | ${table.columns.length} | ${fkSummary} |`
+    );
   }
 
+  schemaDocLines.push("");
+  schemaDocLines.push(
+    "> 💡 *Tip: Run `com db describe <table_name>` to inspect full column definitions, constraints, and default values.*"
+  );
   schemaDocLines.push(endTag);
   const newSectionContent = schemaDocLines.join("\n");
 
@@ -940,7 +983,7 @@ export async function dbPullCommand(options: {
       },
       {
         label: "AI Guidelines",
-        value: "AGENTS.md (Schema & Descriptions injected)",
+        value: "AGENTS.md (Compact Schema & Tools injected)",
         color: colors.sky,
       },
     ]);
@@ -951,5 +994,380 @@ export async function dbPullCommand(options: {
   } catch (err: any) {
     logger.error(`Database introspection failed: ${err.message || String(err)}`);
     process.exit(1);
+  }
+}
+
+/**
+ * CLI Command: `com db list` / `com db tables`
+ */
+export async function dbListCommand(options: {
+  dir?: string;
+  env?: string;
+  dbUrl?: string;
+  json?: boolean;
+} = {}): Promise<void> {
+  const projectDir = options.dir || process.cwd();
+  const dbUrl = options.dbUrl || findDatabaseUrl(projectDir, options.env);
+
+  if (!dbUrl) {
+    logger.error(
+      "No DATABASE_URL found!",
+      "Please configure DATABASE_URL in your .env file or provide --url option."
+    );
+    process.exit(1);
+  }
+
+  const schema = await introspectPostgres(dbUrl);
+
+  if (options.json) {
+    const list = schema.tables.map((t) => ({
+      name: t.name,
+      description: extractHumanComment(t.comment),
+      columnsCount: t.columns.length,
+      primaryKey: t.columns.find((c) => c.isPrimaryKey)?.name || null,
+      foreignKeys: t.columns
+        .filter((c) => c.foreignKey)
+        .map(
+          (c) =>
+            `${c.name} -> ${c.foreignKey!.foreignTable}.${c.foreignKey!.foreignColumn}`
+        ),
+      rawComment: t.comment,
+    }));
+    console.log(JSON.stringify(list, null, 2));
+    return;
+  }
+
+  logger.hero();
+  logger.section(`DATABASE TABLES (${schema.tables.length} tables total)`);
+
+  for (const t of schema.tables) {
+    const desc =
+      extractHumanComment(t.comment) ||
+      `${colors.darkGray}(No description)${colors.reset}`;
+    const fks = t.columns.filter((c) => c.foreignKey);
+    const fkInfo =
+      fks.length > 0 ? ` ${colors.darkGray}[${fks.length} FKs]${colors.reset}` : "";
+    console.log(
+      `  ${colors.bold}${colors.green}• ${t.name}${colors.reset} ${colors.darkGray}(${t.columns.length} cols)${colors.reset}${fkInfo}`
+    );
+    console.log(`    ${colors.gray}${desc}${colors.reset}`);
+  }
+  console.log(
+    `\n  ${colors.darkGray}Tip: Run ${colors.cyan}com db describe <table_name>${colors.darkGray} to inspect full column details.${colors.reset}\n`
+  );
+}
+
+/**
+ * CLI Command: `com db describe <table_name>` / `com db show <table_name>`
+ */
+export async function dbDescribeCommand(
+  tableName: string | undefined,
+  options: {
+    dir?: string;
+    env?: string;
+    dbUrl?: string;
+    json?: boolean;
+  } = {}
+): Promise<void> {
+  const projectDir = options.dir || process.cwd();
+  const dbUrl = options.dbUrl || findDatabaseUrl(projectDir, options.env);
+
+  if (!tableName || !tableName.trim()) {
+    logger.error(
+      "Missing required <table_name> argument!",
+      "Usage: com db describe <table_name>\n    Example: com db describe wellness_assessments"
+    );
+    process.exit(1);
+  }
+
+  if (!dbUrl) {
+    logger.error(
+      "No DATABASE_URL found!",
+      "Please configure DATABASE_URL in your .env file or provide --url option."
+    );
+    process.exit(1);
+  }
+
+  const schema = await introspectPostgres(dbUrl);
+  const target = schema.tables.find(
+    (t) => t.name.toLowerCase() === tableName.trim().toLowerCase()
+  );
+
+  if (!target) {
+    const similar = schema.tables
+      .filter((t) =>
+        t.name.toLowerCase().includes(tableName.trim().toLowerCase())
+      )
+      .map((t) => t.name);
+    logger.error(
+      `Table "${tableName}" not found in database!`,
+      similar.length > 0
+        ? `Did you mean one of these?\n    ${similar.join("\n    ")}`
+        : "Run `com db list` to view all available tables."
+    );
+    process.exit(1);
+  }
+
+  if (options.json) {
+    console.log(JSON.stringify(target, null, 2));
+    return;
+  }
+
+  logger.hero();
+  logger.section(`TABLE: ${target.name}`);
+
+  const desc = extractHumanComment(target.comment);
+  if (desc) {
+    console.log(
+      `  ${colors.bold}📝 Description:${colors.reset} ${colors.white}${desc}${colors.reset}\n`
+    );
+  }
+
+  console.log(
+    `  ${colors.bold}${colors.white}COLUMNS (${target.columns.length}):${colors.reset}`
+  );
+  for (const col of target.columns) {
+    const badges: string[] = [];
+    if (col.isPrimaryKey) badges.push(`${colors.yellow}[PK]${colors.reset}`);
+    if (col.foreignKey) {
+      badges.push(
+        `${colors.sky}[FK -> ${col.foreignKey.foreignTable}.${col.foreignKey.foreignColumn}]${colors.reset}`
+      );
+    }
+    if (!col.isNullable && !col.isPrimaryKey) {
+      badges.push(`${colors.red}[NOT NULL]${colors.reset}`);
+    }
+    if (col.columnDefault) {
+      badges.push(
+        `${colors.darkGray}[default: ${col.columnDefault}]${colors.reset}`
+      );
+    }
+
+    const colDesc = extractHumanComment(col.comment);
+    const descText = colDesc ? ` - ${colors.gray}${colDesc}${colors.reset}` : "";
+    const badgeText = badges.length > 0 ? ` ${badges.join(" ")}` : "";
+
+    console.log(
+      `  • ${colors.bold}${colors.green}${col.name}${colors.reset} ${colors.cyan}(${col.dataType})${colors.reset}${badgeText}${descText}`
+    );
+  }
+  console.log("");
+}
+
+/**
+ * CLI Command: `com db search <query>` / `com db find <query>`
+ */
+export async function dbSearchCommand(
+  query: string | undefined,
+  options: {
+    dir?: string;
+    env?: string;
+    dbUrl?: string;
+    json?: boolean;
+  } = {}
+): Promise<void> {
+  const projectDir = options.dir || process.cwd();
+  const dbUrl = options.dbUrl || findDatabaseUrl(projectDir, options.env);
+
+  if (!query || !query.trim()) {
+    logger.error(
+      "Missing search query!",
+      "Usage: com db search <keyword>\n    Example: com db search \"khảo sát\""
+    );
+    process.exit(1);
+  }
+
+  if (!dbUrl) {
+    logger.error(
+      "No DATABASE_URL found!",
+      "Please configure DATABASE_URL in your .env file or provide --url option."
+    );
+    process.exit(1);
+  }
+
+  const q = query.trim().toLowerCase();
+  const schema = await introspectPostgres(dbUrl);
+
+  const matchedTables: {
+    table: TableMeta;
+    matchedColumns: ColumnMeta[];
+    matchType: "name" | "comment" | "column";
+  }[] = [];
+
+  for (const t of schema.tables) {
+    const tableNameMatch = t.name.toLowerCase().includes(q);
+    const tableCommentMatch = (t.comment || "").toLowerCase().includes(q);
+    const matchedCols = t.columns.filter(
+      (c) =>
+        c.name.toLowerCase().includes(q) ||
+        (c.comment || "").toLowerCase().includes(q)
+    );
+
+    if (tableNameMatch || tableCommentMatch || matchedCols.length > 0) {
+      matchedTables.push({
+        table: t,
+        matchedColumns: matchedCols,
+        matchType: tableNameMatch
+          ? "name"
+          : tableCommentMatch
+          ? "comment"
+          : "column",
+      });
+    }
+  }
+
+  if (options.json) {
+    console.log(JSON.stringify(matchedTables, null, 2));
+    return;
+  }
+
+  logger.hero();
+  logger.section(`DATABASE SEARCH: "${query}" (${matchedTables.length} matches)`);
+
+  if (matchedTables.length === 0) {
+    logger.info(
+      `No tables or columns matching "${query}". Run \`com db list\` to view all tables.`
+    );
+    return;
+  }
+
+  for (const item of matchedTables) {
+    const desc = extractHumanComment(item.table.comment) || "(No description)";
+    console.log(
+      `\n  ${colors.bold}${colors.green}📋 Table: ${item.table.name}${colors.reset}`
+    );
+    console.log(`     ${colors.gray}Description: ${desc}${colors.reset}`);
+
+    if (item.matchedColumns.length > 0) {
+      console.log(
+        `     ${colors.cyan}Matching Columns (${item.matchedColumns.length}):${colors.reset}`
+      );
+      for (const col of item.matchedColumns) {
+        const colDesc = extractHumanComment(col.comment) || "-";
+        console.log(
+          `       • ${colors.bold}${col.name}${colors.reset} (${col.dataType}): ${colors.gray}${colDesc}${colors.reset}`
+        );
+      }
+    }
+  }
+  console.log(
+    `\n  ${colors.darkGray}Tip: Run ${colors.cyan}com db describe <table_name>${colors.darkGray} for full details.${colors.reset}\n`
+  );
+}
+
+/**
+ * CLI Command: `com migrate <SQL|file.sql>` or `com db migrate <SQL|file.sql>`
+ * Executes custom SQL migrations and automatically triggers `com db pull` to refresh types and schemas.
+ */
+export async function dbMigrateCommand(
+  sqlOrFile: string | undefined,
+  options: {
+    dir?: string;
+    env?: string;
+    dbUrl?: string;
+  } = {}
+): Promise<void> {
+  const projectDir = options.dir || process.cwd();
+  const dbUrl = options.dbUrl || findDatabaseUrl(projectDir, options.env);
+
+  logger.hero();
+  logger.section("DATABASE MIGRATION & AUTO-SYNC");
+
+  if (!sqlOrFile || !sqlOrFile.trim()) {
+    logger.error(
+      "Missing SQL statement or migration file path!",
+      `Usage:
+    com migrate "<SQL_STATEMENT>"
+    com migrate ./migrations/001_create_table.sql
+    com db migrate "<SQL_STATEMENT>"`
+    );
+    process.exit(1);
+  }
+
+  if (!dbUrl) {
+    logger.error(
+      "No DATABASE_URL or POSTGRES_URL found!",
+      "Please configure DATABASE_URL in your .env file or provide --url option."
+    );
+    process.exit(1);
+  }
+
+  let sqlContent = sqlOrFile.trim();
+  let isFilePath = false;
+  const potentialPath = join(projectDir, sqlContent);
+
+  if (existsSync(sqlContent)) {
+    isFilePath = true;
+    sqlContent = readFileSync(sqlContent, "utf-8");
+  } else if (existsSync(potentialPath)) {
+    isFilePath = true;
+    sqlContent = readFileSync(potentialPath, "utf-8");
+  }
+
+  if (!sqlContent.trim()) {
+    logger.error("Migration SQL content is empty!");
+    process.exit(1);
+  }
+
+  const maskedUrl = dbUrl.replace(/:([^:@]+)@/, ":****@");
+  logger.info(`Target database: ${colors.sky}${maskedUrl}${colors.reset}`);
+  if (isFilePath) {
+    logger.info(`Executing migration file: ${colors.yellow}${sqlOrFile}${colors.reset}`);
+  } else {
+    logger.info(`Executing SQL statement(s)...`);
+  }
+
+  // @ts-ignore - Bun.SQL is built-in
+  const sql = new Bun.SQL(dbUrl);
+
+  try {
+    // Execute SQL migration
+    await sql.unsafe(sqlContent);
+    logger.success("Database migration executed successfully!");
+  } catch (err: any) {
+    logger.error(
+      `Migration failed: ${err.message || String(err)}`,
+      "Please verify your SQL syntax, table/column names, and constraints."
+    );
+    process.exit(1);
+  } finally {
+    try {
+      await sql.close();
+    } catch {}
+  }
+
+  // Automatically trigger db pull to refresh types/db.d.ts, schema.sql, and AGENTS.md
+  logger.info(`Auto-synchronizing database schema & types...`);
+  try {
+    const result = await introspectAndGenerateSchema(projectDir, dbUrl);
+    logger.card("MIGRATION & SYNC COMPLETE", [
+      {
+        label: "Migration Status",
+        value: "Applied successfully",
+        color: colors.bold + colors.emerald,
+      },
+      {
+        label: "Total Tables",
+        value: `${result.tableCount} tables`,
+        color: colors.sky,
+      },
+      {
+        label: "TypeScript Types",
+        value: "types/db.d.ts (updated)",
+        color: colors.cyan,
+      },
+      {
+        label: "SQL Schema",
+        value: "schema.sql (updated)",
+        color: colors.yellow,
+      },
+      {
+        label: "AI Guidelines",
+        value: "AGENTS.md (updated)",
+        color: colors.emerald,
+      },
+    ]);
+  } catch (err: any) {
+    logger.warn(`Migration succeeded, but auto db pull failed: ${err.message || String(err)}`);
   }
 }
