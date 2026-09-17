@@ -935,7 +935,7 @@ export async function introspectAndGenerateSchema(
       ? readFileSync(antigravityRulesPath, "utf-8")
       : (existsSync(agentsGuidePath) ? readFileSync(agentsGuidePath, "utf-8") : ""));
 
-  if (!agentsContent || !agentsContent.includes("Clean Architecture & AI Coding Guidelines") || !agentsContent.includes("Testing Standards")) {
+  if (!agentsContent || !agentsContent.includes("CRITICAL INVIOLABLE MANDATES") || !agentsContent.includes("@pglite/core")) {
     const { generateAgentsGuide } = await import("../templates/ai_guidelines");
     const { getLocalViewConfig } = await import("../core/config");
     const localView = getLocalViewConfig(projectDir);

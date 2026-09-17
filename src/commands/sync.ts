@@ -139,7 +139,7 @@ export async function syncCommand(options: SyncOptions = {}): Promise<SyncResult
       ? readFileSync(antigravityRulesPath, "utf-8")
       : (existsSync(agentsPath) ? readFileSync(agentsPath, "utf-8") : ""));
 
-  if (!currentAgents || !currentAgents.includes("Testing Standards") || !currentAgents.includes("Clean Architecture & AI Coding Guidelines")) {
+  if (!currentAgents || !currentAgents.includes("CRITICAL INVIOLABLE MANDATES") || !currentAgents.includes("@pglite/core")) {
     const fullTemplate = generateAgentsGuide(projectName, viewId || 1);
     currentAgents = fullTemplate;
   }
