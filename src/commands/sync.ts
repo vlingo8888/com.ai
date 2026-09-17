@@ -125,12 +125,19 @@ export async function syncCommand(options: SyncOptions = {}): Promise<SyncResult
     }
   }
 
-  // 2. Ensure .antigravityrules & AGENTS.md exist & are up to date with full guidelines
+  // 2. Ensure .agents/rules, .agent/rules, .antigravityrules & AGENTS.md exist & are up to date with full guidelines
+  const agentsDir = join(projectDir, ".agents", "rules");
+  const agentLegacyDir = join(projectDir, ".agent", "rules");
+  const agentsRulePath = join(agentsDir, "architecture.md");
+  const agentLegacyRulePath = join(agentLegacyDir, "architecture.md");
   const antigravityRulesPath = join(projectDir, ".antigravityrules");
   const agentsPath = join(projectDir, "AGENTS.md");
-  let currentAgents = existsSync(antigravityRulesPath)
-    ? readFileSync(antigravityRulesPath, "utf-8")
-    : (existsSync(agentsPath) ? readFileSync(agentsPath, "utf-8") : "");
+
+  let currentAgents = existsSync(agentsRulePath)
+    ? readFileSync(agentsRulePath, "utf-8")
+    : (existsSync(antigravityRulesPath)
+      ? readFileSync(antigravityRulesPath, "utf-8")
+      : (existsSync(agentsPath) ? readFileSync(agentsPath, "utf-8") : ""));
 
   if (!currentAgents || !currentAgents.includes("Testing Standards") || !currentAgents.includes("Clean Architecture & AI Coding Guidelines")) {
     const fullTemplate = generateAgentsGuide(projectName, viewId || 1);
@@ -145,6 +152,15 @@ export async function syncCommand(options: SyncOptions = {}): Promise<SyncResult
       currentAgents = updateAgentsMarkdown(currentAgents, schema);
     } catch {}
   }
+
+  // Primary Antigravity native workspace rules (.agents/rules & .agent/rules)
+  try {
+    if (!existsSync(agentsDir)) mkdirSync(agentsDir, { recursive: true });
+    if (!existsSync(agentLegacyDir)) mkdirSync(agentLegacyDir, { recursive: true });
+    await Bun.write(agentsRulePath, currentAgents);
+    await Bun.write(agentLegacyRulePath, currentAgents);
+  } catch {}
+
   await Bun.write(antigravityRulesPath, currentAgents);
   await Bun.write(agentsPath, currentAgents);
 

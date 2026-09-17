@@ -38,6 +38,8 @@ describe("Com Sync Command", () => {
     expect(syncResult).toBeDefined();
     expect(syncResult.agentsPath).toBe(join(testDir, "AGENTS.md"));
     expect(existsSync(syncResult.agentsPath)).toBe(true);
+    expect(existsSync(join(testDir, ".agents", "rules", "architecture.md"))).toBe(true);
+    expect(existsSync(join(testDir, ".agent", "rules", "architecture.md"))).toBe(true);
     expect(existsSync(join(testDir, ".antigravityrules"))).toBe(true);
     expect(existsSync(join(testDir, "CLAUDE.md"))).toBe(true);
     expect(existsSync(join(testDir, ".cursorrules"))).toBe(true);

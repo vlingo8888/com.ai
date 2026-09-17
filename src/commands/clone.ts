@@ -136,10 +136,23 @@ export async function cloneView(viewIdArg: string | number, options: CloneOption
     await Bun.write(readmePath, readmeContent);
   }
 
-  // Generate .antigravityrules & AGENTS.md (Comprehensive AI Assistant Guidelines & Architecture Guide)
+  // Generate .agents/rules, .agent/rules, .antigravityrules & AGENTS.md
+  const agentsDir = join(targetDir, ".agents", "rules");
+  const agentLegacyDir = join(targetDir, ".agent", "rules");
+  const agentsRulePath = join(agentsDir, "architecture.md");
+  const agentLegacyRulePath = join(agentLegacyDir, "architecture.md");
   const antigravityRulesPath = join(targetDir, ".antigravityrules");
   const agentsGuidePath = join(targetDir, "AGENTS.md");
   const agentsGuideContent = generateAgentsGuide(viewDetails?.name || `View #${viewId}`, viewId);
+
+  try {
+    const { mkdirSync } = await import("fs");
+    if (!existsSync(agentsDir)) mkdirSync(agentsDir, { recursive: true });
+    if (!existsSync(agentLegacyDir)) mkdirSync(agentLegacyDir, { recursive: true });
+    await Bun.write(agentsRulePath, agentsGuideContent);
+    await Bun.write(agentLegacyRulePath, agentsGuideContent);
+  } catch {}
+
   await Bun.write(antigravityRulesPath, agentsGuideContent);
   await Bun.write(agentsGuidePath, agentsGuideContent);
 
