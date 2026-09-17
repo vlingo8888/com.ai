@@ -160,10 +160,14 @@ export function mapSqlTypeToTs(udtName: string, dataType: string): string {
  * Converts snake_case or kebab-case table names to PascalCase for TypeScript interface names
  */
 export function toPascalCase(str: string): string {
-  return str
+  let res = str
     .replace(/[^a-zA-Z0-9]+(.)/g, (_, chr) => chr.toUpperCase())
     .replace(/^[a-z]/, (chr) => chr.toUpperCase())
     .replace(/[^a-zA-Z0-9]/g, "");
+  if (!res || /^[0-9]/.test(res)) {
+    res = `Table${res}`;
+  }
+  return res;
 }
 
 /**
@@ -373,7 +377,11 @@ export function generateTypeScriptTypes(schema: DatabaseSchema): string {
 
       let finalType: string;
       if (hasDefaultOrGenerated) {
-        finalType = `Generated<${baseTsType}>`;
+        if (col.isNullable && !col.isPrimaryKey) {
+          finalType = `Generated<${baseTsType} | null>`;
+        } else {
+          finalType = `Generated<${baseTsType}>`;
+        }
       } else if (col.isNullable) {
         finalType = `${baseTsType} | null`;
       } else {
@@ -400,7 +408,10 @@ export function generateTypeScriptTypes(schema: DatabaseSchema): string {
       if (commentParts.length > 0) {
         lines.push(`  /** ${commentParts.join(" | ")} */`);
       }
-      lines.push(`  ${col.name}: ${finalType};`);
+
+      const isValidIdent = /^[a-zA-Z_$][a-zA-Z0-9_$]*$/.test(col.name);
+      const propKey = isValidIdent ? col.name : JSON.stringify(col.name);
+      lines.push(`  ${propKey}: ${finalType};`);
     }
 
     lines.push("}");
@@ -426,11 +437,11 @@ export function generateSqlDdl(schema: DatabaseSchema): string {
 
     for (const col of table.columns) {
       let def = `  "${col.name}" ${col.dataType.toUpperCase()}`;
-      if (!col.isNullable && !col.isPrimaryKey) {
-        def += " NOT NULL";
-      }
       if (col.columnDefault) {
         def += ` DEFAULT ${col.columnDefault}`;
+      }
+      if (!col.isNullable && !col.isPrimaryKey) {
+        def += " NOT NULL";
       }
       if (col.isPrimaryKey) {
         def += " PRIMARY KEY";
