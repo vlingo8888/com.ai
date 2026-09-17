@@ -8,6 +8,7 @@ export interface ColumnMeta {
   udtName: string;
   isNullable: boolean;
   columnDefault: string | null;
+  comment: string | null;
   isPrimaryKey: boolean;
   foreignKey?: {
     foreignTable: string;
@@ -17,12 +18,70 @@ export interface ColumnMeta {
 
 export interface TableMeta {
   name: string;
+  comment: string | null;
   columns: ColumnMeta[];
 }
 
 export interface DatabaseSchema {
   tables: TableMeta[];
   introspectedAt: string;
+}
+
+/**
+ * Robust formatter for SQL column defaults (handles strings, numbers, and Bun.SQL parsed AST objects)
+ */
+export function formatDefaultValue(val: any): string | null {
+  if (val === null || val === undefined) return null;
+
+  // If val is an AST object parsed by Bun.SQL or database driver
+  if (typeof val === "object") {
+    // 1. Identifier node (e.g. { type: "Identifier", name: "CURRENT_TIMESTAMP" } or { name: "now" })
+    if (val.type === "Identifier" || val.name || val.identifier) {
+      const name = String(val.name || val.identifier || "").trim();
+      const lower = name.toLowerCase();
+      if (lower === "now") return "now()";
+      if (lower === "current_timestamp") return "CURRENT_TIMESTAMP";
+      if (lower === "current_date") return "CURRENT_DATE";
+      if (lower === "current_time") return "CURRENT_TIME";
+      if (lower === "gen_random_uuid") return "gen_random_uuid()";
+      return name;
+    }
+
+    // 2. CallExpression / Function call node
+    if (val.type === "CallExpression" || val.callee) {
+      const callee = typeof val.callee === "object" ? val.callee.name || "fn" : val.callee;
+      const argsList = Array.isArray(val.args || val.arguments)
+        ? (val.args || val.arguments).map(formatDefaultValue).filter(Boolean).join(", ")
+        : "";
+      return `${callee}(${argsList})`;
+    }
+
+    // 3. Literal node
+    if (val.type === "Literal" || val.value !== undefined) {
+      if (typeof val.value === "string") return `'${val.value.replace(/'/g, "''")}'`;
+      return String(val.value);
+    }
+
+    // 4. Raw expression or SQL string
+    if (val.raw) return String(val.raw).trim().replace(/\r?\n|\r/g, " ");
+    if (val.sql) return String(val.sql).trim().replace(/\r?\n|\r/g, " ");
+
+    // Fallback for object: clean single line JSON
+    return JSON.stringify(val);
+  }
+
+  let str = String(val).trim();
+
+  // If string contains JSON AST representation (e.g. '{"type":"Identifier","name":"now"}')
+  if (str.startsWith("{") && str.endsWith("}")) {
+    try {
+      const parsed = JSON.parse(str);
+      return formatDefaultValue(parsed);
+    } catch {}
+  }
+
+  // Ensure single line string
+  return str.replace(/\r?\n|\r/g, " ");
 }
 
 /**
@@ -108,7 +167,7 @@ export function toPascalCase(str: string): string {
 }
 
 /**
- * Connects to PostgreSQL and extracts schema metadata using native Bun.SQL
+ * Connects to PostgreSQL and extracts schema metadata including table/column comments using native Bun.SQL
  */
 export async function introspectPostgres(dbUrl: string): Promise<DatabaseSchema> {
   // @ts-ignore - Bun.SQL is built-in in Bun 1.2+
@@ -169,6 +228,48 @@ export async function introspectPostgres(dbUrl: string): Promise<DatabaseSchema>
         AND tc.table_schema = 'public';
     `;
 
+    // 5. Fetch Table Comments from PostgreSQL catalog
+    let tableCommentsMap = new Map<string, string>();
+    try {
+      const tableCommentRows = await sql`
+        SELECT 
+          c.relname AS table_name,
+          pg_catalog.obj_description(c.oid, 'pg_class') AS table_comment
+        FROM pg_catalog.pg_class c
+        JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = 'public' 
+          AND c.relkind = 'r';
+      `;
+      for (const row of tableCommentRows) {
+        if (row.table_comment) {
+          tableCommentsMap.set(row.table_name, String(row.table_comment).trim());
+        }
+      }
+    } catch {}
+
+    // 6. Fetch Column Comments from PostgreSQL catalog
+    let columnCommentsMap = new Map<string, string>();
+    try {
+      const colCommentRows = await sql`
+        SELECT 
+          c.relname AS table_name,
+          a.attname AS column_name,
+          pg_catalog.col_description(c.oid, a.attnum) AS column_comment
+        FROM pg_catalog.pg_class c
+        JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+        JOIN pg_catalog.pg_attribute a ON a.attrelid = c.oid
+        WHERE n.nspname = 'public'
+          AND c.relkind = 'r'
+          AND a.attnum > 0
+          AND NOT a.attisdropped;
+      `;
+      for (const row of colCommentRows) {
+        if (row.column_comment) {
+          columnCommentsMap.set(`${row.table_name}.${row.column_name}`, String(row.column_comment).trim());
+        }
+      }
+    } catch {}
+
     const primaryKeyMap = new Set<string>();
     for (const row of pkRows) {
       primaryKeyMap.add(`${row.table_name}.${row.column_name}`);
@@ -191,13 +292,16 @@ export async function introspectPostgres(dbUrl: string): Promise<DatabaseSchema>
       const key = `${col.table_name}.${col.column_name}`;
       const isPk = primaryKeyMap.has(key);
       const fk = fkMap.get(key);
+      const comment = columnCommentsMap.get(key) || null;
+      const formattedDefault = formatDefaultValue(col.column_default);
 
       const colMeta: ColumnMeta = {
         name: col.column_name,
         dataType: col.data_type,
         udtName: col.udt_name,
         isNullable: col.is_nullable === "YES",
-        columnDefault: col.column_default,
+        columnDefault: formattedDefault,
+        comment,
         isPrimaryKey: isPk,
         foreignKey: fk,
       };
@@ -210,7 +314,8 @@ export async function introspectPostgres(dbUrl: string): Promise<DatabaseSchema>
 
     const tables: TableMeta[] = [];
     for (const [name, columns] of tablesMap.entries()) {
-      tables.push({ name, columns });
+      const tableComment = tableCommentsMap.get(name) || null;
+      tables.push({ name, comment: tableComment, columns });
     }
 
     return {
@@ -242,6 +347,9 @@ export function generateTypeScriptTypes(schema: DatabaseSchema): string {
 
   for (const table of schema.tables) {
     const interfaceName = `${toPascalCase(table.name)}Table`;
+    if (table.comment) {
+      lines.push(`  /** ${table.comment.replace(/\*\//g, "* /")} */`);
+    }
     lines.push(`  ${JSON.stringify(table.name)}: ${interfaceName};`);
   }
 
@@ -250,6 +358,11 @@ export function generateTypeScriptTypes(schema: DatabaseSchema): string {
 
   for (const table of schema.tables) {
     const interfaceName = `${toPascalCase(table.name)}Table`;
+    if (table.comment) {
+      lines.push("/**");
+      lines.push(` * 📋 ${table.comment.replace(/\*\//g, "* /")}`);
+      lines.push(" */");
+    }
     lines.push(`export interface ${interfaceName} {`);
 
     for (const col of table.columns) {
@@ -267,16 +380,21 @@ export function generateTypeScriptTypes(schema: DatabaseSchema): string {
         finalType = baseTsType;
       }
 
-      // Add JSDoc comment if foreign key or primary key
+      // Build JSDoc comment with comment description, foreign keys, and defaults
       const commentParts: string[] = [];
-      if (col.isPrimaryKey) commentParts.push("Primary Key");
+      if (col.comment) {
+        commentParts.push(`📝 ${col.comment.replace(/\*\//g, "* /")}`);
+      }
+      if (col.isPrimaryKey) {
+        commentParts.push("🔑 Primary Key");
+      }
       if (col.foreignKey) {
         commentParts.push(
-          `References ${col.foreignKey.foreignTable}.${col.foreignKey.foreignColumn}`
+          `🔗 FK -> ${col.foreignKey.foreignTable}.${col.foreignKey.foreignColumn}`
         );
       }
       if (col.columnDefault) {
-        commentParts.push(`Default: ${col.columnDefault}`);
+        commentParts.push(`Default: ${col.columnDefault.replace(/\*\//g, "* /")}`);
       }
 
       if (commentParts.length > 0) {
@@ -293,7 +411,7 @@ export function generateTypeScriptTypes(schema: DatabaseSchema): string {
 }
 
 /**
- * Generates SQL DDL schema file (schema.sql)
+ * Generates SQL DDL schema file (schema.sql) with table & column comments
  */
 export function generateSqlDdl(schema: DatabaseSchema): string {
   const lines: string[] = [];
@@ -325,6 +443,23 @@ export function generateSqlDdl(schema: DatabaseSchema): string {
 
     lines.push(colDefs.join(",\n"));
     lines.push(");");
+
+    // Add table comment
+    if (table.comment) {
+      const escapedComment = table.comment.replace(/'/g, "''");
+      lines.push(`COMMENT ON TABLE "${table.name}" IS '${escapedComment}';`);
+    }
+
+    // Add column comments
+    for (const col of table.columns) {
+      if (col.comment) {
+        const escapedColComment = col.comment.replace(/'/g, "''");
+        lines.push(
+          `COMMENT ON COLUMN "${table.name}"."${col.name}" IS '${escapedColComment}';`
+        );
+      }
+    }
+
     lines.push("");
   }
 
@@ -347,21 +482,25 @@ export function updateAgentsMarkdown(
     sectionHeader,
     "",
     `> **Last Synced:** \`${schema.introspectedAt}\` | **Total Tables:** \`${schema.tables.length}\``,
-    `> AI coding assistants can reference this live schema and use strongly-typed queries with \`import { db } from "core"\`.`,
+    `> AI coding assistants should reference \`types/db.d.ts\` and the schema table below for exact table structures, column types, and business descriptions when writing database queries with \`import { db } from "core"\`.`,
     "",
   ];
 
   for (const table of schema.tables) {
     schemaDocLines.push(`### Table: \`${table.name}\``);
-    schemaDocLines.push("| Column | Type | Nullable | Details |");
-    schemaDocLines.push("| :--- | :--- | :---: | :--- |");
+    if (table.comment) {
+      schemaDocLines.push(`> 📝 **Mô tả (Description):** ${table.comment}`);
+      schemaDocLines.push("");
+    }
+    schemaDocLines.push("| Cột (Column) | Kiểu (Type) | Nullable | Khóa & Mặc định (Keys & Defaults) | Ghi chú (Description) |");
+    schemaDocLines.push("| :--- | :--- | :---: | :--- | :--- |");
 
     for (const col of table.columns) {
       const tsType = mapSqlTypeToTs(col.udtName, col.dataType);
-      const nullableBadge = col.isNullable ? "✅ Yes" : "❌ No";
+      const nullableBadge = col.isNullable ? "✅ Có" : "❌ Không";
       const details: string[] = [];
 
-      if (col.isPrimaryKey) details.push("🔑 **Primary Key**");
+      if (col.isPrimaryKey) details.push("🔑 **Khóa chính (PK)**");
       if (col.foreignKey) {
         details.push(
           `🔗 FK \`-> ${col.foreignKey.foreignTable}.${col.foreignKey.foreignColumn}\``
@@ -371,8 +510,10 @@ export function updateAgentsMarkdown(
         details.push(`Default: \`${col.columnDefault}\``);
       }
 
+      const commentText = col.comment ? col.comment : "-";
+
       schemaDocLines.push(
-        `| \`${col.name}\` | \`${col.dataType}\` (\`${tsType}\`) | ${nullableBadge} | ${details.join(", ") || "-"} |`
+        `| \`${col.name}\` | \`${col.dataType}\` (\`${tsType}\`) | ${nullableBadge} | ${details.join(", ") || "-"} | ${commentText} |`
       );
     }
     schemaDocLines.push("");
@@ -516,23 +657,23 @@ export async function dbPullCommand(options: {
       },
       {
         label: "TypeScript Types",
-        value: "types/db.d.ts (Kysely typed)",
+        value: "types/db.d.ts (Kysely typed + Comments)",
         color: colors.cyan,
       },
       {
         label: "SQL Schema",
-        value: "schema.sql (DDL)",
+        value: "schema.sql (DDL + Table/Column Comments)",
         color: colors.yellow,
       },
       {
         label: "AI Guidelines",
-        value: "AGENTS.md (Schema injected)",
+        value: "AGENTS.md (Schema & Descriptions injected)",
         color: colors.sky,
       },
     ]);
 
     logger.success(
-      `Successfully synced database schema! AI coding assistants (Antigravity/Cursor/Copilot) now have full visibility into your database.`
+      `Successfully synced database schema! AI coding assistants (Antigravity/Cursor/Copilot) now have full visibility and business comments for your database.`
     );
   } catch (err: any) {
     logger.error(`Database introspection failed: ${err.message || String(err)}`);

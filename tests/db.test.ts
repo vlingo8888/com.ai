@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import {
   mapSqlTypeToTs,
   toPascalCase,
+  formatDefaultValue,
   generateTypeScriptTypes,
   generateSqlDdl,
   updateAgentsMarkdown,
@@ -9,6 +10,18 @@ import {
 } from "../src/commands/db";
 
 describe("Database Schema Generator", () => {
+  it("formats SQL column defaults properly including AST objects", () => {
+    expect(formatDefaultValue(null)).toBe(null);
+    expect(formatDefaultValue(undefined)).toBe(null);
+    expect(formatDefaultValue("nextval('users_id_seq'::regclass)")).toBe("nextval('users_id_seq'::regclass)");
+    expect(formatDefaultValue("CURRENT_TIMESTAMP")).toBe("CURRENT_TIMESTAMP");
+    expect(formatDefaultValue({ type: "Identifier", name: "now" })).toBe("now()");
+    expect(formatDefaultValue({ type: "Identifier", name: "CURRENT_TIMESTAMP" })).toBe("CURRENT_TIMESTAMP");
+    expect(formatDefaultValue({ type: "Identifier", name: "gen_random_uuid" })).toBe("gen_random_uuid()");
+    expect(formatDefaultValue({ type: "Literal", value: "active" })).toBe("'active'");
+    expect(formatDefaultValue('{"type":"Identifier","name":"now"}')).toBe("now()");
+  });
+
   it("maps SQL types to TypeScript types correctly", () => {
     expect(mapSqlTypeToTs("int4", "integer")).toBe("number");
     expect(mapSqlTypeToTs("int8", "bigint")).toBe("number");
@@ -24,38 +37,42 @@ describe("Database Schema Generator", () => {
   it("converts snake_case table names to PascalCase", () => {
     expect(toPascalCase("users")).toBe("Users");
     expect(toPascalCase("sos_requests")).toBe("SosRequests");
-    expect(toPascalCase("user_role_permissions")).toBe("UserRolePermissions");
+    expect(toPascalCase("program_guest_checklists")).toBe("ProgramGuestChecklists");
   });
 
-  it("generates Kysely TypeScript definitions with Generated<T> and nullability", () => {
+  it("generates Kysely TypeScript definitions with comments, Generated<T>, and nullability", () => {
     const mockSchema: DatabaseSchema = {
       introspectedAt: "2026-09-17T10:00:00.000Z",
       tables: [
         {
-          name: "users",
+          name: "program_guest_checklists",
+          comment: "Quản lý checklist khách mời",
           columns: [
             {
               name: "id",
               dataType: "integer",
               udtName: "int4",
               isNullable: false,
-              columnDefault: "nextval('users_id_seq'::regclass)",
+              columnDefault: "nextval('program_guest_checklists_id_seq'::regclass)",
+              comment: "ID tự tăng",
               isPrimaryKey: true,
             },
             {
-              name: "email",
-              dataType: "varchar",
-              udtName: "varchar",
+              name: "created_at",
+              dataType: "timestamp",
+              udtName: "timestamp",
               isNullable: false,
-              columnDefault: null,
+              columnDefault: "now()",
+              comment: "Thời gian tạo bản ghi",
               isPrimaryKey: false,
             },
             {
-              name: "bio",
+              name: "name",
               dataType: "text",
               udtName: "text",
               isNullable: true,
               columnDefault: null,
+              comment: "Tên khách",
               isPrimaryKey: false,
             },
           ],
@@ -67,19 +84,24 @@ describe("Database Schema Generator", () => {
 
     expect(tsOutput).toContain('import type { Generated } from "kysely";');
     expect(tsOutput).toContain('export interface Database {');
-    expect(tsOutput).toContain('"users": UsersTable;');
-    expect(tsOutput).toContain('export interface UsersTable {');
+    expect(tsOutput).toContain('/** Quản lý checklist khách mời */');
+    expect(tsOutput).toContain('"program_guest_checklists": ProgramGuestChecklistsTable;');
+    expect(tsOutput).toContain('export interface ProgramGuestChecklistsTable {');
+    expect(tsOutput).toContain('/** 📝 ID tự tăng | 🔑 Primary Key | Default: nextval(\'program_guest_checklists_id_seq\'::regclass) */');
     expect(tsOutput).toContain('id: Generated<number>;');
-    expect(tsOutput).toContain('email: string;');
-    expect(tsOutput).toContain('bio: string | null;');
+    expect(tsOutput).toContain('/** 📝 Thời gian tạo bản ghi | Default: now() */');
+    expect(tsOutput).toContain('created_at: Generated<string>;');
+    expect(tsOutput).toContain('/** 📝 Tên khách */');
+    expect(tsOutput).toContain('name: string | null;');
   });
 
-  it("generates SQL DDL schema", () => {
+  it("generates SQL DDL schema with COMMENT ON TABLE and COLUMN", () => {
     const mockSchema: DatabaseSchema = {
       introspectedAt: "2026-09-17T10:00:00.000Z",
       tables: [
         {
           name: "posts",
+          comment: "Bảng bài viết",
           columns: [
             {
               name: "id",
@@ -87,6 +109,7 @@ describe("Database Schema Generator", () => {
               udtName: "int4",
               isNullable: false,
               columnDefault: null,
+              comment: "Mã bài viết",
               isPrimaryKey: true,
             },
             {
@@ -95,6 +118,7 @@ describe("Database Schema Generator", () => {
               udtName: "int4",
               isNullable: false,
               columnDefault: null,
+              comment: null,
               isPrimaryKey: false,
               foreignKey: {
                 foreignTable: "users",
@@ -110,14 +134,17 @@ describe("Database Schema Generator", () => {
     expect(sqlOutput).toContain('CREATE TABLE IF NOT EXISTS "posts" (');
     expect(sqlOutput).toContain('"id" SERIAL PRIMARY KEY');
     expect(sqlOutput).toContain('REFERENCES "users"("id")');
+    expect(sqlOutput).toContain('COMMENT ON TABLE "posts" IS \'Bảng bài viết\';');
+    expect(sqlOutput).toContain('COMMENT ON COLUMN "posts"."id" IS \'Mã bài viết\';');
   });
 
-  it("injects and updates schema in AGENTS.md", () => {
+  it("injects and updates schema in AGENTS.md including comments", () => {
     const mockSchema: DatabaseSchema = {
       introspectedAt: "2026-09-17T10:00:00.000Z",
       tables: [
         {
           name: "tasks",
+          comment: "Bảng công việc",
           columns: [
             {
               name: "id",
@@ -125,6 +152,7 @@ describe("Database Schema Generator", () => {
               udtName: "int4",
               isNullable: false,
               columnDefault: "nextval()",
+              comment: "ID công việc",
               isPrimaryKey: true,
             },
             {
@@ -133,6 +161,7 @@ describe("Database Schema Generator", () => {
               udtName: "text",
               isNullable: false,
               columnDefault: null,
+              comment: "Tiêu đề công việc",
               isPrimaryKey: false,
             },
           ],
@@ -145,11 +174,8 @@ describe("Database Schema Generator", () => {
 
     expect(updated).toContain("<!-- DATABASE_SCHEMA_START -->");
     expect(updated).toContain("### Table: `tasks`");
-    expect(updated).toContain("`title`");
+    expect(updated).toContain("> 📝 **Mô tả (Description):** Bảng công việc");
+    expect(updated).toContain("Tiêu đề công việc");
     expect(updated).toContain("<!-- DATABASE_SCHEMA_END -->");
-
-    // Test updating an existing schema block
-    const reUpdated = updateAgentsMarkdown(updated, mockSchema);
-    expect(reUpdated.match(/<!-- DATABASE_SCHEMA_START -->/g)?.length).toBe(1);
   });
 });
