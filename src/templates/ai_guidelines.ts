@@ -360,20 +360,20 @@ describe("Payroll Domain: calculateNetSalary", () => {
 \`\`\`
 
 ### C. Server Actions & Database Integration Tests (\`modules/<domain>/presentation/*.test.ts\`)
-Test Server Actions interacting with the real/local database via \`core\`:
+When running \`com test\`, \`core\` **automatically activates an In-Memory Database Engine** and auto-loads \`schema.sql\`. You can **import real Server Actions & use-cases directly** without writing manual database mocks! Real SQL queries, constraints, and defaults execute in RAM at sub-millisecond speed:
 
 \`\`\`typescript
 import { describe, it, expect, beforeEach } from "bun:test";
-import { db, HttpError } from "core";
+import { db, truncateTables, HttpError } from "core";
 import { createNewsAction, getNewsListAction } from "../index";
 
-describe("News Server Actions", () => {
+describe("News Server Actions (Real In-Memory DB)", () => {
   beforeEach(async () => {
-    // Clean up test data before each test
-    await db.deleteFrom("news").where("title", "like", "[TEST]%").execute();
+    // Clean up test data before each test run
+    await truncateTables(["news"]);
   });
 
-  it("creates a new article with auto-generated id and timestamps", async () => {
+  it("creates a new article in in-memory database with real autoincrement ID", async () => {
     const post = await createNewsAction({
       title: "[TEST] Release v2.0",
       content: "Full changelog details...",
@@ -383,6 +383,10 @@ describe("News Server Actions", () => {
     expect(post).toBeDefined();
     expect(post.id).toBeTypeOf("number");
     expect(post.title).toBe("[TEST] Release v2.0");
+
+    // Verify it exists in real in-memory query
+    const allNews = await getNewsListAction();
+    expect(allNews.some((n: any) => n.id === post.id)).toBe(true);
   });
 
   it("rejects empty title with HttpError.badRequest", async () => {

@@ -1,5 +1,5 @@
 import { existsSync } from "fs";
-import { resolve, relative } from "path";
+import { resolve, relative, join } from "path";
 import { logger, colors } from "../core/logger";
 
 export interface TestOptions {
@@ -70,11 +70,18 @@ export function buildBunTestArgs(pattern?: string, options: TestOptions = {}): s
   return args;
 }
 
+import { ensureRuntimeEnvironment } from "../core/runtime";
+
 /**
  * Executes project tests using Bun's native high-performance test runner
  */
 export async function testCommand(rawArgs: string[] = [], options: TestOptions = {}): Promise<number> {
   const projectDir = resolve(process.cwd(), options.dir || ".");
+
+  // Automatically provision runtime files (.nata/core.ts & node_modules/core) for testing
+  try {
+    ensureRuntimeEnvironment(projectDir);
+  } catch {}
 
   // If pattern not explicitly passed in options, check if first positional arg is a pattern
   let pattern = options.pattern;
@@ -83,6 +90,7 @@ export async function testCommand(rawArgs: string[] = [], options: TestOptions =
   }
 
   const bunArgs = buildBunTestArgs(pattern, options);
+  const hasSchema = existsSync(join(projectDir, "schema.sql"));
 
   if (!options.json) {
     logger.hero();
@@ -98,6 +106,13 @@ export async function testCommand(rawArgs: string[] = [], options: TestOptions =
         label: "Target Directory",
         value: relDir,
         color: colors.cyan,
+      },
+      {
+        label: "Database Mode",
+        value: hasSchema
+          ? "● In-Memory MockDB (Auto-loaded schema.sql)"
+          : "○ In-Memory Embedded SQLite/PGlite",
+        color: hasSchema ? colors.bold + colors.emerald : colors.yellow,
       },
       {
         label: "Pattern Filter",
@@ -130,6 +145,7 @@ export async function testCommand(rawArgs: string[] = [], options: TestOptions =
     env: {
       ...process.env,
       NODE_ENV: "test",
+      COM_TEST: "true",
     },
   });
 
