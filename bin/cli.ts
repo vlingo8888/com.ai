@@ -199,7 +199,7 @@ async function main() {
       let dir: string | undefined;
       let engine: "rust" | "bun" | undefined;
       let target: "web" | "zalo" | undefined;
-      let tunnel = false;
+      let tunnel: boolean | undefined = undefined;
       let provider: "123c" | "rs" | undefined;
       let subdomain: string | undefined;
       let server: string | undefined;
@@ -216,6 +216,8 @@ async function main() {
           if (val === "rust" || val === "bun") engine = val;
         } else if (args[i] === "--tunnel" || args[i] === "-T") {
           tunnel = true;
+        } else if (args[i] === "--no-tunnel") {
+          tunnel = false;
         } else if ((args[i] === "--provider" || args[i] === "-P") && args[i + 1]) {
           const val = args[++i].toLowerCase();
           if (val === "123c" || val === "rs") provider = val;

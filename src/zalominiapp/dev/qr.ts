@@ -42,20 +42,18 @@ export function generateZaloShortLink(appId: string, host: string, port: number 
  */
 export function printZaloDevQrCode(deepLinkUrl: string, appId: string, networkUrl: string) {
   const shortLink = deepLinkUrl.replace("/app/link/zapps/", "/s/");
-  const isTunnel = networkUrl.startsWith("https://");
   try {
     qrcode.generate(deepLinkUrl, { small: true }, (qr: string) => {
-      console.log(`\n  ${colors.bold}${colors.cyan}📱 QUÉT MÃ QR BẰNG ZALO HOẶC CAMERA ĐỂ MỞ TRÊN ĐIỆN THOẠI:${colors.reset}\n`);
+      console.log(`   ${colors.dim}Scan with Zalo camera to preview:${colors.reset}\n`);
       const lines = qr.split("\n");
       for (const line of lines) {
-        console.log(`    ${line}`);
+        console.log(`   ${line}`);
       }
-      console.log(`\n    ${colors.bold}${colors.white}DeepLink:${colors.reset}   ${colors.sky}${deepLinkUrl}${colors.reset}`);
-      console.log(`    ${colors.bold}${colors.white}ShortLink:${colors.reset}  ${colors.cyan}${shortLink}${colors.reset}`);
-      console.log(`    ${colors.bold}${colors.white}${isTunnel ? "Tunnel URL:" : "Mobile URL:"}${colors.reset} ${colors.bold}${colors.green}${networkUrl}${colors.reset}`);
-      console.log(`    ${colors.bold}${colors.white}App ID:${colors.reset}     ${colors.yellow}${appId}${colors.reset}\n`);
+      console.log();
+      console.log(`   ${colors.dim}-${colors.reset} DeepLink:     ${colors.cyan}${shortLink}${colors.reset}`);
+      console.log();
     });
   } catch (err: any) {
-    console.log(`\n  ${colors.bold}${colors.cyan}📱 Zalo DeepLink:${colors.reset} ${colors.sky}${deepLinkUrl}${colors.reset}\n`);
+    console.log(`   ${colors.dim}-${colors.reset} DeepLink:     ${colors.cyan}${deepLinkUrl}${colors.reset}\n`);
   }
 }

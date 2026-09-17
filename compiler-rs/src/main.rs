@@ -49,10 +49,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     match cli.command {
         Commands::Dev { dir, port, target } => {
-            println!("\x1b[1;36m◆ COM.AI.VN RUST COMPILER & DEV SERVER\x1b[0m");
-            println!("  Root:   {:?}", dir.canonicalize().unwrap_or(dir.clone()));
-            println!("  Target: \x1b[1;32m{}\x1b[0m", target);
-            println!();
+            if std::env::var("COM_MANAGED").is_err() {
+                println!("\n   \x1b[1m▲ com.ai.vn\x1b[0m \x1b[90m(Rust Engine)\x1b[0m");
+                println!("   \x1b[90m-\x1b[0m Target:   {}", target);
+                println!();
+            }
 
             DevServer::run(dir, port, target).await?;
         }

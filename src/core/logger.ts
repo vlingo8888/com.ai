@@ -79,38 +79,34 @@ export const logger = {
     return new Spinner(msg).start();
   },
 
-  hero() {
-    console.log(`
-${colors.cyan}  ┌────────────────────────────────────────────────────────┐
-  │  ${colors.bold}${colors.indigo}◆ COM.AI.VN CLI${colors.reset}${colors.cyan}                                      │
-  │  ${colors.darkGray}The Intelligent Web & Cloud Engine Developer Tooling${colors.cyan}   │
-  └────────────────────────────────────────────────────────┘${colors.reset}`);
+  hero(version?: string) {
+    console.log(`\n   ${colors.bold}▲ com.ai.vn${colors.reset}${version ? ` ${colors.dim}v${version}${colors.reset}` : ""}`);
   },
 
   section(title: string) {
-    console.log(`\n ${colors.bgCyan} ${colors.bold}\x1b[30m ${title.toUpperCase()} \x1b[0m\n`);
+    console.log(`\n   ${colors.bold}${title}${colors.reset}\n`);
   },
 
   step(current: number, total: number, title: string) {
-    console.log(`\n ${colors.bold}${colors.cyan}[${current}/${total}]${colors.reset} ${colors.bold}${title}${colors.reset}`);
+    console.log(`\n   ${colors.dim}[${current}/${total}]${colors.reset} ${colors.bold}${title}${colors.reset}`);
   },
 
   info(msg: string) {
-    console.log(`  ${colors.blue}ℹ${colors.reset} ${msg}`);
+    console.log(`   ${colors.dim}-${colors.reset} ${msg}`);
   },
 
   success(msg: string) {
-    console.log(`  ${colors.green}✔${colors.reset} ${colors.bold}${msg}${colors.reset}`);
+    console.log(` ${colors.green}✓${colors.reset} ${msg}`);
   },
 
   warn(msg: string) {
-    console.log(`  ${colors.yellow}▲${colors.reset} ${colors.yellow}${msg}${colors.reset}`);
+    console.log(` ${colors.yellow}▲${colors.reset} ${msg}`);
   },
 
   error(msg: string, detail?: string) {
-    console.error(`\n  ${colors.red}✖ ${colors.bold}ERROR:${colors.reset} ${colors.red}${msg}${colors.reset}`);
+    console.error(` ${colors.red}⨯${colors.reset} ${colors.bold}${msg}${colors.reset}`);
     if (detail) {
-      console.error(`    ${colors.darkGray}${detail}${colors.reset}`);
+      console.error(`   ${colors.darkGray}${detail}${colors.reset}`);
     }
     console.log();
   },
@@ -122,22 +118,22 @@ ${colors.cyan}  ┌────────────────────�
   },
 
   card(title: string, items: Array<{ label: string; value: string; color?: string }>) {
-    const maxLabelLen = Math.max(...items.map((i) => i.label.length), 10);
-    console.log(`\n  ${colors.bold}${colors.indigo}┌─ ${title} ${"─".repeat(Math.max(40 - title.length, 4))}┐${colors.reset}`);
+    const maxLabelLen = Math.max(...items.map((i) => i.label.length), 8);
+    console.log(`\n   ${colors.bold}▲ ${title}${colors.reset}`);
 
     for (const item of items) {
       const pad = " ".repeat(maxLabelLen - item.label.length);
-      const valColor = item.color || colors.cyan;
-      console.log(`  ${colors.indigo}│${colors.reset}  ${colors.darkGray}${item.label}:${pad}${colors.reset} ${valColor}${item.value}${colors.reset}`);
+      const valColor = item.color || colors.reset;
+      console.log(`   ${colors.dim}-${colors.reset} ${item.label}:${pad} ${valColor}${item.value}${colors.reset}`);
     }
 
-    console.log(`  ${colors.indigo}└${"─".repeat(47)}┘${colors.reset}\n`);
+    console.log();
   },
 
   nextSteps(commands: Array<{ cmd: string; desc: string }>) {
-    console.log(`  ${colors.bold}${colors.green}✨ NEXT STEPS:${colors.reset}`);
+    console.log(`   ${colors.bold}Next steps:${colors.reset}`);
     for (const { cmd, desc } of commands) {
-      console.log(`    ${colors.darkGray}›${colors.reset} ${colors.bold}${colors.cyan}${cmd}${colors.reset} ${colors.darkGray}# ${desc}${colors.reset}`);
+      console.log(`   ${colors.dim}-${colors.reset} ${colors.cyan}${cmd}${colors.reset} ${colors.dim}# ${desc}${colors.reset}`);
     }
     console.log();
   }

@@ -98,10 +98,12 @@ impl DevServer {
         };
 
         let (db_status_title, db_status_detail) = detect_database_env(&root_dir);
+        let _ = (db_status_title, db_status_detail);
 
-        println!("  \x1b[1;32m✔ Server running at:\x1b[0m \x1b[1;36mhttp://localhost:{}\x1b[0m", port);
-        println!("  \x1b[1;34m⚡ Database:\x1b[0m          {} {}", db_status_title, db_status_detail);
-        println!("  \x1b[90m› Press Ctrl+C to stop the server\x1b[0m\n");
+        if std::env::var("COM_MANAGED").is_err() {
+            println!("   \x1b[90m-\x1b[0m Local:    \x1b[36mhttp://localhost:{}\x1b[0m", port);
+            println!("\n \x1b[32m✓\x1b[0m Ready\n");
+        }
 
         axum::serve(listener, app).await?;
         Ok(())

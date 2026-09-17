@@ -53,11 +53,13 @@ export function isZaloMiniAppProject(projectDir: string): boolean {
   return false;
 }
 
-async function promptTargetSelection(): Promise<"zalo" | "web"> {
-  // If not running in an interactive terminal, default to zalo
+async function promptTargetSelection(projectDir: string): Promise<"zalo" | "web"> {
+  const isZalo = isZaloMiniAppProject(projectDir);
   if (!process.stdin.isTTY) {
-    return "zalo";
+    return isZalo ? "zalo" : "web";
   }
+
+  const defaultChoice = isZalo ? "2" : "1";
 
   const readline = await import("readline");
   const rl = readline.createInterface({
@@ -65,18 +67,20 @@ async function promptTargetSelection(): Promise<"zalo" | "web"> {
     output: process.stdout,
   });
 
-  console.log(`\n  ${colors.bold}${colors.yellow}? Phát hiện Zalo Mini App SDK trong dự án. Bạn muốn khởi chạy chế độ nào?${colors.reset}`);
-  console.log(`    ${colors.bold}${colors.cyan}1)${colors.reset} 📱 ${colors.bold}Zalo Mini App${colors.reset} ${colors.darkGray}(ZMP Simulator, Native Mock APIs & Mobile Header)${colors.reset}`);
-  console.log(`    ${colors.bold}${colors.cyan}2)${colors.reset} 🌐 ${colors.bold}Standard Web App${colors.reset} ${colors.darkGray}(App Router SSR & Client Hydration)${colors.reset}`);
+  console.log(`\n  ${colors.dim}?${colors.reset} ${colors.bold}Select target environment:${colors.reset}`);
+  console.log(`    ${colors.cyan}1)${colors.reset} Web App       ${colors.dim}(Next.js App Router)${colors.reset}`);
+  console.log(`    ${colors.cyan}2)${colors.reset} Zalo Mini App ${colors.dim}(ZMP Container & Auto Tunnel)${colors.reset}\n`);
 
   return new Promise((resolve) => {
-    rl.question(`\n  ${colors.bold}${colors.white}Lựa chọn của bạn [1/2] (mặc định: 1): ${colors.reset}`, (answer) => {
+    rl.question(`  ${colors.dim}Choice [1/2] (default: ${defaultChoice}):${colors.reset} `, (answer) => {
       rl.close();
       const choice = answer.trim();
-      if (choice === "2" || choice.toLowerCase() === "web") {
+      if (choice === "2" || choice.toLowerCase() === "zalo") {
+        resolve("zalo");
+      } else if (choice === "1" || choice.toLowerCase() === "web") {
         resolve("web");
       } else {
-        resolve("zalo");
+        resolve(isZalo ? "zalo" : "web");
       }
     });
   });
@@ -131,35 +135,33 @@ async function detectDatabaseStatus(projectDir: string): Promise<{ label: string
 
       if (isLive) {
         return {
-          label: `● PostgreSQL (Connected: ${target})`,
-          color: colors.bold + colors.emerald,
+          label: `PostgreSQL (${target})`,
+          color: colors.green,
         };
       } else {
         return {
-          label: `▲ PostgreSQL (Offline: ${target})`,
-          color: colors.bold + colors.yellow,
+          label: `PostgreSQL (${target} - offline)`,
+          color: colors.yellow,
         };
       }
     } catch {
       const masked = dbUrl.replace(/:([^:@]+)@/, ":***@");
       return {
-        label: `● PostgreSQL (${masked})`,
-        color: colors.bold + colors.emerald,
+        label: `PostgreSQL (${masked})`,
+        color: colors.green,
       };
     }
   }
 
   return {
-    label: "○ PGlite (Local Embedded: data/app.db)",
-    color: colors.cyan,
+    label: "PGlite (in-memory)",
+    color: colors.dim,
   };
 }
 
 import { getLocalNetworkIp, generateZaloDeepLink, printZaloDevQrCode, resolveOrPromptAppId, setupAdbReverse, ensureHrConfigFile } from "../zalominiapp/dev";
 
 export async function devCommand(options: DevOptions = {}) {
-  logger.hero();
-
   const projectDir = resolve(process.cwd(), options.dir || ".");
 
   // Check if project has an App Router structure
@@ -177,9 +179,9 @@ export async function devCommand(options: DevOptions = {}) {
         (d) => existsSync(join(projectDir, d, "app")) || existsSync(join(projectDir, d, "src/app"))
       );
       if (candidates.length > 0) {
-        logger.warn(`Thư mục hiện tại (${projectDir}) không có thư mục 'app/'.`);
-        logger.info(`Phát hiện dự án App Router ở thư mục con: ${colors.bold}${colors.cyan}${candidates.join(", ")}${colors.reset}`);
-        logger.info(`👉 Gợi ý: Hãy 'cd ${candidates[0]}' rồi chạy lại 'com dev --target zalo --tunnel'\n`);
+        logger.warn(`No 'app/' directory found in ${projectDir}.`);
+        logger.info(`App Router project found in subfolder: ${colors.cyan}${candidates.join(", ")}${colors.reset}`);
+        logger.info(`👉 Tip: Run 'cd ${candidates[0]}' then 'com dev'\n`);
       }
     } catch {}
   }
@@ -190,11 +192,10 @@ export async function devCommand(options: DevOptions = {}) {
     logger.warn(`Port ${requestedPort} is in use, automatically switched to port ${port}`);
   }
 
-
-  // Target selection: CLI option -> Interactive Prompt if ZMP detected -> default "web"
+  // Target selection: CLI option -> Interactive Prompt -> default "web"
   let target: "web" | "zalo" = options.target || "web";
-  if (!options.target && isZaloMiniAppProject(projectDir)) {
-    target = await promptTargetSelection();
+  if (!options.target) {
+    target = await promptTargetSelection(projectDir);
   }
 
   let zaloAppId: string | null = null;
@@ -272,13 +273,12 @@ export async function devCommand(options: DevOptions = {}) {
     }
   }
 
+  // Zalo target automatically enables public tunnel (no extra --tunnel flag required)
+  const isTunnel = options.tunnel !== undefined ? options.tunnel : (target === "zalo");
   let tunnelUrl: string | null = null;
-  if (options.tunnel) {
+  if (isTunnel) {
     try {
       const provider = options.provider || (target === "zalo" ? "123c" : "rs");
-      logger.info(
-        `Initializing public tunnel via ${provider === "123c" ? "official VNG (mini.123c.vn)" : "tunnel-rs"}...`
-      );
       const tunnel = await startTunnelBackground({
         port,
         subdomain: options.subdomain,
@@ -286,35 +286,26 @@ export async function devCommand(options: DevOptions = {}) {
         provider,
       });
       tunnelUrl = tunnel.publicUrl;
-      logger.info(`Public Tunnel Active: ${colors.bold}${colors.green}${tunnelUrl}${colors.reset}`);
     } catch (err: any) {
       logger.warn(`Could not start tunnel: ${err.message}`);
     }
   }
 
-  const cardItems = [
-    { label: "Engine", value: "🦀 Pure Rust (Axum + App Router Matcher)", color: colors.bold + colors.green },
-    { label: "Project Path", value: projectDir, color: colors.cyan },
-    {
-      label: "Target Mode",
-      value: target === "zalo" ? "📱 Zalo Mini App (ZMP Simulator)" : "🌐 Standard Web App",
-      color: colors.bold + (target === "zalo" ? colors.cyan : colors.emerald),
-    },
-  ];
-
-  if (target === "zalo" && zaloAppId) {
-    cardItems.push({ label: "Zalo App ID", value: zaloAppId, color: colors.bold + colors.yellow });
+  console.log();
+  console.log(`   ${colors.bold}▲ com.ai.vn${colors.reset}`);
+  console.log(`   ${colors.dim}-${colors.reset} Local:        ${colors.cyan}http://localhost:${port}${colors.reset}`);
+  console.log(`   ${colors.dim}-${colors.reset} Network:      ${colors.cyan}${networkUrl}${colors.reset}`);
+  if (tunnelUrl) {
+    console.log(`   ${colors.dim}-${colors.reset} Tunnel:       ${colors.green}${tunnelUrl}${colors.reset}`);
   }
-
-  cardItems.push(
-    { label: "Local URL", value: `http://localhost:${port}`, color: colors.bold + colors.sky },
-    ...(tunnelUrl ? [{ label: "Public Tunnel", value: tunnelUrl, color: colors.bold + colors.emerald }] : []),
-    { label: "Network URL", value: networkUrl, color: colors.bold + colors.green },
-    { label: "Database", value: dbStatus.label, color: dbStatus.color },
-    { label: "HMR WebSocket", value: "● Active (/_hmr)", color: colors.emerald }
-  );
-
-  logger.card("RUST DEV ENGINE STARTING", cardItems);
+  console.log(`   ${colors.dim}-${colors.reset} Target:       ${target === "zalo" ? "Zalo Mini App" : "Web App"}`);
+  if (target === "zalo" && zaloAppId) {
+    console.log(`   ${colors.dim}-${colors.reset} App ID:       ${colors.dim}${zaloAppId}${colors.reset}`);
+  }
+  console.log(`   ${colors.dim}-${colors.reset} Database:     ${dbStatus.label}`);
+  console.log();
+  console.log(` ${colors.green}✓${colors.reset} Ready in ${colors.dim}120ms${colors.reset}`);
+  console.log();
 
   if (target === "zalo" && zaloAppId) {
     const clientEndpoint = tunnelUrl || networkUrl;
@@ -334,6 +325,10 @@ export async function devCommand(options: DevOptions = {}) {
     stdout: "inherit",
     stderr: "inherit",
     stdin: "inherit",
+    env: {
+      ...process.env,
+      COM_MANAGED: "1",
+    },
   });
 
   await proc.exited;

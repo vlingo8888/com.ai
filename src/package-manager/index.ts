@@ -27,19 +27,9 @@ export async function setupProjectEnvironment(
     files
   );
 
-  if (detectedPackages.length > 0) {
-    console.log(
-      `    ${colors.darkGray}› Detected ${colors.bold}${detectedPackages.length}${colors.reset}${colors.darkGray} third-party packages: ${colors.cyan}${detectedPackages.slice(0, 5).join(", ")}${detectedPackages.length > 5 ? "..." : ""}${colors.reset}`
-    );
-  }
-
   // ESM Zero-Install runtime: Only install local node_modules if explicitly requested via --install
   if (options.install && isPackageCreated) {
     await installDependencies({ cwd: projectDir });
-  } else {
-    console.log(
-      `    ${colors.darkGray}› ${colors.emerald}⚡ ESM Zero-Install Active${colors.reset}${colors.darkGray} (Native compiler resolves dependencies dynamically via ESM CDN)${colors.reset}`
-    );
   }
 
   return { isPackageCreated, detectedPackages };
