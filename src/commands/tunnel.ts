@@ -7,6 +7,7 @@ export interface TunnelOptions {
   port?: number | string;
   subdomain?: string;
   server?: string;
+  provider?: "123c" | "rs";
   showQr?: boolean;
 }
 
@@ -20,6 +21,69 @@ export function printTunnelQrCode(url: string, title = "QUÉT MÃ QR BẰNG ZALO
       console.log(`\n    ${colors.bold}${colors.white}Public URL:${colors.reset} ${colors.bold}${colors.green}${url}${colors.reset}\n`);
     });
   } catch {}
+}
+
+export async function start123cTunnel(options: TunnelOptions = {}): Promise<{
+  publicUrl: string;
+  subdomain: string;
+  proc: any;
+}> {
+  const port = String(options.port || 3000);
+  const args = ["bun", "x", "localtunnel", "--host", "https://mini.123c.vn", "--port", port];
+  if (options.subdomain) {
+    args.push("--subdomain", options.subdomain);
+  }
+
+  return new Promise((resolvePromise, reject) => {
+    let resolved = false;
+    const proc = Bun.spawn(args, {
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+
+    const timeout = setTimeout(() => {
+      if (!resolved) {
+        resolved = true;
+        reject(new Error("Timeout connecting to official Zalo tunnel server (mini.123c.vn)"));
+      }
+    }, 15000);
+
+    proc.exited.then((exitCode) => {
+      if (!resolved && exitCode !== 0) {
+        resolved = true;
+        clearTimeout(timeout);
+        reject(new Error(`123c tunnel exited with code ${exitCode}`));
+      }
+    });
+
+    (async () => {
+      const reader = proc.stdout.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value);
+
+          const match = buffer.match(/https:\/\/[a-zA-Z0-9.-]+\.mini\.123c\.vn/i);
+          if (match && !resolved) {
+            resolved = true;
+            clearTimeout(timeout);
+            const publicUrl = match[0].trim();
+            const subdomain = publicUrl.replace("https://", "").replace(".mini.123c.vn", "");
+            resolvePromise({ publicUrl, subdomain, proc });
+          }
+        }
+      } catch (err) {
+        if (!resolved) {
+          clearTimeout(timeout);
+          reject(err);
+        }
+      }
+    })();
+  });
 }
 
 export async function locateOrBuildTunnelBinary(): Promise<string> {
@@ -73,72 +137,81 @@ export async function startTunnelBackground(options: TunnelOptions = {}): Promis
   subdomain: string;
   proc: any;
 }> {
-  const binPath = await locateOrBuildTunnelBinary();
-  const port = String(options.port || 3000);
-  const server = options.server || process.env.TUNNEL_SERVER || "tunnel.myworkbeast.com:8080";
-
-  const args = [binPath, "client", "--server", server, "--port", port];
-  if (options.subdomain) {
-    args.push("--subdomain", options.subdomain);
+  if (options.provider === "123c" || options.server?.includes("123c")) {
+    return await start123cTunnel(options);
   }
 
-  return new Promise((resolvePromise, reject) => {
-    let resolved = false;
-    const proc = Bun.spawn(args, {
-      stdout: "pipe",
-      stderr: "pipe",
-    });
+  try {
+    const binPath = await locateOrBuildTunnelBinary();
+    const port = String(options.port || 3000);
+    const server = options.server || process.env.TUNNEL_SERVER || "tunnel.myworkbeast.com:8080";
 
-    const timeout = setTimeout(() => {
-      if (!resolved) {
-        resolved = true;
-        reject(new Error(`Tunnel connection timed out to server ${server}`));
-      }
-    }, 15000);
+    const args = [binPath, "client", "--server", server, "--port", port];
+    if (options.subdomain) {
+      args.push("--subdomain", options.subdomain);
+    }
 
-    proc.exited.then((exitCode) => {
-      if (!resolved && exitCode !== 0) {
-        resolved = true;
-        clearTimeout(timeout);
-        reject(new Error(`tunnel-rs exited with code ${exitCode}`));
-      }
-    });
+    return await new Promise((resolvePromise, reject) => {
+      let resolved = false;
+      const proc = Bun.spawn(args, {
+        stdout: "pipe",
+        stderr: "pipe",
+      });
 
-    (async () => {
-      const reader = proc.stdout.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
+      const timeout = setTimeout(() => {
+        if (!resolved) {
+          resolved = true;
+          reject(new Error(`Tunnel connection timed out to server ${server}`));
+        }
+      }, 15000);
 
-      try {
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          const text = decoder.decode(value);
-          buffer += text;
+      proc.exited.then((exitCode) => {
+        if (!resolved && exitCode !== 0) {
+          resolved = true;
+          clearTimeout(timeout);
+          reject(new Error(`tunnel-rs exited with code ${exitCode}`));
+        }
+      });
 
-          // Strip ANSI escape codes
-          const clean = buffer.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, "");
+      (async () => {
+        const reader = proc.stdout.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
 
-          // Match Public URL and Subdomain in the clean text
-          const matchUrl = clean.match(/Public URL:\s+([^\s]+)/i);
-          const matchSub = clean.match(/Subdomain:\s+([^\s]+)/i);
+        try {
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            const text = decoder.decode(value);
+            buffer += text;
 
-          if (matchUrl && !resolved) {
-            resolved = true;
+            // Strip ANSI escape codes
+            const clean = buffer.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, "");
+
+            // Match Public URL and Subdomain in the clean text
+            const matchUrl = clean.match(/Public URL:\s+([^\s]+)/i);
+            const matchSub = clean.match(/Subdomain:\s+([^\s]+)/i);
+
+            if (matchUrl && !resolved) {
+              resolved = true;
+              clearTimeout(timeout);
+              const publicUrl = matchUrl[1].trim();
+              const subdomain = matchSub ? matchSub[1].trim() : "";
+              resolvePromise({ publicUrl, subdomain, proc });
+            }
+          }
+        } catch (err) {
+          if (!resolved) {
             clearTimeout(timeout);
-            const publicUrl = matchUrl[1].trim();
-            const subdomain = matchSub ? matchSub[1].trim() : "";
-            resolvePromise({ publicUrl, subdomain, proc });
+            reject(err);
           }
         }
-      } catch (err) {
-        if (!resolved) {
-          clearTimeout(timeout);
-          reject(err);
-        }
-      }
-    })();
-  });
+      })();
+    });
+  } catch (err: any) {
+    logger.warn(`tunnel-rs unavailable (${err.message}), falling back to official mini.123c.vn tunnel...`);
+    return await start123cTunnel(options);
+  }
 }
 
 export async function tunnelCommand(options: TunnelOptions = {}) {

@@ -27,6 +27,7 @@ export interface DevOptions {
   engine?: "rust" | "bun";
   target?: "web" | "zalo";
   tunnel?: boolean;
+  provider?: "123c" | "rs";
   subdomain?: string;
   server?: string;
 }
@@ -249,11 +250,15 @@ export async function devCommand(options: DevOptions = {}) {
   let tunnelUrl: string | null = null;
   if (options.tunnel) {
     try {
-      logger.info("Initializing public tunnel via tunnel-rs...");
+      const provider = options.provider || (target === "zalo" ? "123c" : "rs");
+      logger.info(
+        `Initializing public tunnel via ${provider === "123c" ? "official VNG (mini.123c.vn)" : "tunnel-rs"}...`
+      );
       const tunnel = await startTunnelBackground({
         port,
         subdomain: options.subdomain,
         server: options.server,
+        provider,
       });
       tunnelUrl = tunnel.publicUrl;
       logger.info(`Public Tunnel Active: ${colors.bold}${colors.green}${tunnelUrl}${colors.reset}`);

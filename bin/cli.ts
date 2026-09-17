@@ -48,6 +48,7 @@ function printHelp() {
     ${colors.yellow}--timeout${colors.reset}     ${colors.darkGray}<ms>${colors.reset}       Per-test timeout in milliseconds
     ${colors.yellow}--target, -t${colors.reset} ${colors.darkGray}<web|zalo>${colors.reset} Target runtime mode (auto-detects Zalo Mini App)
     ${colors.yellow}--tunnel, -T${colors.reset}                  Auto-create public tunnel & QR code during dev
+    ${colors.yellow}--provider, -P${colors.reset} ${colors.darkGray}<123c|rs>${colors.reset} Tunnel provider (default: 123c for Zalo, rs for Web)
     ${colors.yellow}--subdomain, -s${colors.reset} ${colors.darkGray}<name>${colors.reset}   Custom subdomain for tunnel
     ${colors.yellow}--dir${colors.reset}        ${colors.darkGray}<path>${colors.reset}     Target directory (default: current directory)
     ${colors.yellow}--port, -p${colors.reset}   ${colors.darkGray}<port>${colors.reset}     Port to listen on in dev mode (default: 3000)
@@ -199,6 +200,7 @@ async function main() {
       let engine: "rust" | "bun" | undefined;
       let target: "web" | "zalo" | undefined;
       let tunnel = false;
+      let provider: "123c" | "rs" | undefined;
       let subdomain: string | undefined;
       let server: string | undefined;
       for (let i = 1; i < args.length; i++) {
@@ -214,24 +216,31 @@ async function main() {
           if (val === "rust" || val === "bun") engine = val;
         } else if (args[i] === "--tunnel" || args[i] === "-T") {
           tunnel = true;
+        } else if ((args[i] === "--provider" || args[i] === "-P") && args[i + 1]) {
+          const val = args[++i].toLowerCase();
+          if (val === "123c" || val === "rs") provider = val;
         } else if ((args[i] === "--subdomain" || args[i] === "-s") && args[i + 1]) {
           subdomain = args[++i];
         } else if (args[i] === "--server" && args[i + 1]) {
           server = args[++i];
         }
       }
-      await devCommand({ port, dir, engine, target, tunnel, subdomain, server });
+      await devCommand({ port, dir, engine, target, tunnel, subdomain, server, provider });
       break;
     }
 
     case "tunnel": {
       let port: string | number = 3000;
+      let provider: "123c" | "rs" | undefined;
       let subdomain: string | undefined;
       let server: string | undefined;
       let showQr = true;
       for (let i = 1; i < args.length; i++) {
         if ((args[i] === "--port" || args[i] === "-p") && args[i + 1]) {
           port = args[++i];
+        } else if ((args[i] === "--provider" || args[i] === "-P") && args[i + 1]) {
+          const val = args[++i].toLowerCase();
+          if (val === "123c" || val === "rs") provider = val;
         } else if ((args[i] === "--subdomain" || args[i] === "-s") && args[i + 1]) {
           subdomain = args[++i];
         } else if (args[i] === "--server" && args[i + 1]) {
@@ -240,7 +249,7 @@ async function main() {
           showQr = false;
         }
       }
-      await tunnelCommand({ port, subdomain, server, showQr });
+      await tunnelCommand({ port, subdomain, server, showQr, provider });
       break;
     }
 
