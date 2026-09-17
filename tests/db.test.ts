@@ -31,6 +31,10 @@ describe("Database Schema Generator", () => {
     expect(formatDefaultValue({ type: "Identifier", name: "gen_random_uuid" })).toBe("gen_random_uuid()");
     expect(formatDefaultValue({ type: "Literal", value: "active" })).toBe("'active'");
     expect(formatDefaultValue('{"type":"Identifier","name":"now"}')).toBe("now()");
+    expect(formatDefaultValue('{"type":"Identifier",\n"name":"now"}')).toBe("now()");
+    expect(formatDefaultValue('{"type":"Identifier",\n"name":"CURRENT_TIMESTAMP"}')).toBe("CURRENT_TIMESTAMP");
+    expect(formatDefaultValue('{"type":"Literal","value":"public"}')).toBe("'public'");
+    expect(formatDefaultValue('{"type":"ArrayExpression","elements":[]}')).toBe("'[]'");
   });
 
   it("maps SQL types to TypeScript types correctly", () => {

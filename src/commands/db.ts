@@ -106,19 +106,18 @@ function extractTextFromJson(obj: any): string | null {
 }
 
 /**
- * Robust formatter for SQL column defaults (handles strings, numbers, and Bun.SQL parsed AST objects)
+ * Robust formatter for SQL column defaults (handles strings, numbers, Bun.SQL parsed AST objects, and stringified AST JSON)
  */
-export function formatDefaultValue(val: any): string | null {
+export function formatDefaultValue(val: any, udtName?: string): string | null {
   if (val === null || val === undefined) return null;
 
-  // If val is an AST object parsed by Bun.SQL or database driver
+  // 1. If val is an object (AST node or parsed JSON)
   if (typeof val === "object") {
-    // 1. Array
     if (Array.isArray(val)) {
       return `'[]'`;
     }
 
-    // 2. Identifier node (e.g. { type: "Identifier", name: "CURRENT_TIMESTAMP" } or { name: "now" })
+    // 1.1 Identifier node
     if (val.type === "Identifier" || val.name || val.identifier) {
       const name = String(val.name || val.identifier || "").trim();
       const lower = name.toLowerCase();
@@ -127,45 +126,104 @@ export function formatDefaultValue(val: any): string | null {
       if (lower === "current_date") return "CURRENT_DATE";
       if (lower === "current_time") return "CURRENT_TIME";
       if (lower === "gen_random_uuid" || lower === "uuid_generate_v4") return `${name}()`;
+      if (lower === "true" || lower === "false") return lower;
       return name;
     }
 
-    // 3. CallExpression / Function call node
+    // 1.2 CallExpression node
     if (val.type === "CallExpression" || val.callee) {
-      const callee = typeof val.callee === "object" ? val.callee.name || "fn" : val.callee;
+      const callee = typeof val.callee === "object" ? val.callee?.name || "fn" : String(val.callee);
       const argsList = Array.isArray(val.args || val.arguments)
-        ? (val.args || val.arguments).map(formatDefaultValue).filter(Boolean).join(", ")
+        ? (val.args || val.arguments).map((a: any) => formatDefaultValue(a, udtName)).filter(Boolean).join(", ")
         : "";
       return `${callee}(${argsList})`;
     }
 
-    // 4. Literal node
+    // 1.3 Literal node
     if (val.type === "Literal" || val.value !== undefined) {
       if (typeof val.value === "string") return `'${val.value.replace(/'/g, "''")}'`;
       if (Array.isArray(val.value)) return `'[]'`;
-      return String(val.value);
+      if (typeof val.value === "boolean" || typeof val.value === "number") return String(val.value);
+      return `'${String(val.value)}'`;
     }
 
-    // 5. Raw expression or SQL string
-    if (val.raw) return String(val.raw).trim().replace(/\r?\n|\r/g, " ");
-    if (val.sql) return String(val.sql).trim().replace(/\r?\n|\r/g, " ");
+    // 1.4 ArrayExpression
+    if (val.type === "ArrayExpression" || val.elements) {
+      return `'[]'`;
+    }
 
-    // Fallback for object: clean single line JSON
-    return JSON.stringify(val).replace(/\r?\n|\r/g, " ");
+    if (val.raw) return String(val.raw).replace(/\r?\n|\r/g, " ").trim();
+    if (val.sql) return String(val.sql).replace(/\r?\n|\r/g, " ").trim();
+
+    // If it's a JSON type column
+    if (udtName === "json" || udtName === "jsonb") {
+      return `'${JSON.stringify(val).replace(/'/g, "''")}'::jsonb`;
+    }
+
+    return null;
   }
 
   let str = String(val).trim();
+  if (!str) return null;
 
-  // If string contains JSON AST representation (e.g. '{"type":"Identifier","name":"now"}')
-  if (str.startsWith("{") && str.endsWith("}")) {
+  // 2. If string is a stringified AST JSON
+  if (str.includes('"type"') || str.startsWith("{") || str.startsWith("[")) {
+    // 2.1 Try JSON.parse
     try {
-      const parsed = JSON.parse(str);
-      const formatted = formatDefaultValue(parsed);
+      const parsed = JSON.parse(str.replace(/[\n\r\t]/g, " "));
+      const formatted = formatDefaultValue(parsed, udtName);
       if (formatted) return formatted;
     } catch {}
+
+    // 2.2 Regex fallback for Identifier AST
+    const idMatch =
+      str.match(/"type"\s*:\s*"Identifier"\s*,\s*"name"\s*:\s*"([^"]+)"/i) ||
+      str.match(/"name"\s*:\s*"([^"]+)"\s*,\s*"type"\s*:\s*"Identifier"/i);
+    if (idMatch) {
+      const name = idMatch[1].trim();
+      const lower = name.toLowerCase();
+      if (lower === "now") return "now()";
+      if (lower === "current_timestamp") return "CURRENT_TIMESTAMP";
+      if (lower === "current_date") return "CURRENT_DATE";
+      if (lower === "current_time") return "CURRENT_TIME";
+      if (lower === "gen_random_uuid" || lower === "uuid_generate_v4") return `${name}()`;
+      if (lower === "true" || lower === "false") return lower;
+      return name;
+    }
+
+    // 2.3 Regex fallback for CallExpression AST
+    if (str.includes('"CallExpression"') || str.includes('"callee"')) {
+      const calleeMatch = str.match(/"name"\s*:\s*"([^"]+)"/i);
+      if (calleeMatch) {
+        return `${calleeMatch[1]}()`;
+      }
+    }
+
+    // 2.4 Regex fallback for Literal AST
+    const litMatch = str.match(/"type"\s*:\s*"Literal"\s*,\s*"value"\s*:\s*([^,\}\]]+)/i);
+    if (litMatch) {
+      let v = litMatch[1].trim();
+      if (v.startsWith('"') && v.endsWith('"')) {
+        v = `'${v.slice(1, -1).replace(/'/g, "''")}'`;
+      }
+      return v;
+    }
+
+    // 2.5 Array fallback
+    if (str.includes('"ArrayExpression"') || str.includes('"elements"')) {
+      return `'[]'`;
+    }
+
+    // If string still starts with { and ends with }, avoid dumping raw JSON into SQL DEFAULT unless it's JSON type
+    if (str.startsWith("{") && str.endsWith("}")) {
+      if (udtName === "json" || udtName === "jsonb") {
+        return `'${str.replace(/\r?\n|\r/g, " ").replace(/'/g, "''")}'::jsonb`;
+      }
+      return null;
+    }
   }
 
-  // Ensure single line string
+  // 3. Clean standard string SQL expression (single line, no newlines)
   return str.replace(/\r?\n|\r/g, " ").replace(/\s+/g, " ");
 }
 
@@ -385,7 +443,7 @@ export async function introspectPostgres(dbUrl: string): Promise<DatabaseSchema>
       const fk = fkMap.get(key);
       const rawComment = columnCommentsMap.get(key) || null;
       const comment = parseJsonComment(rawComment);
-      const formattedDefault = formatDefaultValue(col.column_default);
+      const formattedDefault = formatDefaultValue(col.column_default, col.udt_name);
 
       const colMeta: ColumnMeta = {
         name: col.column_name,
