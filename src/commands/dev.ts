@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "fs";
+import { existsSync, readFileSync, readdirSync } from "fs";
 import { join, resolve } from "path";
 import { createConnection, createServer } from "net";
 import { logger, colors } from "../core/logger";
@@ -161,11 +161,35 @@ export async function devCommand(options: DevOptions = {}) {
   logger.hero();
 
   const projectDir = resolve(process.cwd(), options.dir || ".");
+
+  // Check if project has an App Router structure
+  const hasAppDir =
+    existsSync(join(projectDir, "app")) ||
+    existsSync(join(projectDir, "src/app")) ||
+    existsSync(join(projectDir, "pages"));
+
+  if (!hasAppDir) {
+    try {
+      const subdirs = readdirSync(projectDir, { withFileTypes: true })
+        .filter((d) => d.isDirectory() && !d.name.startsWith(".") && d.name !== "node_modules")
+        .map((d) => d.name);
+      const candidates = subdirs.filter(
+        (d) => existsSync(join(projectDir, d, "app")) || existsSync(join(projectDir, d, "src/app"))
+      );
+      if (candidates.length > 0) {
+        logger.warn(`Thư mục hiện tại (${projectDir}) không có thư mục 'app/'.`);
+        logger.info(`Phát hiện dự án App Router ở thư mục con: ${colors.bold}${colors.cyan}${candidates.join(", ")}${colors.reset}`);
+        logger.info(`👉 Gợi ý: Hãy 'cd ${candidates[0]}' rồi chạy lại 'com dev --target zalo --tunnel'\n`);
+      }
+    } catch {}
+  }
+
   const requestedPort = Number(options.port || process.env.PORT || 3000);
   const port = await findAvailablePort(requestedPort);
   if (port !== requestedPort) {
     logger.warn(`Port ${requestedPort} is in use, automatically switched to port ${port}`);
   }
+
 
   // Target selection: CLI option -> Interactive Prompt if ZMP detected -> default "web"
   let target: "web" | "zalo" = options.target || "web";

@@ -390,12 +390,17 @@ async fn route_info_handler(
         )
             .into_response()
     } else {
+        let err_msg = if dynamic_router.routes.is_empty() {
+            "Không tìm thấy cấu trúc App Router (thư mục 'app/' hoặc 'src/app/'). Hãy đảm bảo lệnh 'com dev' được chạy đúng bên trong thư mục dự án."
+        } else {
+            "Không tìm thấy trang cho đường dẫn này (404 Not Found)."
+        };
         (
             StatusCode::NOT_FOUND,
             headers,
             Json(serde_json::json!({
                 "found": false,
-                "error": "Route not found"
+                "error": err_msg
             })),
         )
             .into_response()
@@ -824,11 +829,12 @@ async fn zmp_js_handler(State(state): State<AppState>) -> impl IntoResponse {
       var initialPath = "/";
       var routeRes = await fetch(serverOrigin + "/_nata/route_info?path=" + encodeURIComponent(initialPath));
       if (!routeRes.ok) {
-        throw new Error("Failed to fetch route info from " + serverOrigin);
+        var errJson = await routeRes.json().catch(function() { return {}; });
+        throw new Error(errJson.error || ("Không tìm thấy route: " + initialPath + " (HTTP " + routeRes.status + ")"));
       }
       var initialInfo = await routeRes.json();
       if (!initialInfo || !initialInfo.found) {
-        throw new Error("No page found for route: " + initialPath);
+        throw new Error(initialInfo && initialInfo.error ? initialInfo.error : ("No page found for route: " + initialPath));
       }
 
       await renderNativeRoute(initialInfo.page_file, initialInfo.layout_files || [], initialInfo.params || {});
@@ -836,10 +842,13 @@ async fn zmp_js_handler(State(state): State<AppState>) -> impl IntoResponse {
     } catch(err) {
       console.error("[Com.AI.VN] Native render error:", err);
       dismissLoading();
-      container.innerHTML = '<div style="padding:24px;font-family:sans-serif;color:#f87171;background:#0f172a;min-height:100vh;">' +
-        '<h3 style="margin-top:0;font-size:18px;">⚠️ Lỗi Khởi Chạy Giao Diện Zalo</h3>' +
-        '<pre style="white-space:pre-wrap;word-break:break-all;font-size:12px;background:#020617;padding:12px;border-radius:8px;color:#fca5a5;">' + (err && err.stack ? err.stack : String(err)) + '</pre>' +
-        '<p style="font-size:12px;color:#94a3b8;">Bấm icon Eruda ở góc màn hình để kiểm tra chi tiết Console và Network log.</p>' +
+      var errMsg = (err && err.message) ? err.message : String(err);
+      var errStack = (err && err.stack) ? err.stack : "";
+      container.innerHTML = '<div style="padding:24px;font-family:sans-serif;color:#f87171;background:#0f172a;min-height:100vh;box-sizing:border-box;">' +
+        '<h3 style="margin-top:0;font-size:18px;color:#f87171;">⚠️ Lỗi Khởi Chạy Giao Diện Zalo</h3>' +
+        '<div style="font-size:14px;color:#fca5a5;font-weight:600;line-height:1.6;background:#1e293b;padding:12px;border-radius:8px;border-left:4px solid #ef4444;">' + errMsg + '</div>' +
+        (errStack ? '<pre style="white-space:pre-wrap;word-break:break-all;font-size:11px;background:#020617;padding:12px;border-radius:8px;color:#94a3b8;margin-top:12px;">' + errStack + '</pre>' : '') +
+        '<p style="font-size:12px;color:#64748b;margin-top:16px;">Bấm icon Eruda ở góc dưới màn hình để kiểm tra chi tiết Console và Network log.</p>' +
       '</div>';
     }
   }
