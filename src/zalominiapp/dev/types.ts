@@ -12,6 +12,7 @@ export interface ZmpAppConfig {
     };
     textColor?: "white" | "black";
     leftButton?: "back" | "none";
+    actionBarHidden?: boolean;
     hideAndroidBottomNavigationBar?: boolean;
     hideIOSSafeAreaBottom?: boolean;
   };

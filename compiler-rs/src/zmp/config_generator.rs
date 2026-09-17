@@ -20,6 +20,12 @@ pub struct ZmpAppMeta {
     pub status_bar: String,
     #[serde(rename = "leftAction", default = "default_left_action")]
     pub left_action: String,
+    #[serde(rename = "actionBarHidden", default = "default_true")]
+    pub action_bar_hidden: bool,
+    #[serde(rename = "hideIOSSafeAreaBottom", default = "default_false")]
+    pub hide_ios_safe_area_bottom: bool,
+    #[serde(rename = "hideAndroidBottomNavigationBar", default = "default_false")]
+    pub hide_android_bottom_navigation_bar: bool,
 }
 
 fn default_title() -> String {
@@ -37,6 +43,12 @@ fn default_status_bar() -> String {
 fn default_left_action() -> String {
     "onlyBack".to_string()
 }
+fn default_true() -> bool {
+    true
+}
+fn default_false() -> bool {
+    false
+}
 
 impl Default for ZmpAppMeta {
     fn default() -> Self {
@@ -47,6 +59,9 @@ impl Default for ZmpAppMeta {
             text_color: default_text_color(),
             status_bar: default_status_bar(),
             left_action: default_left_action(),
+            action_bar_hidden: true,
+            hide_ios_safe_area_bottom: false,
+            hide_android_bottom_navigation_bar: false,
         }
     }
 }
@@ -102,7 +117,21 @@ impl ZmpConfigGenerator {
 
         if config_path.exists() {
             if let Ok(content) = fs::read_to_string(&config_path) {
-                if let Ok(cfg) = serde_json::from_str::<ZmpAppConfig>(&content) {
+                if let Ok(mut cfg) = serde_json::from_str::<ZmpAppConfig>(&content) {
+                    let mut modified = false;
+                    if !cfg.app.action_bar_hidden {
+                        cfg.app.action_bar_hidden = true;
+                        modified = true;
+                    }
+                    if cfg.app.hide_ios_safe_area_bottom {
+                        cfg.app.hide_ios_safe_area_bottom = false;
+                        modified = true;
+                    }
+                    if modified {
+                        if let Ok(json_str) = serde_json::to_string_pretty(&cfg) {
+                            let _ = fs::write(&config_path, json_str);
+                        }
+                    }
                     return Ok(cfg);
                 }
             }

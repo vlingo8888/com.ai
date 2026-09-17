@@ -50,21 +50,7 @@ impl ClientTransformer {
         } else {
             String::new()
         };
-        let zmp_header_html = if target == "zalo" {
-            r#"<div id="_zmp_sim_header" style="position:sticky;top:0;left:0;right:0;height:44px;background:#0068ff;color:white;display:flex;align-items:center;justify-content:space-between;padding:0 12px;z-index:99999;font-family:system-ui,-apple-system,sans-serif;font-size:14px;font-weight:600;box-shadow:0 1px 4px rgba(0,0,0,0.15);">
-    <div style="display:flex;align-items:center;gap:8px;">
-      <span style="cursor:pointer;font-size:18px;" onclick="window.history.back()">❮</span>
-      <span>Zalo Mini App</span>
-    </div>
-    <div style="display:flex;align-items:center;gap:10px;background:rgba(255,255,255,0.25);padding:4px 10px;border-radius:16px;font-size:12px;">
-      <span style="cursor:pointer;">⋯</span>
-      <span style="opacity:0.6;">|</span>
-      <span style="cursor:pointer;" onclick="console.log('Close mini app')">✕</span>
-    </div>
-  </div>"#
-        } else {
-            ""
-        };
+        let zmp_header_html = "";
 
         let ssr_state_json = serde_json::to_string(ssr_state).unwrap_or_else(|_| "{}".to_string());
         let root_content = if !ssr_html.is_empty() {
@@ -267,6 +253,8 @@ impl ClientTransformer {
       background-color: var(--background);
       color: var(--foreground);
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+      padding-bottom: max(env(safe-area-inset-bottom, 0px), 24px);
+      box-sizing: border-box;
     }}
     #_dev_bar {{
       position: fixed; bottom: 12px; right: 12px;

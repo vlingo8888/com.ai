@@ -460,12 +460,28 @@ async fn zmp_app_config_handler(State(state): State<AppState>) -> impl IntoRespo
         let p = state.root_dir.join(cand);
         if p.exists() {
             if let Ok(content) = tokio::fs::read_to_string(&p).await {
+                if let Ok(mut json_val) = serde_json::from_str::<serde_json::Value>(&content) {
+                    // Force full screen without header and preserve bottom safe area
+                    if let Some(app_obj) = json_val.get_mut("app").and_then(|v| v.as_object_mut()) {
+                        app_obj.insert("actionBarHidden".to_string(), serde_json::json!(true));
+                        app_obj.insert("statusBar".to_string(), serde_json::json!("transparent"));
+                        app_obj.insert("hideIOSSafeAreaBottom".to_string(), serde_json::json!(false));
+                        app_obj.insert("hideAndroidBottomNavigationBar".to_string(), serde_json::json!(false));
+                    }
+                    if let Ok(serialized) = serde_json::to_string_pretty(&json_val) {
+                        return (StatusCode::OK, headers, serialized).into_response();
+                    }
+                }
                 return (StatusCode::OK, headers, content).into_response();
             }
         }
     }
 
-    let default_config = crate::zmp::ZmpConfigGenerator::ensure_app_config(&state.root_dir).unwrap_or_default();
+    let mut default_config = crate::zmp::ZmpConfigGenerator::ensure_app_config(&state.root_dir).unwrap_or_default();
+    default_config.app.action_bar_hidden = true;
+    default_config.app.hide_ios_safe_area_bottom = false;
+    default_config.app.hide_android_bottom_navigation_bar = false;
+    default_config.app.status_bar = "transparent".to_string();
     let json_str = serde_json::to_string_pretty(&default_config).unwrap_or_else(|_| "{}".to_string());
     (StatusCode::OK, headers, json_str).into_response()
 }
@@ -576,7 +592,7 @@ async fn zmp_js_handler(State(state): State<AppState>) -> impl IntoResponse {
     }
 
     // 2. Otherwise serve universal Zalo Mini App Native DOM Renderer
-    let bootstrap_js = r#"// Com.AI.VN Zalo Mini App Native DOM Runtime
+    let bootstrap_js = r###"// Com.AI.VN Zalo Mini App Native DOM Runtime
 (function() {
   console.log("[Com.AI.VN] Initializing Zalo Mini App Native DOM Runtime...");
 
@@ -629,6 +645,34 @@ async fn zmp_js_handler(State(state): State<AppState>) -> impl IntoResponse {
     link.rel = "stylesheet";
     link.href = serverOrigin + "/assets/app.css";
     document.head.appendChild(link);
+  }
+
+  // 5b. Inject Safe-Area Bottom Protection Rules (Full screen & né bottom bar)
+  if (!document.getElementById("_zmp_safe_area")) {
+    var safeAreaStyle = document.createElement("style");
+    safeAreaStyle.id = "_zmp_safe_area";
+    safeAreaStyle.textContent = [
+      ":root {",
+      "  --sat: env(safe-area-inset-top, 0px);",
+      "  --sab: env(safe-area-inset-bottom, 24px);",
+      "  --sal: env(safe-area-inset-left, 0px);",
+      "  --sar: env(safe-area-inset-right, 0px);",
+      "}",
+      "html, body {",
+      "  margin: 0 !important;",
+      "  padding: 0 !important;",
+      "  width: 100% !important;",
+      "  min-height: 100vh !important;",
+      "  overflow-x: hidden !important;",
+      "}",
+      "#app, #root {",
+      "  min-height: 100vh !important;",
+      "  width: 100% !important;",
+      "  box-sizing: border-box !important;",
+      "  padding-bottom: max(env(safe-area-inset-bottom, 0px), 24px) !important;",
+      "}"
+    ].join("\n");
+    document.head.appendChild(safeAreaStyle);
   }
 
   // 6. Inject Tailwind Browser Engine
@@ -859,7 +903,7 @@ async fn zmp_js_handler(State(state): State<AppState>) -> impl IntoResponse {
     bootApp();
   }
 })();
-"#;
+"###;
     (StatusCode::OK, headers, bootstrap_js.to_string()).into_response()
 }
 
