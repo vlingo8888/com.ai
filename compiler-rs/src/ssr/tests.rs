@@ -32,6 +32,8 @@ mod tests {
                 PathBuf::from("app/layout.tsx"),
                 PathBuf::from("app/dashboard/layout.tsx"),
             ],
+            segments_files: vec![],
+            global_error_file: None,
             params: serde_json::json!({}),
             search_params: serde_json::json!({ "page": 1 }),
             cookies: Some("token=abc".to_string()),

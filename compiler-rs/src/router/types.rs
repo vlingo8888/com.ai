@@ -67,6 +67,23 @@ impl RouteSegment {
     }
 }
 
+/// Hierarchical collection of special files at a specific route segment folder
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SegmentFiles {
+    /// Relative path of the segment directory from root, e.g. `app` or `app/dashboard`
+    pub folder: PathBuf,
+    /// `layout.tsx` / `layout.jsx` / `layout.js` / `layout.ts`
+    pub layout: Option<PathBuf>,
+    /// `template.tsx` / `template.jsx` / `template.js` / `template.ts`
+    pub template: Option<PathBuf>,
+    /// `error.tsx` / `error.jsx` / `error.js` / `error.ts`
+    pub error: Option<PathBuf>,
+    /// `loading.tsx` / `loading.jsx` / `loading.js` / `loading.ts`
+    pub loading: Option<PathBuf>,
+    /// `not-found.tsx` / `not-found.jsx` / `not-found.js` / `not-found.ts`
+    pub not_found: Option<PathBuf>,
+}
+
 /// Represents an indexable, matchable App Router route entry
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RouteEntry {
@@ -78,6 +95,12 @@ pub struct RouteEntry {
     pub page_file: PathBuf,
     /// Hierarchical chain of layouts applying to this route, from root layout down to leaf
     pub layout_files: Vec<PathBuf>,
+    /// Hierarchical chain of segment special files from root down to leaf
+    #[serde(default)]
+    pub segments_files: Vec<SegmentFiles>,
+    /// Root level `global-error.tsx` (if present in root app folder)
+    #[serde(default)]
+    pub global_error_file: Option<PathBuf>,
     /// List of dynamic parameter names extracted in order, e.g. `["id"]`
     pub param_names: Vec<String>,
     /// Whether this is a backend API route (`route.ts`) or a frontend UI page (`page.tsx`)

@@ -75,7 +75,7 @@ impl ClientTransformer {
         };
 
         format!(
-            r#"<!DOCTYPE html>
+            r####"<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
@@ -510,6 +510,28 @@ impl ClientTransformer {
       return node;
     }}
 
+    function makeParams(paramsObj) {{
+      const p = {{ ...(paramsObj || {{}}) }};
+      Object.defineProperty(p, 'then', {{
+        value: (resolve) => Promise.resolve(p).then(resolve),
+        enumerable: false,
+        writable: true,
+        configurable: true,
+      }});
+      return p;
+    }}
+
+    function makeSearchParams(searchParamsObj) {{
+      const sp = {{ ...(searchParamsObj || {{}}) }};
+      Object.defineProperty(sp, 'then', {{
+        value: (resolve) => Promise.resolve(sp).then(resolve),
+        enumerable: false,
+        writable: true,
+        configurable: true,
+      }});
+      return sp;
+    }}
+
     function makeComponent(Comp) {{
       if (!Comp) return () => null;
       const isAsync = Comp.constructor && (Comp.constructor.name === 'AsyncFunction' || Comp[Symbol.toStringTag] === 'AsyncFunction');
@@ -526,7 +548,7 @@ impl ClientTransformer {
               if (active) setErr(e);
             }});
             return () => {{ active = false; }};
-          }}, [safeProps.children]);
+          }}, [safeProps.children, JSON.stringify(safeProps.params)]);
 
           if (err) throw err;
           return content;
@@ -551,11 +573,100 @@ impl ClientTransformer {
       }};
     }}
 
-    async function renderRoute(entryStr, layoutFiles, params = {{}}, timestamp = null) {{
+    class ErrorBoundary extends React.Component {{
+      constructor(props) {{
+        super(props);
+        this.state = {{ hasError: false, error: null }};
+      }}
+      static getDerivedStateFromError(error) {{
+        return {{ hasError: true, error }};
+      }}
+      componentDidCatch(error, info) {{
+        console.error("[Route ErrorBoundary]", error, info);
+      }}
+      render() {{
+        if (this.state.hasError) {{
+          if (this.props.fallback) {{
+            const Fallback = this.props.fallback;
+            return React.createElement(Fallback, {{
+              error: this.state.error,
+              reset: () => this.setState({{ hasError: false, error: null }})
+            }});
+          }}
+          return React.createElement("div", {{
+            style: {{ padding: "2rem", color: "#ef4444", fontFamily: "system-ui" }}
+          }}, React.createElement("h2", {{ style: {{ fontWeight: 600 }} }}, "Application Error"),
+             React.createElement("pre", {{ style: {{ marginTop: "0.5rem", fontSize: "0.875rem" }} }}, this.state.error?.message || String(this.state.error)),
+             React.createElement("button", {{
+               onClick: () => this.setState({{ hasError: false, error: null }}),
+               style: {{ marginTop: "1rem", padding: "0.5rem 1rem", background: "#ef4444", color: "white", borderRadius: "0.375rem", border: "none", cursor: "pointer" }}
+             }}, "Try again")
+          );
+        }}
+        return this.props.children;
+      }}
+    }}
+
+    class NotFoundBoundary extends React.Component {{
+      constructor(props) {{
+        super(props);
+        this.state = {{ isNotFound: false }};
+      }}
+      static getDerivedStateFromError(error) {{
+        if (error?.digest === "NEXT_NOT_FOUND" || error?.message === "NEXT_NOT_FOUND" || (error?.message && error.message.includes("404 Not Found"))) {{
+          return {{ isNotFound: true }};
+        }}
+        throw error;
+      }}
+      render() {{
+        if (this.state.isNotFound) {{
+          if (this.props.fallback) {{
+            const Fallback = this.props.fallback;
+            return React.createElement(Fallback, {{}});
+          }}
+          return React.createElement("div", {{
+            style: {{ minHeight: "60vh", display: "flex", alignItems: "center", justifyContent: "center", flexDirection: "column" }}
+          }}, React.createElement("h1", {{ style: {{ fontSize: "2rem", fontWeight: 700 }} }}, "404 - Page Not Found"));
+        }}
+        return this.props.children;
+      }}
+    }}
+
+    async function renderRoute(entryStr, layoutFiles, params = {{}}, timestamp = null, segmentFiles = [], globalErrorFile = null) {{
       const renderId = ++currentRenderId;
-      window.__NATA_PARAMS__ = params;
+      window.__NATA_PARAMS__ = params || {{}};
+
+      const searchParamsObj = typeof window !== 'undefined'
+        ? Object.fromEntries(new URLSearchParams(window.location.search))
+        : {{}};
+
+      const safeParams = makeParams(params);
+      const safeSearchParams = makeSearchParams(searchParamsObj);
+      const routeProps = {{
+        params: safeParams,
+        searchParams: safeSearchParams
+      }};
+
+      window.dispatchEvent(new CustomEvent("_nata_navigate", {{ detail: {{ params: window.__NATA_PARAMS__, searchParams: searchParamsObj }} }}));
 
       try {{
+        // Parallel preload all segment modules
+        const allModules = [entryStr];
+        if (Array.isArray(segmentFiles)) {{
+          for (const s of segmentFiles) {{
+            if (s.layout) allModules.push(s.layout);
+            if (s.template) allModules.push(s.template);
+            if (s.error) allModules.push(s.error);
+            if (s.loading) allModules.push(s.loading);
+            if (s.not_found) allModules.push(s.not_found);
+          }}
+        }} else if (Array.isArray(layoutFiles)) {{
+          allModules.push(...layoutFiles);
+        }}
+        if (globalErrorFile) allModules.push(globalErrorFile);
+
+        await Promise.all(allModules.map(f => loadModule(f, timestamp).catch(() => null)));
+
         const pageMod = await loadModule(entryStr, timestamp);
         const Page = pageMod.default || Object.values(pageMod).find(v => typeof v === 'function');
 
@@ -565,26 +676,113 @@ impl ClientTransformer {
 
         let RootComponent = makeComponent(Page);
 
-        // Wrap layouts from inside-out (leaf layout to root layout)
-        for (let i = layoutFiles.length - 1; i >= 0; i--) {{
-          try {{
-            const layoutMod = await loadModule(layoutFiles[i], timestamp);
-            let Layout = layoutMod.default;
-            if (!Layout) {{
-              const entry = Object.entries(layoutMod).find(([k, v]) => typeof v === 'function' && (/^[A-Z]/.test(k) || k.endsWith('Layout')));
-              Layout = entry ? entry[1] : undefined;
+        if (Array.isArray(segmentFiles) && segmentFiles.length > 0) {{
+          for (let i = segmentFiles.length - 1; i >= 0; i--) {{
+            const seg = segmentFiles[i];
+
+            if (seg.not_found) {{
+              try {{
+                const nfMod = await loadModule(seg.not_found, timestamp);
+                const NF = nfMod.default || Object.values(nfMod).find(v => typeof v === 'function');
+                if (NF) {{
+                  const CurrentChild = RootComponent;
+                  const WrappedNF = makeComponent(NF);
+                  RootComponent = (props = {{}}) => React.createElement(NotFoundBoundary, {{ fallback: WrappedNF }}, React.createElement(CurrentChild, props));
+                }}
+              }} catch (e) {{}}
             }}
-            if (!Layout) {{
-              Layout = Object.values(layoutMod).find(v => typeof v === 'function');
+
+            if (seg.loading) {{
+              try {{
+                const loadMod = await loadModule(seg.loading, timestamp);
+                const Loading = loadMod.default || Object.values(loadMod).find(v => typeof v === 'function');
+                if (Loading) {{
+                  const CurrentChild = RootComponent;
+                  const WrappedLoading = makeComponent(Loading);
+                  RootComponent = (props = {{}}) => React.createElement(React.Suspense, {{ fallback: React.createElement(WrappedLoading, props) }}, React.createElement(CurrentChild, props));
+                }}
+              }} catch (e) {{}}
             }}
-            if (Layout) {{
-              const CurrentChild = RootComponent;
-              const WrappedLayout = makeComponent(Layout);
-              RootComponent = (props = {{}}) => React.createElement(WrappedLayout, {{ ...(props || {{}}), children: React.createElement(CurrentChild, props || {{}}) }});
+
+            if (seg.error) {{
+              try {{
+                const errMod = await loadModule(seg.error, timestamp);
+                const ErrComp = errMod.default || Object.values(errMod).find(v => typeof v === 'function');
+                if (ErrComp) {{
+                  const CurrentChild = RootComponent;
+                  const WrappedErr = makeComponent(ErrComp);
+                  RootComponent = (props = {{}}) => React.createElement(ErrorBoundary, {{ fallback: WrappedErr }}, React.createElement(CurrentChild, props));
+                }}
+              }} catch (e) {{}}
             }}
-          }} catch (layoutErr) {{
-            console.warn("Could not wrap layout:", layoutFiles[i], layoutErr);
+
+            if (seg.template) {{
+              try {{
+                const tplMod = await loadModule(seg.template, timestamp);
+                const Tpl = tplMod.default || Object.values(tplMod).find(v => typeof v === 'function');
+                if (Tpl) {{
+                  const CurrentChild = RootComponent;
+                  const WrappedTpl = makeComponent(Tpl);
+                  RootComponent = (props = {{}}) => React.createElement(WrappedTpl, {{ ...routeProps, ...(props || {{}}), key: window.location.pathname, children: React.createElement(CurrentChild, props) }});
+                }}
+              }} catch (e) {{}}
+            }}
+
+            if (seg.layout) {{
+              try {{
+                const layoutMod = await loadModule(seg.layout, timestamp);
+                let Layout = layoutMod.default;
+                if (!Layout) {{
+                  const entry = Object.entries(layoutMod).find(([k, v]) => typeof v === 'function' && (/^[A-Z]/.test(k) || k.endsWith('Layout')));
+                  Layout = entry ? entry[1] : undefined;
+                }}
+                if (!Layout) {{
+                  Layout = Object.values(layoutMod).find(v => typeof v === 'function');
+                }}
+                if (Layout) {{
+                  const CurrentChild = RootComponent;
+                  const WrappedLayout = makeComponent(Layout);
+                  RootComponent = (props = {{}}) => React.createElement(WrappedLayout, {{ ...routeProps, ...(props || {{}}), children: React.createElement(CurrentChild, props) }});
+                }}
+              }} catch (layoutErr) {{
+                console.warn("Could not wrap layout:", seg.layout, layoutErr);
+              }}
+            }}
           }}
+        }} else {{
+          // Fallback legacy layout wrapping
+          for (let i = layoutFiles.length - 1; i >= 0; i--) {{
+            try {{
+              const layoutMod = await loadModule(layoutFiles[i], timestamp);
+              let Layout = layoutMod.default;
+              if (!Layout) {{
+                const entry = Object.entries(layoutMod).find(([k, v]) => typeof v === 'function' && (/^[A-Z]/.test(k) || k.endsWith('Layout')));
+                Layout = entry ? entry[1] : undefined;
+              }}
+              if (!Layout) {{
+                Layout = Object.values(layoutMod).find(v => typeof v === 'function');
+              }}
+              if (Layout) {{
+                const CurrentChild = RootComponent;
+                const WrappedLayout = makeComponent(Layout);
+                RootComponent = (props = {{}}) => React.createElement(WrappedLayout, {{ ...routeProps, ...(props || {{}}), children: React.createElement(CurrentChild, props) }});
+              }}
+            }} catch (layoutErr) {{
+              console.warn("Could not wrap layout:", layoutFiles[i], layoutErr);
+            }}
+          }}
+        }}
+
+        if (globalErrorFile) {{
+          try {{
+            const geMod = await loadModule(globalErrorFile, timestamp);
+            const GE = geMod.default || Object.values(geMod).find(v => typeof v === 'function');
+            if (GE) {{
+              const CurrentChild = RootComponent;
+              const WrappedGE = makeComponent(GE);
+              RootComponent = (props = {{}}) => React.createElement(ErrorBoundary, {{ fallback: WrappedGE }}, React.createElement(CurrentChild, props));
+            }}
+          }} catch (e) {{}}
         }}
 
         if (renderId === currentRenderId) {{
@@ -594,7 +792,7 @@ impl ClientTransformer {
           if (!currentRoot) {{
             if (isSsr && typeof ReactDOM.hydrateRoot === "function") {{
               try {{
-                currentRoot = ReactDOM.hydrateRoot(rootEl, React.createElement(RootComponent, {{}}), {{
+                currentRoot = ReactDOM.hydrateRoot(rootEl, React.createElement(RootComponent, routeProps), {{
                   onRecoverableError(error) {{
                     console.warn("[NATA Hydration Info]", error);
                   }}
@@ -604,14 +802,14 @@ impl ClientTransformer {
                 console.warn("[NATA SSR] Hydration mismatch/error, falling back to createRoot:", hydrateErr);
                 rootEl.innerHTML = "";
                 currentRoot = ReactDOM.createRoot(rootEl);
-                currentRoot.render(React.createElement(RootComponent, {{}}));
+                currentRoot.render(React.createElement(RootComponent, routeProps));
               }}
             }} else {{
               currentRoot = ReactDOM.createRoot(rootEl);
-              currentRoot.render(React.createElement(RootComponent, {{}}));
+              currentRoot.render(React.createElement(RootComponent, routeProps));
             }}
           }} else {{
-            currentRoot.render(React.createElement(RootComponent, {{}}));
+            currentRoot.render(React.createElement(RootComponent, routeProps));
           }}
           const overlay = document.getElementById('_error_overlay');
           if (overlay) overlay.style.display = 'none';
@@ -653,11 +851,15 @@ impl ClientTransformer {
         }}
 
         if (!info || !info.found) {{
+          if (info && info.not_found_file) {{
+            await renderRoute(info.not_found_file, info.layout_files || [], info.params || {{}}, null, info.segments_files || [], info.global_error_file);
+            return;
+          }}
           window.location.href = targetUrl;
           return;
         }}
 
-        await renderRoute(info.page_file, info.layout_files || [], info.params || {{}});
+        await renderRoute(info.page_file, info.layout_files || [], info.params || {{}}, null, info.segments_files || [], info.global_error_file);
         window.scrollTo(0, 0);
       }} catch (err) {{
         console.warn("SPA navigation fallback:", err);
@@ -1070,8 +1272,19 @@ impl ClientTransformer {
       }}
     }}, 4000);
 
+    let initialData = {{}};
+    try {{
+      const ssrDataEl = document.getElementById('__NATA_SSR_DATA__');
+      if (ssrDataEl && ssrDataEl.textContent) {{
+        initialData = JSON.parse(ssrDataEl.textContent);
+      }}
+    }} catch (e) {{}}
+
+    const initialParams = (initialData && initialData.params) ? initialData.params : {{}};
+    window.__NATA_PARAMS__ = initialParams;
+
     // Initial mount
-    renderRoute("{entry_str}", {layouts_json}).finally(() => {{
+    renderRoute("{entry_str}", {layouts_json}, initialParams).finally(() => {{
       clearTimeout(mountDiagnosticTimer);
     }});
 
@@ -1123,7 +1336,7 @@ impl ClientTransformer {
           }} catch {{}}
 
           if (info && info.found) {{
-            await renderRoute(info.page_file, info.layout_files || [], info.params || {{}}, now);
+            await renderRoute(info.page_file, info.layout_files || [], info.params || {{}}, now, info.segments_files || [], info.global_error_file);
           }} else {{
             location.reload();
           }}
@@ -1138,7 +1351,7 @@ impl ClientTransformer {
     }};
   </script>
 </body>
-</html>"#
+</html>"####
         )
     }
 }

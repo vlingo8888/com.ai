@@ -14,7 +14,7 @@
 | **Database & Migration Engine** | Kysely, Postgres Introspection, `com migrate`, `com db *` | ✅ **Fully Supported** | Completed |
 | **Tailwind CSS v4 & Theming** | Native JIT, CSS variable theming | ✅ **Fully Supported** | Completed |
 | **ESM Zero-Install (Client)** | Remote CDN dynamic resolution | ✅ **Fully Supported** | Completed |
-| **Route Special Files** | `loading.tsx`, `error.tsx`, `not-found.tsx`, `route.ts` | 🚧 **In Progress** | **High (P0)** |
+| **Route Special Files** | `loading.tsx`, `error.tsx`, `not-found.tsx`, `template.tsx` | ✅ **Fully Supported** | Completed |
 | **Next.js Shims & APIs** | `next/navigation`, `next/headers`, `next/link`, `next/image` | 🟡 **Partial** | **High (P0)** |
 | **SEO & Metadata API** | `export const metadata`, `generateMetadata()`, `sitemap.ts` | 🔴 **Missing** | **High (P0)** |
 | **Route Handlers (API Routes)** | `app/api/.../route.ts` (`GET`, `POST`, `PUT`, `DELETE`) | 🔴 **Missing** | **High (P0)** |
@@ -29,18 +29,18 @@
 
 Next.js provides convention-based file names within route folders to handle UI states declaratively:
 
-- [ ] **`loading.tsx` Support**:
+- [x] **`loading.tsx` Support**:
   - Automatically wrap `page.tsx` with React `<Suspense fallback={<Loading />}>` when `loading.tsx` is present in the route folder or parent folders.
-- [ ] **`error.tsx` & `global-error.tsx` Support**:
+- [x] **`error.tsx` & `global-error.tsx` Support**:
   - Automatically wrap route boundaries with a React Error Boundary component rendering `error.tsx` (with `reset()` prop).
-- [ ] **`not-found.tsx` Support**:
+- [x] **`not-found.tsx` Support**:
   - Render `not-found.tsx` when `notFound()` is triggered from `next/navigation` or a route doesn't match.
-- [ ] **`template.tsx` Support**:
+- [x] **`template.tsx` Support**:
   - Similar to `layout.tsx`, but creates a new instance for each child on navigation (does not preserve state, re-triggers animations).
-- [ ] **Advanced Dynamic Routing**:
-  - [ ] Catch-all routes: `app/docs/[...slug]/page.tsx`
-  - [ ] Optional catch-all routes: `app/shop/[[...slug]]/page.tsx`
-  - [ ] Route Groups: `app/(marketing)/...` vs `app/(dashboard)/...` (folders with parentheses should not affect URL pathname).
+- [x] **Advanced Dynamic Routing**:
+  - [x] Catch-all routes: `app/docs/[...slug]/page.tsx`
+  - [x] Optional catch-all routes: `app/shop/[[...slug]]/page.tsx`
+  - [x] Route Groups: `app/(marketing)/...` vs `app/(dashboard)/...` (folders with parentheses should not affect URL pathname).
 - [ ] **Parallel Routes & Intercepting Routes (P2)**:
   - `@modal/page.tsx` slots and `(..)photos/[id]` modal interception.
 

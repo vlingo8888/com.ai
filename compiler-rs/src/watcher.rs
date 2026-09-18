@@ -24,6 +24,7 @@ impl ProjectWatcher {
     pub fn start<P: AsRef<Path>>(
         root_dir: P,
         hmr_tx: broadcast::Sender<String>,
+        router: std::sync::Arc<tokio::sync::RwLock<crate::router::AppRouter>>,
     ) -> tokio::task::JoinHandle<()> {
         let root = root_dir.as_ref().to_path_buf();
         let canon_root = root.canonicalize().unwrap_or_else(|_| root.clone());
@@ -80,6 +81,22 @@ impl ProjectWatcher {
                         .as_millis();
 
                     let files_to_notify: Vec<PathBuf> = pending_files.drain().collect();
+
+                    let mut should_rescan_router = false;
+                    for path in &files_to_notify {
+                        let rel = path.strip_prefix(&canon_root).unwrap_or(path);
+                        let rel_str = rel.to_string_lossy().replace('\\', "/");
+                        if rel_str.starts_with("app/") || rel_str.starts_with("src/app/") || rel_str == "app" || rel_str == "src/app" {
+                            should_rescan_router = true;
+                            break;
+                        }
+                    }
+
+                    if should_rescan_router {
+                        let new_router = crate::router::AppRouter::scan(&canon_root);
+                        let mut r_guard = router.write().await;
+                        *r_guard = new_router;
+                    }
 
                     for path in files_to_notify {
                         let rel_path = path

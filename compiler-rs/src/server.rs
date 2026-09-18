@@ -22,7 +22,7 @@ use crate::{
 #[derive(Clone)]
 pub struct AppState {
     pub root_dir: PathBuf,
-    pub router: Arc<AppRouter>,
+    pub router: Arc<tokio::sync::RwLock<AppRouter>>,
     pub hmr_tx: broadcast::Sender<String>,
     pub target: String,
     pub query_logs: Arc<RwLock<VecDeque<serde_json::Value>>>,
@@ -41,12 +41,12 @@ impl DevServer {
             crate::zmp::ZmpConfigGenerator::ensure_hr_config(&root_dir);
         }
 
-        let router = Arc::new(AppRouter::scan(&root_dir));
+        let router = Arc::new(tokio::sync::RwLock::new(AppRouter::scan(&root_dir)));
         let (hmr_tx, _) = broadcast::channel::<String>(100);
         let query_logs = Arc::new(RwLock::new(VecDeque::with_capacity(500)));
 
         // Start native file system watcher for live HMR & CSS hot reload
-        crate::watcher::ProjectWatcher::start(&root_dir, hmr_tx.clone());
+        crate::watcher::ProjectWatcher::start(&root_dir, hmr_tx.clone(), router.clone());
 
         let state = AppState {
             root_dir: root_dir.clone(),
@@ -366,19 +366,41 @@ async fn route_info_handler(
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
     let path = params.get("path").cloned().unwrap_or_else(|| "/".to_string());
-    let dynamic_router = AppRouter::scan(&state.root_dir);
+    let router_guard = state.router.read().await;
 
     let mut headers = HeaderMap::new();
     headers.insert(header::CONTENT_TYPE, "application/json; charset=utf-8".parse().unwrap());
     headers.insert(header::CACHE_CONTROL, "no-cache".parse().unwrap());
 
-    if let Some((route, route_params)) = dynamic_router.match_route(&path) {
+    if let Some((route, route_params)) = router_guard.match_route(&path) {
         let page_file = route.page_file.to_string_lossy().replace('\\', "/");
         let layout_files: Vec<String> = route
             .layout_files
             .iter()
             .map(|p| p.to_string_lossy().replace('\\', "/"))
             .collect();
+
+        let segments_files_clean: Vec<serde_json::Value> = route
+            .segments_files
+            .iter()
+            .map(|s| {
+                let clean_opt = |opt: &Option<std::path::PathBuf>| -> serde_json::Value {
+                    match opt {
+                        Some(p) => serde_json::Value::String(p.to_string_lossy().replace('\\', "/")),
+                        None => serde_json::Value::Null,
+                    }
+                };
+                serde_json::json!({
+                    "folder": s.folder.to_string_lossy().replace('\\', "/"),
+                    "layout": clean_opt(&s.layout),
+                    "template": clean_opt(&s.template),
+                    "error": clean_opt(&s.error),
+                    "loading": clean_opt(&s.loading),
+                    "not_found": clean_opt(&s.not_found),
+                })
+            })
+            .collect();
+        let global_error = route.global_error_file.as_ref().map(|p| p.to_string_lossy().replace('\\', "/"));
 
         (
             StatusCode::OK,
@@ -387,21 +409,31 @@ async fn route_info_handler(
                 "found": true,
                 "page_file": page_file,
                 "layout_files": layout_files,
+                "segments_files": segments_files_clean,
+                "global_error_file": global_error,
                 "params": route_params
             })),
         )
             .into_response()
     } else {
-        let err_msg = if dynamic_router.routes.is_empty() {
+        let not_found_file = router_guard
+            .routes
+            .iter()
+            .find_map(|r| {
+                r.segments_files.iter().find_map(|s| s.not_found.as_ref().map(|p| p.to_string_lossy().replace('\\', "/")))
+            });
+        let err_msg = if router_guard.routes.is_empty() {
             "Không tìm thấy cấu trúc App Router (thư mục 'app/' hoặc 'src/app/'). Hãy đảm bảo lệnh 'com dev' được chạy đúng bên trong thư mục dự án."
         } else {
             "Không tìm thấy trang cho đường dẫn này (404 Not Found)."
         };
+
         (
             StatusCode::NOT_FOUND,
             headers,
             Json(serde_json::json!({
                 "found": false,
+                "not_found_file": not_found_file,
                 "error": err_msg
             })),
         )
@@ -1183,9 +1215,16 @@ export const useSearchParams = () => {
 };
 
 export const useParams = () => {
-  const [params, setParams] = React.useState(() => (typeof window !== "undefined" && window.__NATA_PARAMS__) ? window.__NATA_PARAMS__ : {});
+  const getParams = () => (typeof window !== "undefined" && window.__NATA_PARAMS__ && typeof window.__NATA_PARAMS__ === "object") ? window.__NATA_PARAMS__ : {};
+  const [params, setParams] = React.useState(getParams);
   React.useEffect(() => {
-    const handler = () => setParams((typeof window !== "undefined" && window.__NATA_PARAMS__) ? window.__NATA_PARAMS__ : {});
+    const handler = (e) => {
+      if (e && e.detail && e.detail.params) {
+        setParams(e.detail.params);
+      } else {
+        setParams(getParams());
+      }
+    };
     window.addEventListener("popstate", handler);
     window.addEventListener("_nata_navigate", handler);
     return () => {
@@ -1206,7 +1245,11 @@ export const redirect = (url) => {
   }
 };
 
-export const notFound = () => { throw new Error("404 Not Found"); };
+export const notFound = () => {
+  const err = new Error("NEXT_NOT_FOUND");
+  err.digest = "NEXT_NOT_FOUND";
+  throw err;
+};
 export default { useRouter, usePathname, useSearchParams, useParams, redirect, notFound };
 "##
         }
@@ -1215,10 +1258,16 @@ export default { useRouter, usePathname, useSearchParams, useParams, redirect, n
 export const useRouter = () => {
   const [pathname, setPathname] = React.useState(() => typeof window !== "undefined" ? window.location.pathname : "/");
   const [search, setSearch] = React.useState(() => typeof window !== "undefined" ? window.location.search : "");
+  const [params, setParams] = React.useState(() => (typeof window !== "undefined" && window.__NATA_PARAMS__) ? window.__NATA_PARAMS__ : {});
   React.useEffect(() => {
-    const handler = () => {
+    const handler = (e) => {
       setPathname(window.location.pathname);
       setSearch(window.location.search);
+      if (e && e.detail && e.detail.params) {
+        setParams(e.detail.params);
+      } else if (typeof window !== "undefined" && window.__NATA_PARAMS__) {
+        setParams(window.__NATA_PARAMS__);
+      }
     };
     window.addEventListener("popstate", handler);
     window.addEventListener("_nata_navigate", handler);
@@ -1248,7 +1297,7 @@ export const useRouter = () => {
     reload: () => { if (typeof window !== "undefined") window.location.reload(); },
     pathname,
     asPath: pathname + search,
-    query: Object.fromEntries(new URLSearchParams(search)),
+    query: { ...Object.fromEntries(new URLSearchParams(search)), ...params },
     events: { on: () => {}, off: () => {}, emit: () => {} }
   };
 };
@@ -1356,9 +1405,9 @@ async fn app_router_fallback_handler(
         return axum::response::Redirect::temporary(&redirect_url).into_response();
     }
 
-    // Re-scan routes dynamically in dev mode so new layouts and pages are immediately active
-    let dynamic_router = AppRouter::scan(&state.root_dir);
-    if let Some((route, params)) = dynamic_router.match_route(path) {
+    // In-memory router matching with zero disk I/O
+    let router_guard = state.router.read().await;
+    if let Some((route, params)) = router_guard.match_route(path) {
         let custom_css = crate::css_compiler::CssCompiler::find_and_load_custom_css(&state.root_dir);
 
         // Build SSR request context
@@ -1390,6 +1439,8 @@ async fn app_router_fallback_handler(
             path: path.to_string(),
             page_file: route.page_file.clone(),
             layout_files: route.layout_files.clone(),
+            segments_files: route.segments_files.clone(),
+            global_error_file: route.global_error_file.clone(),
             params: serde_json::to_value(&params).unwrap_or_else(|_| serde_json::json!({})),
             search_params: serde_json::to_value(&query_map).unwrap_or_else(|_| serde_json::json!({})),
             cookies: raw_cookie_str,
@@ -1447,6 +1498,44 @@ async fn app_router_fallback_handler(
         if let Ok(bytes) = tokio::fs::read(static_candidate).await {
             return (StatusCode::OK, bytes).into_response();
         }
+    }
+
+    // Try rendering root not-found.tsx if available
+    let not_found_opt = router_guard.routes.iter().find_map(|r| {
+        r.segments_files.iter().find_map(|s| s.not_found.clone())
+    });
+
+    if let Some(not_found_file) = not_found_opt {
+        let custom_css = crate::css_compiler::CssCompiler::find_and_load_custom_css(&state.root_dir);
+        let root_layout = router_guard.routes.first().and_then(|r| r.layout_files.first().cloned());
+        let layout_files = match root_layout {
+            Some(l) => vec![l],
+            None => vec![],
+        };
+        let ssr_req = SsrRequest {
+            path: path.to_string(),
+            page_file: not_found_file.clone(),
+            layout_files: layout_files.clone(),
+            segments_files: vec![],
+            global_error_file: None,
+            params: serde_json::json!({}),
+            search_params: serde_json::json!({}),
+            cookies: None,
+            headers: None,
+        };
+        let ssr_output = SsrEngine::render(&state.root_dir, ssr_req).await;
+        let html = ClientTransformer::render_ssr_html_shell(
+            "404: This page could not be found",
+            &not_found_file,
+            &layout_files,
+            &custom_css,
+            &ssr_output.html,
+            &ssr_output.initial_state,
+            &state.target,
+        );
+        let mut response = Html(html).into_response();
+        *response.status_mut() = StatusCode::NOT_FOUND;
+        return response;
     }
 
     (StatusCode::NOT_FOUND, "Route not found in App Router").into_response()

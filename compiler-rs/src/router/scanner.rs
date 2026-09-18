@@ -62,25 +62,43 @@ impl RouteScanner {
             let (pattern, regex_str, param_names, score) =
                 RouteMatcher::compile_segments(&segments);
 
-            // Find all cascading layouts from root app dir to current folder
-            let mut layout_files = Vec::new();
+            // Collect directory chain from app_dir down to current folder (root -> leaf)
+            let mut dir_chain = Vec::new();
             let mut current_search = path.parent();
             while let Some(dir) = current_search {
-                for ext in &["tsx", "jsx", "js", "ts"] {
-                    let layout_cand = dir.join(format!("layout.{}", ext));
-                    if layout_cand.exists() {
-                        if let Ok(rel_path) = layout_cand.strip_prefix(root) {
-                            layout_files.insert(0, rel_path.to_path_buf());
-                        }
-                        break;
-                    }
-                }
+                dir_chain.insert(0, dir);
                 if dir == app_dir {
                     break;
                 }
                 current_search = dir.parent();
             }
 
+            let mut layout_files = Vec::new();
+            let mut segments_files = Vec::new();
+
+            for dir in dir_chain {
+                let rel_folder = dir.strip_prefix(root).unwrap_or(dir).to_path_buf();
+                let layout = Self::find_special_file(dir, root, "layout");
+                let template = Self::find_special_file(dir, root, "template");
+                let error = Self::find_special_file(dir, root, "error");
+                let loading = Self::find_special_file(dir, root, "loading");
+                let not_found = Self::find_special_file(dir, root, "not-found");
+
+                if let Some(ref l) = layout {
+                    layout_files.push(l.clone());
+                }
+
+                segments_files.push(super::types::SegmentFiles {
+                    folder: rel_folder,
+                    layout,
+                    template,
+                    error,
+                    loading,
+                    not_found,
+                });
+            }
+
+            let global_error_file = Self::find_special_file(app_dir, root, "global-error");
             let rel_page = path.strip_prefix(root).unwrap_or(path).to_path_buf();
 
             routes.push(RouteEntry {
@@ -88,6 +106,8 @@ impl RouteScanner {
                 regex: regex_str,
                 page_file: rel_page,
                 layout_files,
+                segments_files,
+                global_error_file,
                 param_names,
                 is_api,
                 kind,
@@ -108,5 +128,20 @@ impl RouteScanner {
         });
 
         routes
+    }
+
+    /// Checks for a special file with any of the supported extensions (.tsx, .jsx, .js, .ts)
+    pub fn find_special_file(dir: &Path, root: &Path, prefix: &str) -> Option<std::path::PathBuf> {
+        for ext in &["tsx", "jsx", "js", "ts"] {
+            let cand = dir.join(format!("{}.{}", prefix, ext));
+            if cand.exists() && cand.is_file() {
+                if let Ok(rel) = cand.strip_prefix(root) {
+                    return Some(rel.to_path_buf());
+                } else {
+                    return Some(cand);
+                }
+            }
+        }
+        None
     }
 }

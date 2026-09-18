@@ -9,7 +9,7 @@ mod tests;
 pub use matcher::RouteMatcher;
 pub use scanner::RouteScanner;
 pub use segment::SegmentParser;
-pub use types::{RouteEntry, RouteKind, RouteMatch, RouteSegment, SegmentType};
+pub use types::{RouteEntry, RouteKind, RouteMatch, RouteSegment, SegmentFiles, SegmentType};
 
 use std::{collections::HashMap, path::Path};
 

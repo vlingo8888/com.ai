@@ -61,6 +61,8 @@ coverage/
 .nata/
 temp/
 tmp/
+.test-*/
+.test*
 
 # Operating System Files
 # macOS

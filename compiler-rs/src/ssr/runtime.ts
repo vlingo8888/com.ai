@@ -6,9 +6,20 @@
 const SSR_DELIM_START = "__NATA_SSR_OUT_START__";
 const SSR_DELIM_END = "__NATA_SSR_OUT_END__";
 
+interface SegmentFilePaths {
+  folder: string;
+  layout?: string | null;
+  template?: string | null;
+  error?: string | null;
+  loading?: string | null;
+  not_found?: string | null;
+}
+
 interface SsrInput {
   pagePath: string;
   layoutPaths: string[];
+  segmentsFiles?: SegmentFilePaths[];
+  globalErrorPath?: string | null;
   params: Record<string, any>;
   searchParams: Record<string, any>;
   cookiesStr: string;
@@ -173,6 +184,10 @@ export async function runSsr(input: SsrInput) {
               redirectUrl = err.url || err.message;
               return null;
             }
+            if (err?.digest === "NEXT_NOT_FOUND" || err?.message === "NEXT_NOT_FOUND" || err?.message?.includes("404 Not Found")) {
+              notFoundEncountered = true;
+              return null;
+            }
             throw err;
           }
         };
@@ -182,44 +197,134 @@ export async function runSsr(input: SsrInput) {
           redirectUrl = err.url || err.message;
           return null;
         }
+        if (err?.digest === "NEXT_NOT_FOUND" || err?.message === "NEXT_NOT_FOUND" || err?.message?.includes("404 Not Found")) {
+          notFoundEncountered = true;
+          return null;
+        }
         throw err;
       }
     };
 
-    // 5. Build Component Tree from Page outwards through Layouts
+    const loadComp = async (filePath: string | null | undefined) => {
+      if (!filePath) return null;
+      try {
+        const mod = await import(filePath);
+        let comp = mod.default;
+        if (!comp) {
+          const entry = Object.entries(mod).find(([k, v]) => typeof v === "function" && /^[A-Z]/.test(k));
+          comp = entry ? entry[1] : Object.values(mod).find((v) => typeof v === "function");
+        }
+        return comp;
+      } catch (err) {
+        console.warn(`[NATA SSR] Failed to load module ${filePath}:`, err);
+        return null;
+      }
+    };
+
+    // 5. Build Component Tree from Page outwards through Segments
     let currentTree = makeElement(Page, {
       params: input.params,
       searchParams: input.searchParams,
     });
 
-    // Wrap with layouts in reverse order (leaf layout -> root layout)
-    for (let i = input.layoutPaths.length - 1; i >= 0; i--) {
-      const layoutPath = input.layoutPaths[i];
-      try {
-        const layoutMod = await import(layoutPath);
-        let Layout = layoutMod.default;
-        if (!Layout) {
-          const entry = Object.entries(layoutMod).find(([k, v]) => typeof v === "function" && (/^[A-Z]/.test(k) || k.endsWith("Layout")));
-          Layout = entry ? entry[1] : Object.values(layoutMod).find((v) => typeof v === "function");
+    if (input.segmentsFiles && input.segmentsFiles.length > 0) {
+      // Wrap from leaf segment outwards to root segment
+      for (let i = input.segmentsFiles.length - 1; i >= 0; i--) {
+        const seg = input.segmentsFiles[i];
+
+        // 5a. Wrap with loading if present (React.Suspense)
+        if (seg.loading) {
+          try {
+            const Loading = await loadComp(seg.loading);
+            if (Loading) {
+              const loadingEl = React.createElement(Loading, {});
+              currentTree = React.createElement(React.Suspense, { fallback: loadingEl }, currentTree);
+            }
+          } catch (loadingErr) {
+            console.warn(`[NATA SSR] Loading fallback error in ${seg.loading}:`, loadingErr);
+          }
         }
 
-        if (layoutMod.metadata && typeof layoutMod.metadata === "object" && !title) {
-          title = layoutMod.metadata.title;
+        // 5b. Wrap with template if present
+        if (seg.template) {
+          try {
+            const Template = await loadComp(seg.template);
+            if (Template) {
+              currentTree = makeElement(Template, { params: input.params, searchParams: input.searchParams }, currentTree);
+            }
+          } catch (templateErr) {
+            console.warn(`[NATA SSR] Template error in ${seg.template}:`, templateErr);
+          }
         }
 
-        if (Layout) {
-          currentTree = makeElement(
-            Layout,
-            { params: input.params, searchParams: input.searchParams },
-            currentTree
-          );
+        // 5c. Wrap with layout if present
+        if (seg.layout) {
+          try {
+            const layoutMod = await import(seg.layout);
+            let Layout = layoutMod.default;
+            if (!Layout) {
+              const entry = Object.entries(layoutMod).find(([k, v]) => typeof v === "function" && (/^[A-Z]/.test(k) || k.endsWith("Layout")));
+              Layout = entry ? entry[1] : Object.values(layoutMod).find((v) => typeof v === "function");
+            }
+
+            if (layoutMod.metadata && typeof layoutMod.metadata === "object" && !title) {
+              title = layoutMod.metadata.title;
+            }
+
+            if (Layout) {
+              currentTree = makeElement(
+                Layout,
+                { params: input.params, searchParams: input.searchParams },
+                currentTree
+              );
+            }
+          } catch (layoutErr: any) {
+            if (layoutErr?.digest?.startsWith("NEXT_REDIRECT") || layoutErr?.name === "RedirectError") {
+              redirectUrl = layoutErr.url || layoutErr.message;
+              break;
+            }
+            if (layoutErr?.digest === "NEXT_NOT_FOUND" || layoutErr?.message === "NEXT_NOT_FOUND") {
+              notFoundEncountered = true;
+              break;
+            }
+            console.warn(`[NATA SSR] Layout evaluation warning in ${seg.layout}:`, layoutErr?.message || layoutErr);
+          }
         }
-      } catch (layoutErr: any) {
-        if (layoutErr?.digest?.startsWith("NEXT_REDIRECT") || layoutErr?.name === "RedirectError") {
-          redirectUrl = layoutErr.url || layoutErr.message;
-          break;
+      }
+    } else {
+      // Legacy fallback: wrap with layouts in reverse order
+      for (let i = input.layoutPaths.length - 1; i >= 0; i--) {
+        const layoutPath = input.layoutPaths[i];
+        try {
+          const layoutMod = await import(layoutPath);
+          let Layout = layoutMod.default;
+          if (!Layout) {
+            const entry = Object.entries(layoutMod).find(([k, v]) => typeof v === "function" && (/^[A-Z]/.test(k) || k.endsWith("Layout")));
+            Layout = entry ? entry[1] : Object.values(layoutMod).find((v) => typeof v === "function");
+          }
+
+          if (layoutMod.metadata && typeof layoutMod.metadata === "object" && !title) {
+            title = layoutMod.metadata.title;
+          }
+
+          if (Layout) {
+            currentTree = makeElement(
+              Layout,
+              { params: input.params, searchParams: input.searchParams },
+              currentTree
+            );
+          }
+        } catch (layoutErr: any) {
+          if (layoutErr?.digest?.startsWith("NEXT_REDIRECT") || layoutErr?.name === "RedirectError") {
+            redirectUrl = layoutErr.url || layoutErr.message;
+            break;
+          }
+          if (layoutErr?.digest === "NEXT_NOT_FOUND" || layoutErr?.message === "NEXT_NOT_FOUND") {
+            notFoundEncountered = true;
+            break;
+          }
+          console.warn(`[NATA SSR] Layout evaluation warning in ${layoutPath}:`, layoutErr?.message || layoutErr);
         }
-        console.warn(`[NATA SSR] Layout evaluation warning in ${layoutPath}:`, layoutErr?.message || layoutErr);
       }
     }
 
@@ -239,13 +344,81 @@ export async function runSsr(input: SsrInput) {
       return;
     }
 
+    // Helper to render Not Found UI
+    const renderNotFoundTree = async () => {
+      let NotFoundComp = null;
+      if (input.segmentsFiles) {
+        for (let i = input.segmentsFiles.length - 1; i >= 0; i--) {
+          if (input.segmentsFiles[i].not_found) {
+            NotFoundComp = await loadComp(input.segmentsFiles[i].not_found);
+            if (NotFoundComp) break;
+          }
+        }
+      }
+      let nfTree: any = null;
+      if (NotFoundComp) {
+        nfTree = makeElement(NotFoundComp, { params: input.params, searchParams: input.searchParams });
+        const rootLayout = input.segmentsFiles?.[0]?.layout || input.layoutPaths?.[0];
+        if (rootLayout) {
+          const RootLayout = await loadComp(rootLayout);
+          if (RootLayout) {
+            nfTree = makeElement(RootLayout, { params: input.params, searchParams: input.searchParams }, nfTree);
+          }
+        }
+      } else {
+        nfTree = React.createElement("div", {
+          style: {
+            fontFamily: "system-ui, -apple-system, sans-serif",
+            height: "100vh",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            flexDirection: "column",
+            background: "#09090b",
+            color: "#f4f4f5"
+          }
+        }, React.createElement("h1", { style: { fontSize: "2rem", fontWeight: 700 } }, "404 - Not Found"));
+      }
+      return nfTree;
+    };
+
+    if (notFoundEncountered) {
+      currentTree = await renderNotFoundTree();
+    }
+
     // 6. Render to HTML String
     let renderedHtml = "";
-    if (currentTree) {
-      if (typeof ReactDOMServer.renderToString === "function") {
-        renderedHtml = ReactDOMServer.renderToString(currentTree);
-      } else if (typeof ReactDOMServer.renderToStaticMarkup === "function") {
-        renderedHtml = ReactDOMServer.renderToStaticMarkup(currentTree);
+    try {
+      if (currentTree) {
+        if (typeof ReactDOMServer.renderToString === "function") {
+          renderedHtml = ReactDOMServer.renderToString(currentTree);
+        } else if (typeof ReactDOMServer.renderToStaticMarkup === "function") {
+          renderedHtml = ReactDOMServer.renderToStaticMarkup(currentTree);
+        }
+      }
+    } catch (renderErr: any) {
+      if (renderErr?.digest === "NEXT_NOT_FOUND" || renderErr?.message === "NEXT_NOT_FOUND" || renderErr?.message?.includes("404 Not Found")) {
+        notFoundEncountered = true;
+        const nfTree = await renderNotFoundTree();
+        renderedHtml = typeof ReactDOMServer.renderToString === "function"
+          ? ReactDOMServer.renderToString(nfTree)
+          : ReactDOMServer.renderToStaticMarkup(nfTree);
+      } else if (input.globalErrorPath) {
+        try {
+          const GlobalError = await loadComp(input.globalErrorPath);
+          if (GlobalError) {
+            const geTree = React.createElement(GlobalError, { error: renderErr, reset: () => {} });
+            renderedHtml = typeof ReactDOMServer.renderToString === "function"
+              ? ReactDOMServer.renderToString(geTree)
+              : ReactDOMServer.renderToStaticMarkup(geTree);
+          } else {
+            throw renderErr;
+          }
+        } catch (geErr) {
+          throw renderErr;
+        }
+      } else {
+        throw renderErr;
       }
     }
 

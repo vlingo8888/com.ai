@@ -27,6 +27,12 @@ pub struct SsrRequest {
     pub page_file: PathBuf,
     /// List of cascade layout files from root to leaf
     pub layout_files: Vec<PathBuf>,
+    /// Hierarchical segment special files from root to leaf
+    #[serde(default)]
+    pub segments_files: Vec<crate::router::SegmentFiles>,
+    /// Root level global error file (if any)
+    #[serde(default)]
+    pub global_error_file: Option<PathBuf>,
     /// Extracted dynamic route parameters (e.g., {"id": "105"})
     pub params: serde_json::Value,
     /// URL search query parameters (e.g., {"tab": "overview"})

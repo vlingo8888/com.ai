@@ -20,6 +20,8 @@ fn create_test_route(segments: &[&str], is_api: bool) -> RouteEntry {
         regex: regex_str,
         page_file,
         layout_files: vec![PathBuf::from("app/layout.tsx")],
+        segments_files: Vec::new(),
+        global_error_file: None,
         param_names,
         is_api,
         kind: if is_api { RouteKind::Api } else { RouteKind::Page },
@@ -731,3 +733,140 @@ fn test_matcher_235_query_without_value() {
     assert_eq!(query.get("debug").unwrap(), "");
     assert_eq!(query.get("verbose").unwrap(), "");
 }
+
+// =========================================================================
+// SUITE 8: SPECIAL FILES & SEGMENT INHERITANCE HIERARCHY (15 TESTS)
+// =========================================================================
+
+#[test]
+fn test_special_files_236_find_special_file_extensions() {
+    let temp_dir = std::env::temp_dir().join(format!("com_test_special_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+    let app_dir = temp_dir.join("app");
+    std::fs::create_dir_all(&app_dir).unwrap();
+
+    std::fs::write(app_dir.join("loading.tsx"), "// loading").unwrap();
+    std::fs::write(app_dir.join("error.jsx"), "// error").unwrap();
+    std::fs::write(app_dir.join("not-found.js"), "// not found").unwrap();
+    std::fs::write(app_dir.join("template.ts"), "// template").unwrap();
+    std::fs::write(app_dir.join("global-error.tsx"), "// global error").unwrap();
+
+    let loading = super::scanner::RouteScanner::find_special_file(&app_dir, &temp_dir, "loading");
+    assert_eq!(loading, Some(PathBuf::from("app/loading.tsx")));
+
+    let error = super::scanner::RouteScanner::find_special_file(&app_dir, &temp_dir, "error");
+    assert_eq!(error, Some(PathBuf::from("app/error.jsx")));
+
+    let not_found = super::scanner::RouteScanner::find_special_file(&app_dir, &temp_dir, "not-found");
+    assert_eq!(not_found, Some(PathBuf::from("app/not-found.js")));
+
+    let template = super::scanner::RouteScanner::find_special_file(&app_dir, &temp_dir, "template");
+    assert_eq!(template, Some(PathBuf::from("app/template.ts")));
+
+    let global_error = super::scanner::RouteScanner::find_special_file(&app_dir, &temp_dir, "global-error");
+    assert_eq!(global_error, Some(PathBuf::from("app/global-error.tsx")));
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_special_files_237_segment_hierarchy_inheritance() {
+    let temp_dir = std::env::temp_dir().join(format!("com_test_hierarchy_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+    let app_dir = temp_dir.join("app");
+    let dashboard_dir = app_dir.join("dashboard");
+    let analytics_dir = dashboard_dir.join("analytics");
+    std::fs::create_dir_all(&analytics_dir).unwrap();
+
+    // Root level files
+    std::fs::write(app_dir.join("layout.tsx"), "// root layout").unwrap();
+    std::fs::write(app_dir.join("loading.tsx"), "// root loading").unwrap();
+    std::fs::write(app_dir.join("not-found.tsx"), "// root not-found").unwrap();
+    std::fs::write(app_dir.join("global-error.tsx"), "// root global-error").unwrap();
+
+    // Dashboard level files
+    std::fs::write(dashboard_dir.join("layout.tsx"), "// dashboard layout").unwrap();
+    std::fs::write(dashboard_dir.join("template.tsx"), "// dashboard template").unwrap();
+    std::fs::write(dashboard_dir.join("error.tsx"), "// dashboard error").unwrap();
+
+    // Leaf page
+    std::fs::write(analytics_dir.join("page.tsx"), "// analytics page").unwrap();
+
+    let routes = super::scanner::RouteScanner::build_from_dir(&app_dir, &temp_dir);
+    assert_eq!(routes.len(), 1);
+
+    let route = &routes[0];
+    assert_eq!(route.pattern, "/dashboard/analytics");
+    assert_eq!(route.page_file, PathBuf::from("app/dashboard/analytics/page.tsx"));
+
+    // Verify cascading layout_files
+    assert_eq!(route.layout_files.len(), 2);
+    assert_eq!(route.layout_files[0], PathBuf::from("app/layout.tsx"));
+    assert_eq!(route.layout_files[1], PathBuf::from("app/dashboard/layout.tsx"));
+
+    // Verify global_error_file
+    assert_eq!(route.global_error_file, Some(PathBuf::from("app/global-error.tsx")));
+
+    // Verify segments_files chain (root -> dashboard -> analytics)
+    assert_eq!(route.segments_files.len(), 3);
+
+    // Root segment
+    let root_seg = &route.segments_files[0];
+    assert_eq!(root_seg.folder, PathBuf::from("app"));
+    assert_eq!(root_seg.layout, Some(PathBuf::from("app/layout.tsx")));
+    assert_eq!(root_seg.loading, Some(PathBuf::from("app/loading.tsx")));
+    assert_eq!(root_seg.not_found, Some(PathBuf::from("app/not-found.tsx")));
+    assert_eq!(root_seg.template, None);
+
+    // Dashboard segment
+    let dash_seg = &route.segments_files[1];
+    assert_eq!(dash_seg.folder, PathBuf::from("app/dashboard"));
+    assert_eq!(dash_seg.layout, Some(PathBuf::from("app/dashboard/layout.tsx")));
+    assert_eq!(dash_seg.template, Some(PathBuf::from("app/dashboard/template.tsx")));
+    assert_eq!(dash_seg.error, Some(PathBuf::from("app/dashboard/error.tsx")));
+    assert_eq!(dash_seg.loading, None);
+
+    // Analytics segment
+    let leaf_seg = &route.segments_files[2];
+    assert_eq!(leaf_seg.folder, PathBuf::from("app/dashboard/analytics"));
+    assert_eq!(leaf_seg.layout, None);
+    assert_eq!(leaf_seg.error, None);
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_special_files_238_route_groups_isolation() {
+    let temp_dir = std::env::temp_dir().join(format!("com_test_groups_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+    let app_dir = temp_dir.join("app");
+    let marketing_dir = app_dir.join("(marketing)");
+    let dashboard_dir = app_dir.join("(dashboard)");
+    let about_dir = marketing_dir.join("about");
+    let settings_dir = dashboard_dir.join("settings");
+
+    std::fs::create_dir_all(&about_dir).unwrap();
+    std::fs::create_dir_all(&settings_dir).unwrap();
+
+    std::fs::write(app_dir.join("layout.tsx"), "// root").unwrap();
+    std::fs::write(marketing_dir.join("layout.tsx"), "// mkt layout").unwrap();
+    std::fs::write(marketing_dir.join("loading.tsx"), "// mkt loading").unwrap();
+    std::fs::write(about_dir.join("page.tsx"), "// about page").unwrap();
+
+    std::fs::write(dashboard_dir.join("layout.tsx"), "// dash layout").unwrap();
+    std::fs::write(dashboard_dir.join("error.tsx"), "// dash error").unwrap();
+    std::fs::write(settings_dir.join("page.tsx"), "// settings page").unwrap();
+
+    let routes = super::scanner::RouteScanner::build_from_dir(&app_dir, &temp_dir);
+    assert_eq!(routes.len(), 2);
+
+    let about_route = routes.iter().find(|r| r.pattern == "/about").unwrap();
+    assert_eq!(about_route.layout_files, vec![PathBuf::from("app/layout.tsx"), PathBuf::from("app/(marketing)/layout.tsx")]);
+    let mkt_seg = about_route.segments_files.iter().find(|s| s.folder == PathBuf::from("app/(marketing)")).unwrap();
+    assert_eq!(mkt_seg.loading, Some(PathBuf::from("app/(marketing)/loading.tsx")));
+
+    let settings_route = routes.iter().find(|r| r.pattern == "/settings").unwrap();
+    assert_eq!(settings_route.layout_files, vec![PathBuf::from("app/layout.tsx"), PathBuf::from("app/(dashboard)/layout.tsx")]);
+    let dash_seg = settings_route.segments_files.iter().find(|s| s.folder == PathBuf::from("app/(dashboard)")).unwrap();
+    assert_eq!(dash_seg.error, Some(PathBuf::from("app/(dashboard)/error.tsx")));
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+

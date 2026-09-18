@@ -41,6 +41,32 @@ impl SsrWorker {
             .collect();
         let layout_paths_json = serde_json::to_string(&layout_paths_vec).unwrap_or_else(|_| "[]".to_string());
 
+        let segments_files_clean: Vec<serde_json::Value> = request
+            .segments_files
+            .iter()
+            .map(|s| {
+                let clean_opt = |opt: &Option<std::path::PathBuf>| -> serde_json::Value {
+                    match opt {
+                        Some(p) => serde_json::Value::String(crate::rpc::clean_path(if p.is_absolute() { p.clone() } else { root.join(p) })),
+                        None => serde_json::Value::Null,
+                    }
+                };
+                serde_json::json!({
+                    "folder": crate::rpc::clean_path(if s.folder.is_absolute() { s.folder.clone() } else { root.join(&s.folder) }),
+                    "layout": clean_opt(&s.layout),
+                    "template": clean_opt(&s.template),
+                    "error": clean_opt(&s.error),
+                    "loading": clean_opt(&s.loading),
+                    "not_found": clean_opt(&s.not_found),
+                })
+            })
+            .collect();
+        let segments_files_json = serde_json::to_string(&segments_files_clean).unwrap_or_else(|_| "[]".to_string());
+        let global_error_json = match &request.global_error_file {
+            Some(p) => serde_json::to_string(&crate::rpc::clean_path(if p.is_absolute() { p.clone() } else { root.join(p) })).unwrap_or_else(|_| "null".to_string()),
+            None => "null".to_string(),
+        };
+
         let params_json = serde_json::to_string(&request.params).unwrap_or_else(|_| "{}".to_string());
         let search_params_json = serde_json::to_string(&request.search_params).unwrap_or_else(|_| "{}".to_string());
         let cookies_str_json = serde_json::to_string(&request.cookies.clone().unwrap_or_default()).unwrap_or_else(|_| "\"\"".to_string());
@@ -55,6 +81,8 @@ import {{ runSsr }} from "{runtime_path}";
 await runSsr({{
   pagePath: "{page_path}",
   layoutPaths: {layout_paths},
+  segmentsFiles: {segments_files},
+  globalErrorPath: {global_error},
   params: {params},
   searchParams: {search_params},
   cookiesStr: {cookies_str},
@@ -65,6 +93,8 @@ await runSsr({{
             runtime_path = crate::rpc::clean_path(root.join(".nata/ssr_runtime.ts")),
             page_path = page_path,
             layout_paths = layout_paths_json,
+            segments_files = segments_files_json,
+            global_error = global_error_json,
             params = params_json,
             search_params = search_params_json,
             cookies_str = cookies_str_json,
