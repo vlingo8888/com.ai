@@ -73,6 +73,7 @@ impl ClientTransformer {
                 zmp_header_html
             )
         };
+        let backend_url = std::env::var("COM_BACKEND_URL").unwrap_or_default();
 
         format!(
             r####"<!DOCTYPE html>
@@ -81,6 +82,7 @@ impl ClientTransformer {
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>{title}</title>
+  <script>window.__COM_BACKEND_URL__ = "{backend_url}";</script>
   {zmp_script}
   
   <!-- Preconnect to CDN endpoints for fast parallel downloading -->

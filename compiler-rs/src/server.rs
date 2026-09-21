@@ -632,9 +632,13 @@ async fn zmp_js_handler(State(state): State<AppState>) -> impl IntoResponse {
 
   // 1. Resolve Server Origin accurately from script tag URL
   var currentScript = document.currentScript || document.querySelector('script[src*="app.js"]');
-  var serverOrigin = currentScript ? new URL(currentScript.src, window.location.href).origin : (window.location.origin && window.location.origin !== "null" && !window.location.origin.startsWith("file:") ? window.location.origin : "");
+  var scriptOrigin = currentScript ? new URL(currentScript.src, window.location.href).origin : "";
   var configuredBackend = "__COM_BACKEND_PLACEHOLDER__";
-  var backendOrigin = (configuredBackend && !configuredBackend.startsWith("__") ? configuredBackend : (window.__COM_BACKEND_URL__ || serverOrigin));
+  var backendOrigin = (configuredBackend && !configuredBackend.startsWith("__") ? configuredBackend : (window.__COM_BACKEND_URL__ || ""));
+  var serverOrigin = (scriptOrigin && !scriptOrigin.includes("h5.zdn.vn")) ? scriptOrigin : (backendOrigin || (window.location.origin && !window.location.origin.includes("h5.zdn.vn") && !window.location.origin.startsWith("file:") ? window.location.origin : ""));
+  if (!backendOrigin && serverOrigin) {
+    backendOrigin = serverOrigin;
+  }
   window.__COM_BACKEND_URL__ = backendOrigin;
 
   // 2. Dismiss Zalo loading indicator

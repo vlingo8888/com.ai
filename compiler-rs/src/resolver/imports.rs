@@ -311,7 +311,8 @@ export const {local} = new Proxy(function() {{}}, {{
         }} catch {{ return ""; }}
       }})();
 
-      const res = await fetch("/_nata/rpc", {{
+      const _nataBackend = (typeof window !== "undefined" && (window.__COM_BACKEND_URL__ || window.__NATA_BACKEND_URL__)) || "";
+      const res = await fetch((_nataBackend ? _nataBackend.replace(/\/$/, "") : "") + "/_nata/rpc", {{
         method: "POST",
         headers: {{
           "Content-Type": "application/json",
@@ -406,7 +407,8 @@ export const {local} = new Proxy(function() {{}}, {{
         }} catch {{ return ""; }}
       }})();
 
-      const res = await fetch("/_nata/rpc", {{
+      const _nataBackend = (typeof window !== "undefined" && (window.__COM_BACKEND_URL__ || window.__NATA_BACKEND_URL__)) || "";
+      const res = await fetch((_nataBackend ? _nataBackend.replace(/\/$/, "") : "") + "/_nata/rpc", {{
         method: "POST",
         headers: {{
           "Content-Type": "application/json",
