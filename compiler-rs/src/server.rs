@@ -73,7 +73,7 @@ impl DevServer {
             .route("/assets/app.css", get(zmp_css_handler))
             .route("/assets/app.js", get(zmp_js_handler))
             .route("/src/app.js", get(zmp_js_handler))
-            .fallback(get(app_router_fallback_handler))
+            .fallback(app_router_fallback_handler)
             .layer(CorsLayer::permissive())
             .with_state(state);
 
@@ -1316,6 +1316,40 @@ export default function Head({ children }) {
 export { Head };
 "##
         }
+        "next/server" | "server" => {
+            r##"export class NextResponse extends Response {
+  static json(data, init) {
+    const headers = new Headers(init?.headers);
+    if (!headers.has("content-type")) headers.set("content-type", "application/json; charset=utf-8");
+    return new NextResponse(JSON.stringify(data), { ...init, headers });
+  }
+  static redirect(url, init) {
+    const status = typeof init === "number" ? init : init?.status || 307;
+    const headers = new Headers(typeof init === "object" ? init?.headers : undefined);
+    headers.set("location", String(url));
+    return new NextResponse(null, { status, headers });
+  }
+  static rewrite(url, init) {
+    const headers = new Headers(init?.headers);
+    headers.set("x-middleware-rewrite", String(url));
+    return new NextResponse(null, { ...init, headers });
+  }
+  static next(init) {
+    const headers = new Headers(init?.headers);
+    headers.set("x-middleware-next", "1");
+    return new NextResponse(null, { ...init, headers });
+  }
+}
+export class NextRequest extends Request {
+  constructor(input, init) {
+    super(input, init);
+    this.nextUrl = new URL(typeof input === "string" ? input : input?.url || "/");
+    this.cookies = new Map();
+  }
+}
+export default { NextResponse, NextRequest };
+"##
+        }
         _ => {
             r##"export default {};"##
         }
@@ -1379,7 +1413,7 @@ async fn app_router_fallback_handler(
     State(state): State<AppState>,
     req: axum::extract::Request,
 ) -> impl IntoResponse {
-    let path = req.uri().path();
+    let path = req.uri().path().to_string();
 
     // Defense check: ZMP config and assets must never fall through to HTML
     let clean_path = path.trim_end_matches('/');
@@ -1411,7 +1445,106 @@ async fn app_router_fallback_handler(
 
     // In-memory router matching with zero disk I/O
     let router_guard = state.router.read().await;
-    if let Some((route, params)) = router_guard.match_route(path) {
+    if let Some((route, params)) = router_guard.match_route(&path) {
+        if route.is_api {
+            let method = req.method().to_string();
+            let uri = req.uri().clone();
+            let full_url = format!("http://localhost{}", uri);
+
+            let mut query_map = std::collections::HashMap::new();
+            if let Some(q) = uri.query() {
+                for pair in q.split('&') {
+                    if let Some((k, v)) = pair.split_once('=') {
+                        query_map.insert(k.to_string(), v.to_string());
+                    } else if !pair.is_empty() {
+                        query_map.insert(pair.to_string(), String::new());
+                    }
+                }
+            }
+
+            let mut headers_map = std::collections::HashMap::new();
+            for (k, v) in req.headers() {
+                if let Ok(str_val) = v.to_str() {
+                    headers_map.insert(k.as_str().to_lowercase(), str_val.to_string());
+                }
+            }
+
+            let raw_cookie_str = req
+                .headers()
+                .get(header::COOKIE)
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.to_string());
+
+            let body_bytes = axum::body::to_bytes(req.into_body(), 50 * 1024 * 1024)
+                .await
+                .unwrap_or_default();
+
+            let body_b64 = if !body_bytes.is_empty() {
+                Some(base64::Engine::encode(
+                    &base64::engine::general_purpose::STANDARD,
+                    &body_bytes,
+                ))
+            } else {
+                None
+            };
+
+            let handler_req = crate::route_handler::RouteHandlerRequest {
+                path: path.to_string(),
+                url: full_url,
+                method,
+                file_path: route.page_file.clone(),
+                params: params.clone(),
+                search_params: query_map,
+                headers: headers_map,
+                cookies: raw_cookie_str,
+                body_base64: body_b64,
+            };
+
+            let output = crate::route_handler::RouteHandlerEngine::execute(&state.root_dir, handler_req).await;
+
+            let mut resp_builder = axum::response::Response::builder()
+                .status(StatusCode::from_u16(output.status).unwrap_or(StatusCode::OK));
+
+            for (k, v) in &output.headers {
+                if let (Ok(hk), Ok(hv)) = (header::HeaderName::from_bytes(k.as_bytes()), HeaderValue::from_str(v)) {
+                    resp_builder = resp_builder.header(hk, hv);
+                }
+            }
+
+            for sc in &output.cookies {
+                let mut cookie_hdr = format!("{}={}", escape_cookie_val(&sc.name), escape_cookie_val(&sc.value));
+                cookie_hdr.push_str(&format!("; Path={}", sc.path.as_deref().unwrap_or("/")));
+                if let Some(max_age) = sc.max_age {
+                    cookie_hdr.push_str(&format!("; Max-Age={}", max_age));
+                }
+                if let Some(ref exp) = sc.expires {
+                    cookie_hdr.push_str(&format!("; Expires={}", exp));
+                }
+                if let Some(ref dom) = sc.domain {
+                    cookie_hdr.push_str(&format!("; Domain={}", dom));
+                }
+                if let Some(ref ss) = sc.same_site {
+                    cookie_hdr.push_str(&format!("; SameSite={}", ss));
+                } else {
+                    cookie_hdr.push_str("; SameSite=Lax");
+                }
+                if let Ok(hv) = HeaderValue::from_str(&cookie_hdr) {
+                    resp_builder = resp_builder.header(header::SET_COOKIE, hv);
+                }
+            }
+
+            let resp_body_bytes = if !output.body_base64.is_empty() {
+                base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &output.body_base64)
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            };
+
+            return resp_builder
+                .body(axum::body::Body::from(resp_body_bytes))
+                .unwrap_or_else(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Response building failed").into_response());
+        }
+
         let custom_css = crate::css_compiler::CssCompiler::find_and_load_custom_css(&state.root_dir);
 
         // Build SSR request context

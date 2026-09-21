@@ -137,6 +137,7 @@ impl ImportResolver {
             "next/navigation" => "/_nata/shims/next/navigation".to_string(),
             "next/router" => "/_nata/shims/next/router".to_string(),
             "next/head" => "/_nata/shims/next/head".to_string(),
+            "next/server" => "/_nata/shims/next/server".to_string(),
             _ => {
                 if pkg.starts_with("next/") {
                     format!("/_nata/shims/{}", pkg)

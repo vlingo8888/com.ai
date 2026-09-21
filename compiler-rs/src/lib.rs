@@ -1,6 +1,7 @@
 pub mod bundler;
 pub mod css_compiler;
 pub mod resolver;
+pub mod route_handler;
 pub mod router;
 pub mod rpc;
 pub mod server;

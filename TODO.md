@@ -50,11 +50,11 @@ Next.js provides convention-based file names within route folders to handle UI s
 
 Next.js allows defining API endpoints via `route.ts` / `route.js`:
 
-- [ ] **`app/**/route.ts` Handler Engine**:
-  - Detect `route.ts` in any `app/` folder (e.g. `app/api/webhooks/vnpay/route.ts`, `app/api/auth/login/route.ts`).
-  - Support exported HTTP method functions: `export async function GET(request: Request) {}`, `POST`, `PUT`, `DELETE`, `PATCH`, `OPTIONS`, `HEAD`.
-  - Provide `NextRequest` and `NextResponse.json({ ... }, { status: 200 })` helpers.
-  - Support dynamic params in route handlers (e.g. `app/api/users/[id]/route.ts`).
+- [x] **`app/**/route.ts` Handler Engine**:
+  - [x] Detect `route.ts` in any `app/` folder (e.g. `app/api/webhooks/vnpay/route.ts`, `app/api/auth/login/route.ts`).
+  - [x] Support exported HTTP method functions: `export async function GET(request: Request) {}`, `POST`, `PUT`, `DELETE`, `PATCH`, `OPTIONS`, `HEAD`.
+  - [x] Provide `NextRequest` and `NextResponse.json({ ... }, { status: 200 })` helpers.
+  - [x] Support dynamic params in route handlers (e.g. `app/api/users/[id]/route.ts`).
 
 ---
 

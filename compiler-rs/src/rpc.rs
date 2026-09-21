@@ -654,7 +654,212 @@ export default {
 "#;
         let _ = std::fs::write(nata_dir.join("headers.ts"), headers_ts);
 
-        // 3. Ensure node_modules/core has canonical NATA package files (overriding any broken ancient core package)
+        // 3. Write .nata/server.ts (Next.js server shims: NextRequest, NextResponse, cookies, etc.)
+        let server_ts = r#"export class RequestCookies {
+  private map = new Map<string, string>();
+
+  constructor(cookieHeader?: string | Headers | null) {
+    let headerStr = "";
+    if (typeof cookieHeader === "string") {
+      headerStr = cookieHeader;
+    } else if (cookieHeader && typeof (cookieHeader as Headers).get === "function") {
+      headerStr = (cookieHeader as Headers).get("cookie") || "";
+    }
+    if (headerStr) {
+      for (const pair of headerStr.split(";")) {
+        const idx = pair.indexOf("=");
+        if (idx !== -1) {
+          const k = decodeURIComponent(pair.slice(0, idx).trim());
+          const v = decodeURIComponent(pair.slice(idx + 1).trim());
+          if (k) this.map.set(k, v);
+        }
+      }
+    }
+  }
+
+  get(name: string): { name: string; value: string } | undefined {
+    const val = this.map.get(name);
+    return val !== undefined ? { name, value: val } : undefined;
+  }
+
+  getAll(name?: string): Array<{ name: string; value: string }> {
+    const res: Array<{ name: string; value: string }> = [];
+    for (const [k, v] of this.map.entries()) {
+      if (!name || k === name) {
+        res.push({ name: k, value: v });
+      }
+    }
+    return res;
+  }
+
+  has(name: string): boolean {
+    return this.map.has(name);
+  }
+
+  set(name: string, value: string): this {
+    this.map.set(name, value);
+    return this;
+  }
+
+  delete(name: string): boolean {
+    return this.map.delete(name);
+  }
+
+  clear(): void {
+    this.map.clear();
+  }
+
+  get size(): number {
+    return this.map.size;
+  }
+
+  [Symbol.iterator]() {
+    return this.map.entries();
+  }
+}
+
+export interface ResponseCookie {
+  name: string;
+  value: string;
+  path?: string;
+  maxAge?: number;
+  expires?: Date | string | number;
+  domain?: string;
+  secure?: boolean;
+  httpOnly?: boolean;
+  sameSite?: "lax" | "strict" | "none" | "Lax" | "Strict" | "None" | boolean;
+}
+
+export class ResponseCookies {
+  private _cookies: Map<string, ResponseCookie> = new Map();
+
+  get(name: string): ResponseCookie | undefined {
+    return this._cookies.get(name);
+  }
+
+  getAll(): ResponseCookie[] {
+    return Array.from(this._cookies.values());
+  }
+
+  set(nameOrOptions: string | ResponseCookie, value?: string, options?: Partial<ResponseCookie>): this {
+    let cookieObj: ResponseCookie;
+    if (typeof nameOrOptions === "object" && nameOrOptions !== null) {
+      cookieObj = { ...nameOrOptions };
+    } else {
+      cookieObj = { name: String(nameOrOptions), value: String(value ?? ""), ...(options || {}) };
+    }
+    this._cookies.set(cookieObj.name, cookieObj);
+    return this;
+  }
+
+  delete(name: string): this {
+    this._cookies.set(name, {
+      name,
+      value: "",
+      path: "/",
+      maxAge: 0,
+      expires: new Date(0),
+    });
+    return this;
+  }
+}
+
+export class NextRequest extends Request {
+  readonly nextUrl: URL;
+  readonly cookies: RequestCookies;
+  readonly ip?: string;
+  readonly geo?: {
+    city?: string;
+    country?: string;
+    region?: string;
+    latitude?: string;
+    longitude?: string;
+  };
+
+  constructor(input: RequestInfo | URL, init?: RequestInit & { ip?: string; geo?: any }) {
+    super(input, init);
+    const urlStr = typeof input === "string" ? input : input instanceof URL ? input.toString() : (input as Request).url;
+    this.nextUrl = new URL(urlStr);
+    this.ip = init?.ip || this.headers.get("x-forwarded-for")?.split(",")[0].trim() || "127.0.0.1";
+    this.geo = init?.geo || {};
+    this.cookies = new RequestCookies(this.headers);
+  }
+}
+
+export class NextResponse<Body = any> extends Response {
+  readonly cookies: ResponseCookies;
+
+  constructor(body?: BodyInit | null, init?: ResponseInit) {
+    super(body, init);
+    this.cookies = new ResponseCookies();
+  }
+
+  static json<T = any>(data: T, init?: ResponseInit): NextResponse<T> {
+    const bodyStr = JSON.stringify(data);
+    const headers = new Headers(init?.headers);
+    if (!headers.has("content-type")) {
+      headers.set("content-type", "application/json; charset=utf-8");
+    }
+    return new NextResponse(bodyStr, { ...init, headers });
+  }
+
+  static redirect(url: string | URL, init?: number | ResponseInit): NextResponse {
+    const status = typeof init === "number" ? init : init?.status || 307;
+    const headers = new Headers(typeof init === "object" ? init?.headers : undefined);
+    headers.set("location", url.toString());
+    return new NextResponse(null, { status, headers });
+  }
+
+  static rewrite(destination: string | URL, init?: ResponseInit): NextResponse {
+    const headers = new Headers(init?.headers);
+    headers.set("x-middleware-rewrite", destination.toString());
+    return new NextResponse(null, { ...init, headers });
+  }
+
+  static next(init?: ResponseInit): NextResponse {
+    const headers = new Headers(init?.headers);
+    headers.set("x-middleware-next", "1");
+    return new NextResponse(null, { ...init, headers });
+  }
+}
+
+export const userAgent = (request: { headers: Headers }) => {
+  const ua = request.headers.get("user-agent") || "";
+  const isMobile = /mobile|android|iphone|ipad/i.test(ua);
+  return {
+    isBot: /bot|googlebot|crawler|spider|robot|crawling/i.test(ua),
+    browser: { name: "browser", version: "1.0" },
+    device: { type: isMobile ? "mobile" : "desktop" },
+    engine: { name: "webkit" },
+    os: { name: "os" },
+    cpu: { architecture: "amd64" },
+  };
+};
+
+export class ImageResponse extends Response {
+  constructor(element: any, options: any = {}) {
+    super(new Uint8Array([0x89, 0x50, 0x4e, 0x47]), {
+      status: 200,
+      headers: {
+        "content-type": "image/png",
+        "cache-control": options?.headers?.["cache-control"] || "public, max-age=31536000, immutable",
+      },
+    });
+  }
+}
+
+export default {
+  NextRequest,
+  NextResponse,
+  RequestCookies,
+  ResponseCookies,
+  userAgent,
+  ImageResponse,
+};
+"#;
+        let _ = std::fs::write(nata_dir.join("server.ts"), server_ts);
+
+        // 4. Ensure node_modules/core has canonical NATA package files (overriding any broken ancient core package)
         let nm_core = root.join("node_modules").join("core");
         let _ = std::fs::create_dir_all(&nm_core);
         let _ = std::fs::write(
@@ -666,12 +871,16 @@ export default {
             r#"module.exports = require("../../.nata/core.ts");"#,
         );
 
-        // 4. Ensure node_modules/next/headers, navigation, and font mock files
+        // 5. Ensure node_modules/next/headers, server, navigation, and font mock files
         let nm_next = root.join("node_modules").join("next");
         let _ = std::fs::create_dir_all(&nm_next);
         let _ = std::fs::write(
             nm_next.join("headers.js"),
             r#"module.exports = require("../../.nata/headers.ts");"#,
+        );
+        let _ = std::fs::write(
+            nm_next.join("server.js"),
+            r#"module.exports = require("../../.nata/server.ts");"#,
         );
 
         let nm_next_nav = r#"const React = require('react');
@@ -748,7 +957,7 @@ module.exports = new Proxy({}, {
         let _ = std::fs::create_dir_all(&nm_next_font_local);
         let _ = std::fs::write(nm_next_font_local.join("index.js"), nm_font_code);
 
-        // 5. Ensure node_modules/zmp-sdk and zmp-sdk/apis shims exist
+        // 6. Ensure node_modules/zmp-sdk and zmp-sdk/apis shims exist
         let nm_zmp = root.join("node_modules").join("zmp-sdk");
         let _ = std::fs::create_dir_all(&nm_zmp);
         let _ = std::fs::create_dir_all(nm_zmp.join("apis"));
@@ -789,7 +998,7 @@ exports.default = {
         let _ = std::fs::write(nm_zmp.join("index.js"), zmp_shim_code);
         let _ = std::fs::write(nm_zmp.join("apis").join("index.js"), zmp_shim_code);
 
-        // 6. Ensure tsconfig.json has paths configured
+        // 7. Ensure tsconfig.json has paths configured
         let tsconfig_path = root.join("tsconfig.json");
         if tsconfig_path.exists() {
             if let Ok(content) = std::fs::read_to_string(&tsconfig_path) {
@@ -806,6 +1015,7 @@ exports.default = {
                             if let Some(paths_obj) = paths.as_object_mut() {
                                 paths_obj.insert("core".to_string(), serde_json::json!(["./.nata/core.ts"]));
                                 paths_obj.insert("next/headers".to_string(), serde_json::json!(["./.nata/headers.ts"]));
+                                paths_obj.insert("next/server".to_string(), serde_json::json!(["./.nata/server.ts"]));
                                 if !paths_obj.contains_key("@/*") {
                                     paths_obj.insert("@/*".to_string(), serde_json::json!(["./*", "./src/*"]));
                                 }
@@ -832,6 +1042,7 @@ exports.default = {
                     "paths": {
                         "core": ["./.nata/core.ts"],
                         "next/headers": ["./.nata/headers.ts"],
+                        "next/server": ["./.nata/server.ts"],
                         "@/*": ["./*", "./src/*"],
                         "~/*": ["./*", "./src/*"]
                     }
