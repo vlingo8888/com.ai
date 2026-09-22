@@ -53,6 +53,12 @@ pub struct SsrOutput {
     pub initial_state: serde_json::Value,
     /// Page title extracted from React Helmet / metadata (if any)
     pub title: Option<String>,
+    /// Structured metadata resolved from cascade layouts and page
+    #[serde(default)]
+    pub metadata: Option<serde_json::Value>,
+    /// Raw HTML tags (<meta>, <link>, etc.) to inject into <head>
+    #[serde(default)]
+    pub head_tags: Option<String>,
     /// Any cookies set during SSR execution (e.g. from cookies().set())
     #[serde(default)]
     pub set_cookies: Vec<crate::rpc::SetCookieInfo>,
@@ -74,6 +80,8 @@ impl Default for SsrOutput {
             html: String::new(),
             initial_state: serde_json::json!({}),
             title: None,
+            metadata: None,
+            head_tags: None,
             set_cookies: Vec::new(),
             status_code: 200,
             redirect_url: None,

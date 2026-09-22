@@ -62,16 +62,19 @@ Next.js allows defining API endpoints via `route.ts` / `route.js`:
 
 Next.js has a built-in Metadata API to define HTML `<head>` tags:
 
-- [ ] **Static Metadata Object**:
-  - Extract `export const metadata: Metadata = { title: "...", description: "...", openGraph: { ... }, icons: "..." }` from `layout.tsx` and `page.tsx`.
-  - Inject `<title>`, `<meta name="description">`, `<meta property="og:*">`, `<link rel="canonical">` into the server-rendered HTML shell.
-- [ ] **Dynamic `generateMetadata()`**:
-  - Support `export async function generateMetadata({ params, searchParams }): Promise<Metadata>`.
-- [ ] **Special Metadata Files**:
-  - [ ] `app/robots.ts` / `robots.txt`
-  - [ ] `app/sitemap.ts` / `sitemap.xml`
-  - [ ] `app/manifest.ts` / `manifest.json` (PWA / Web App manifest)
-  - [ ] `app/icon.png` / `app/apple-icon.png` / `app/opengraph-image.png` (automatic route asset generation).
+- [x] **Static Metadata Object**:
+  - [x] Extract `export const metadata: Metadata = { title: "...", description: "...", openGraph: { ... }, icons: "..." }` from `layout.tsx` and `page.tsx`.
+  - [x] Title templates (`%s | Brand`, `default`, `absolute`) and hierarchical cascade merging.
+  - [x] Inject `<title>`, `<meta name="description">`, `<meta property="og:*">`, `<link rel="canonical">`, twitter, theme-color, robots into the server-rendered HTML shell.
+  - [x] Dynamic client-side SPA navigation `<head>` updating (`updateClientMetadata`).
+- [x] **Dynamic `generateMetadata()`**:
+  - [x] Support `export async function generateMetadata({ params, searchParams }, parent): Promise<Metadata>`.
+- [x] **Special Metadata Files**:
+  - [x] `app/robots.ts` -> `/robots.txt` (standard robots text output).
+  - [x] `app/sitemap.ts` -> `/sitemap.xml` (valid Sitemaps 0.9 XML output).
+  - [x] `app/manifest.ts` -> `/manifest.webmanifest` / `/manifest.json` (PWA / Web App manifest JSON).
+  - [x] `app/icon.png` / `app/apple-icon.png` / `app/opengraph-image.png` / `app/twitter-image.png` (automatic route asset serving).
+  - [x] TypeScript declarations for `Metadata`, `ResolvingMetadata`, `MetadataRoute` in `next` module shims.
 
 ---
 

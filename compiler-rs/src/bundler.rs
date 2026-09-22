@@ -23,6 +23,7 @@ impl ClientTransformer {
             "",
             &serde_json::json!({}),
             "web",
+            "",
         )
     }
 
@@ -35,6 +36,7 @@ impl ClientTransformer {
         ssr_html: &str,
         ssr_state: &serde_json::Value,
         target: &str,
+        head_tags: &str,
     ) -> String {
         let entry_str = page_entry.to_string_lossy().replace('\\', "/");
         let layouts_json = serde_json::to_string(
@@ -75,13 +77,25 @@ impl ClientTransformer {
         };
         let backend_url = std::env::var("COM_BACKEND_URL").unwrap_or_default();
 
+        let title_tag = if head_tags.contains("<title>") {
+            String::new()
+        } else {
+            format!("  <title>{}</title>", title)
+        };
+        let formatted_head_tags = if head_tags.trim().is_empty() {
+            String::new()
+        } else {
+            format!("  {}", head_tags.trim())
+        };
+
         format!(
             r####"<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>{title}</title>
+{title_tag}
+{formatted_head_tags}
   <script>window.__COM_BACKEND_URL__ = "{backend_url}";</script>
   {zmp_script}
   
@@ -634,6 +648,106 @@ impl ClientTransformer {
       }}
     }}
 
+    function setMetaTag(name, content, isProperty = false) {{
+      if (!content) return;
+      const attr = isProperty ? "property" : "name";
+      let el = document.querySelector(`meta[${{attr}}="${{name}}"]`);
+      if (!el) {{
+        el = document.createElement("meta");
+        el.setAttribute(attr, name);
+        document.head.appendChild(el);
+      }}
+      el.setAttribute("content", content);
+    }}
+
+    function setLinkTag(rel, href) {{
+      if (!href) return;
+      let el = document.querySelector(`link[rel="${{rel}}"]`);
+      if (!el) {{
+        el = document.createElement("link");
+        el.setAttribute("rel", rel);
+        document.head.appendChild(el);
+      }}
+      el.setAttribute("href", href);
+    }}
+
+    async function updateClientMetadata(pageMod, layoutModules, routeProps) {{
+      try {{
+        const modules = [...(layoutModules || []), pageMod];
+        let resolvedTitle = null;
+        let titleTemplate = null;
+        let merged = {{}};
+
+        for (const mod of modules) {{
+          if (!mod) continue;
+          let meta = null;
+          if (typeof mod.generateMetadata === "function") {{
+            try {{
+              meta = await mod.generateMetadata(routeProps, Promise.resolve(merged));
+            }} catch (e) {{}}
+          }} else if (mod.metadata) {{
+            meta = typeof mod.metadata === "function" ? await mod.metadata() : mod.metadata;
+          }}
+          if (!meta || typeof meta !== "object") continue;
+
+          if (meta.title !== undefined) {{
+            if (typeof meta.title === "string") {{
+              resolvedTitle = titleTemplate && titleTemplate.includes("%s") ? titleTemplate.replace("%s", meta.title) : meta.title;
+            }} else if (typeof meta.title === "object") {{
+              if (meta.title.absolute) {{
+                resolvedTitle = meta.title.absolute;
+              }} else if (meta.title.default) {{
+                resolvedTitle = titleTemplate && titleTemplate.includes("%s") ? titleTemplate.replace("%s", meta.title.default) : meta.title.default;
+              }}
+              if (meta.title.template) {{
+                titleTemplate = meta.title.template;
+              }}
+            }}
+          }}
+
+          if (meta.description) merged.description = meta.description;
+          if (meta.openGraph) merged.openGraph = {{ ...(merged.openGraph || {{}}), ...meta.openGraph }};
+          if (meta.twitter) merged.twitter = {{ ...(merged.twitter || {{}}), ...meta.twitter }};
+          if (meta.alternates) merged.alternates = {{ ...(merged.alternates || {{}}), ...meta.alternates }};
+          if (meta.icons) merged.icons = meta.icons;
+          if (meta.robots) merged.robots = meta.robots;
+        }}
+
+        if (resolvedTitle) {{
+          document.title = resolvedTitle;
+        }}
+        if (merged.description) {{
+          setMetaTag("description", merged.description);
+        }}
+        if (merged.alternates && merged.alternates.canonical) {{
+          setLinkTag("canonical", merged.alternates.canonical);
+        }}
+        if (merged.openGraph) {{
+          setMetaTag("og:title", merged.openGraph.title || resolvedTitle, true);
+          if (merged.openGraph.description || merged.description) {{
+            setMetaTag("og:description", merged.openGraph.description || merged.description, true);
+          }}
+          if (merged.openGraph.url) {{
+            setMetaTag("og:url", merged.openGraph.url, true);
+          }}
+          if (merged.openGraph.images) {{
+            const img = Array.isArray(merged.openGraph.images) ? merged.openGraph.images[0] : merged.openGraph.images;
+            const url = typeof img === "string" ? img : img?.url;
+            if (url) setMetaTag("og:image", url, true);
+          }}
+        }}
+        if (merged.twitter) {{
+          setMetaTag("twitter:card", merged.twitter.card || "summary_large_image");
+          setMetaTag("twitter:title", merged.twitter.title || merged.openGraph?.title || resolvedTitle);
+          if (merged.twitter.description || merged.description) {{
+            setMetaTag("twitter:description", merged.twitter.description || merged.description);
+          }}
+        }}
+      }} catch (err) {{
+        console.warn("[NATA Metadata] Client meta update error:", err);
+      }}
+    }}
+
     async function renderRoute(entryStr, layoutFiles, params = {{}}, timestamp = null, segmentFiles = [], globalErrorFile = null) {{
       const renderId = ++currentRenderId;
       window.__NATA_PARAMS__ = params || {{}};
@@ -675,6 +789,26 @@ impl ClientTransformer {
         if (!Page) {{
           throw new Error("No default export or React component found in " + entryStr);
         }}
+
+        const loadedLayoutMods = [];
+        if (Array.isArray(segmentFiles)) {{
+          for (const s of segmentFiles) {{
+            if (s.layout) {{
+              try {{
+                const lm = await loadModule(s.layout, timestamp);
+                if (lm) loadedLayoutMods.push(lm);
+              }} catch (e) {{}}
+            }}
+          }}
+        }} else if (Array.isArray(layoutFiles)) {{
+          for (const lf of layoutFiles) {{
+            try {{
+              const lm = await loadModule(lf, timestamp);
+              if (lm) loadedLayoutMods.push(lm);
+            }} catch (e) {{}}
+          }}
+        }}
+        updateClientMetadata(pageMod, loadedLayoutMods, routeProps);
 
         let RootComponent = makeComponent(Page);
 

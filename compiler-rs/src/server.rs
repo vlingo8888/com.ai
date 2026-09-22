@@ -59,6 +59,14 @@ impl DevServer {
         let app = Router::new()
             .route("/_hmr", get(ws_hmr_handler))
             .route("/favicon.ico", get(favicon_handler))
+            .route("/robots.txt", get(robots_handler))
+            .route("/sitemap.xml", get(sitemap_handler))
+            .route("/manifest.webmanifest", get(manifest_handler))
+            .route("/manifest.json", get(manifest_handler))
+            .route("/icon", get(icon_handler))
+            .route("/apple-icon", get(apple_icon_handler))
+            .route("/opengraph-image", get(og_image_handler))
+            .route("/twitter-image", get(twitter_image_handler))
             .route("/_nata/rpc", post(rpc_handler))
             .route("/_nata/logs", get(logs_handler).delete(clear_logs_handler))
             .route("/_nata/route_info", get(route_info_handler))
@@ -460,6 +468,14 @@ async fn styles_handler(
 async fn favicon_handler(
     State(state): State<AppState>,
 ) -> impl IntoResponse {
+    if let Some((p, mime)) = crate::metadata::MetadataEngine::find_route_asset(&state.root_dir, "icon") {
+        if let Ok(bytes) = tokio::fs::read(p).await {
+            let mut headers = HeaderMap::new();
+            headers.insert(header::CONTENT_TYPE, mime.parse().unwrap());
+            return (StatusCode::OK, headers, bytes).into_response();
+        }
+    }
+
     let public_fav = state.root_dir.join("public").join("favicon.ico");
     let root_fav = state.root_dir.join("favicon.ico");
     let target = if public_fav.exists() {
@@ -482,6 +498,77 @@ async fn favicon_handler(
     let mut headers = HeaderMap::new();
     headers.insert(header::CONTENT_TYPE, "image/svg+xml".parse().unwrap());
     (StatusCode::OK, headers, default_svg.as_bytes().to_vec()).into_response()
+}
+
+async fn robots_handler(
+    State(state): State<AppState>,
+    req: axum::extract::Request,
+) -> impl IntoResponse {
+    let host = req.headers().get(header::HOST).and_then(|v| v.to_str().ok()).unwrap_or("localhost:3000");
+    let base_url = format!("http://{}", host);
+    let (status, headers, body) = crate::metadata::MetadataEngine::handle_robots(&state.root_dir, Some(&base_url)).await;
+    (status, headers, body)
+}
+
+async fn sitemap_handler(
+    State(state): State<AppState>,
+    req: axum::extract::Request,
+) -> impl IntoResponse {
+    let host = req.headers().get(header::HOST).and_then(|v| v.to_str().ok()).unwrap_or("localhost:3000");
+    let base_url = format!("http://{}", host);
+    let (status, headers, body) = crate::metadata::MetadataEngine::handle_sitemap(&state.root_dir, Some(&base_url)).await;
+    (status, headers, body)
+}
+
+async fn manifest_handler(
+    State(state): State<AppState>,
+) -> impl IntoResponse {
+    let (status, headers, body) = crate::metadata::MetadataEngine::handle_manifest(&state.root_dir).await;
+    (status, headers, body)
+}
+
+async fn icon_handler(State(state): State<AppState>) -> impl IntoResponse {
+    if let Some((path, mime)) = crate::metadata::MetadataEngine::find_route_asset(&state.root_dir, "icon") {
+        if let Ok(bytes) = tokio::fs::read(path).await {
+            let mut headers = HeaderMap::new();
+            headers.insert(header::CONTENT_TYPE, mime.parse().unwrap());
+            return (StatusCode::OK, headers, bytes).into_response();
+        }
+    }
+    StatusCode::NOT_FOUND.into_response()
+}
+
+async fn apple_icon_handler(State(state): State<AppState>) -> impl IntoResponse {
+    if let Some((path, mime)) = crate::metadata::MetadataEngine::find_route_asset(&state.root_dir, "apple-icon") {
+        if let Ok(bytes) = tokio::fs::read(path).await {
+            let mut headers = HeaderMap::new();
+            headers.insert(header::CONTENT_TYPE, mime.parse().unwrap());
+            return (StatusCode::OK, headers, bytes).into_response();
+        }
+    }
+    StatusCode::NOT_FOUND.into_response()
+}
+
+async fn og_image_handler(State(state): State<AppState>) -> impl IntoResponse {
+    if let Some((path, mime)) = crate::metadata::MetadataEngine::find_route_asset(&state.root_dir, "opengraph-image") {
+        if let Ok(bytes) = tokio::fs::read(path).await {
+            let mut headers = HeaderMap::new();
+            headers.insert(header::CONTENT_TYPE, mime.parse().unwrap());
+            return (StatusCode::OK, headers, bytes).into_response();
+        }
+    }
+    StatusCode::NOT_FOUND.into_response()
+}
+
+async fn twitter_image_handler(State(state): State<AppState>) -> impl IntoResponse {
+    if let Some((path, mime)) = crate::metadata::MetadataEngine::find_route_asset(&state.root_dir, "twitter-image") {
+        if let Ok(bytes) = tokio::fs::read(path).await {
+            let mut headers = HeaderMap::new();
+            headers.insert(header::CONTENT_TYPE, mime.parse().unwrap());
+            return (StatusCode::OK, headers, bytes).into_response();
+        }
+    }
+    StatusCode::NOT_FOUND.into_response()
 }
 
 async fn zmp_app_config_handler(State(state): State<AppState>) -> impl IntoResponse {
@@ -1591,14 +1678,17 @@ async fn app_router_fallback_handler(
             return axum::response::Redirect::temporary(&redirect_to).into_response();
         }
 
+        let page_title = ssr_output.title.as_deref().unwrap_or("Com.AI.VN Application");
+        let head_tags = ssr_output.head_tags.as_deref().unwrap_or("");
         let html = ClientTransformer::render_ssr_html_shell(
-            "Com.AI.VN Application",
+            page_title,
             &route.page_file,
             &route.layout_files,
             &custom_css,
             &ssr_output.html,
             &ssr_output.initial_state,
             &state.target,
+            head_tags,
         );
 
         let mut response = Html(html).into_response();
@@ -1629,8 +1719,21 @@ async fn app_router_fallback_handler(
         return response;
     }
 
+    // Try serving special route assets (e.g. /icon.png, /opengraph-image.png, etc.)
+    let clean_path = path.trim_start_matches('/');
+    let asset_stem = clean_path.split('.').next().unwrap_or("");
+    if asset_stem == "icon" || asset_stem == "apple-icon" || asset_stem == "opengraph-image" || asset_stem == "twitter-image" {
+        if let Some((asset_path, mime)) = crate::metadata::MetadataEngine::find_route_asset(&state.root_dir, asset_stem) {
+            if let Ok(bytes) = tokio::fs::read(asset_path).await {
+                let mut headers = HeaderMap::new();
+                headers.insert(header::CONTENT_TYPE, mime.parse().unwrap());
+                return (StatusCode::OK, headers, bytes).into_response();
+            }
+        }
+    }
+
     // Try serving static assets
-    let static_candidate = state.root_dir.join(path.trim_start_matches('/'));
+    let static_candidate = state.root_dir.join(clean_path);
     if static_candidate.exists() && static_candidate.is_file() {
         if let Ok(bytes) = tokio::fs::read(static_candidate).await {
             return (StatusCode::OK, bytes).into_response();
@@ -1661,14 +1764,17 @@ async fn app_router_fallback_handler(
             headers: None,
         };
         let ssr_output = SsrEngine::render(&state.root_dir, ssr_req).await;
+        let page_title = ssr_output.title.as_deref().unwrap_or("404: This page could not be found");
+        let head_tags = ssr_output.head_tags.as_deref().unwrap_or("");
         let html = ClientTransformer::render_ssr_html_shell(
-            "404: This page could not be found",
+            page_title,
             &not_found_file,
             &layout_files,
             &custom_css,
             &ssr_output.html,
             &ssr_output.initial_state,
             &state.target,
+            head_tags,
         );
         let mut response = Html(html).into_response();
         *response.status_mut() = StatusCode::NOT_FOUND;

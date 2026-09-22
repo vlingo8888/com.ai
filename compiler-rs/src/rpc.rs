@@ -875,6 +875,98 @@ export default {
         let nm_next = root.join("node_modules").join("next");
         let _ = std::fs::create_dir_all(&nm_next);
         let _ = std::fs::write(
+            nm_next.join("package.json"),
+            r#"{"name":"next","version":"14.2.5","main":"index.js","types":"index.d.ts"}"#,
+        );
+        let _ = std::fs::write(
+            nm_next.join("index.js"),
+            r#"module.exports = {};"#,
+        );
+        let _ = std::fs::write(
+            nm_next.join("index.d.ts"),
+            r#"export interface Metadata {
+  title?: string | { default?: string; template?: string; absolute?: string };
+  description?: string;
+  applicationName?: string;
+  authors?: Array<{ name: string; url?: string }> | { name: string; url?: string };
+  generator?: string;
+  keywords?: string | string[];
+  referrer?: string;
+  themeColor?: string | Array<{ media?: string; color: string }>;
+  colorScheme?: 'dark' | 'light' | 'dark light';
+  creator?: string;
+  publisher?: string;
+  robots?: string | { index?: boolean; follow?: boolean; nocache?: boolean; noarchive?: boolean; googleBot?: any };
+  alternates?: { canonical?: string; languages?: Record<string, string> };
+  icons?: string | { icon?: string | string[]; apple?: string | string[]; shortcut?: string };
+  openGraph?: {
+    title?: string;
+    description?: string;
+    url?: string;
+    siteName?: string;
+    images?: Array<{ url: string; width?: number; height?: number; alt?: string }> | string;
+    locale?: string;
+    type?: string;
+  };
+  twitter?: {
+    card?: string;
+    title?: string;
+    description?: string;
+    site?: string;
+    creator?: string;
+    images?: string | string[];
+  };
+  manifest?: string;
+  other?: Record<string, string | number | (string | number)[]>;
+  [key: string]: any;
+}
+
+export type ResolvingMetadata = Promise<Metadata>;
+
+export namespace MetadataRoute {
+  export type Robots = {
+    rules: {
+      userAgent?: string | string[];
+      allow?: string | string[];
+      disallow?: string | string[];
+      crawlDelay?: number;
+    } | Array<{
+      userAgent?: string | string[];
+      allow?: string | string[];
+      disallow?: string | string[];
+      crawlDelay?: number;
+    }>;
+    sitemap?: string | string[];
+    host?: string;
+  };
+
+  export type Sitemap = Array<{
+    url: string;
+    lastModified?: string | Date;
+    changeFrequency?: 'always' | 'hourly' | 'daily' | 'weekly' | 'monthly' | 'yearly' | 'never';
+    priority?: number;
+  }>;
+
+  export type Manifest = {
+    name?: string;
+    short_name?: string;
+    description?: string;
+    start_url?: string;
+    display?: 'fullscreen' | 'standalone' | 'minimal-ui' | 'browser';
+    background_color?: string;
+    theme_color?: string;
+    icons?: Array<{
+      src: string;
+      sizes?: string;
+      type?: string;
+      purpose?: string;
+    }>;
+    [key: string]: any;
+  };
+}
+"#,
+        );
+        let _ = std::fs::write(
             nm_next.join("headers.js"),
             r#"module.exports = require("../../.nata/headers.ts");"#,
         );
