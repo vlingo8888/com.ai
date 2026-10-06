@@ -197,6 +197,17 @@ export async function syncCommand(options: SyncOptions = {}): Promise<SyncResult
       const mergedDeps = { ...existing.dependencies, ...scanResult.dependencies };
       const mergedDevDeps = { ...existing.devDependencies, ...scanResult.devDependencies };
 
+      for (const k of Object.keys(mergedDeps)) {
+        if (k === "@native" || k.startsWith("@native/")) {
+          delete mergedDeps[k];
+        }
+      }
+      for (const k of Object.keys(mergedDevDeps)) {
+        if (k === "@native" || k.startsWith("@native/")) {
+          delete mergedDevDeps[k];
+        }
+      }
+
       existing.dependencies = mergedDeps;
       existing.devDependencies = mergedDevDeps;
       await Bun.write(packageJsonPath, JSON.stringify(existing, null, 2) + "\n");

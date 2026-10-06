@@ -196,4 +196,46 @@ describe("Database Schema Generator", () => {
     expect(updated).toContain("Bảng công việc - Quản lý việc cần làm");
     expect(updated).toContain("<!-- DATABASE_SCHEMA_END -->");
   });
+
+  it("detects PGlite when no DATABASE_URL is in env", async () => {
+    const { mkdtempSync, rmSync } = await import("fs");
+    const { tmpdir } = await import("os");
+    const { join } = await import("path");
+    const { detectDatabaseStatus } = await import("../src/commands/dev");
+
+    const tmp = mkdtempSync(join(tmpdir(), "com-db-test-"));
+    const oldEnv = process.env.DATABASE_URL;
+    delete process.env.DATABASE_URL;
+    try {
+      const status = await detectDatabaseStatus(tmp);
+      expect(status.label).toContain("PGlite");
+      expect(status.isLive).toBe(true);
+      expect(status.isConfigured).toBe(false);
+    } finally {
+      if (oldEnv) process.env.DATABASE_URL = oldEnv;
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("detects offline status when DATABASE_URL points to non-listening port", async () => {
+    const { mkdtempSync, writeFileSync, rmSync } = await import("fs");
+    const { tmpdir } = await import("os");
+    const { join } = await import("path");
+    const { detectDatabaseStatus } = await import("../src/commands/dev");
+
+    const tmp = mkdtempSync(join(tmpdir(), "com-db-test-"));
+    writeFileSync(join(tmp, ".env"), "DATABASE_URL=postgres://user:pass@127.0.0.1:59999/testdb\n");
+    const oldEnv = process.env.DATABASE_URL;
+    delete process.env.DATABASE_URL;
+    try {
+      const status = await detectDatabaseStatus(tmp);
+      expect(status.isLive).toBe(false);
+      expect(status.isConfigured).toBe(true);
+      expect(status.label).toContain("offline");
+      expect(status.target).toContain("59999");
+    } finally {
+      if (oldEnv) process.env.DATABASE_URL = oldEnv;
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
 });

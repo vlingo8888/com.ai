@@ -55,6 +55,7 @@ impl RpcExecutor {
         let root = project_dir.as_ref();
         let nata_dir = root.join(".nata");
         let _ = std::fs::create_dir_all(&nata_dir);
+        let _ = std::fs::create_dir_all(root.join("data"));
 
         // 1. Write .nata/core.ts
         let core_ts = r#"import {
@@ -163,6 +164,9 @@ class LoggingConnection implements DatabaseConnection {
 
       console.error(`\x1b[31m✖ [SQL Error]\x1b[0m \x1b[1m${sqlStr}\x1b[0m\x1b[90m${paramStr} (${duration}ms)\x1b[0m`);
       console.error(`\x1b[31m  ↳ Error:\x1b[0m ${err?.message || err}`);
+      if (err?.code === "ECONNREFUSED" || err?.name === "AggregateError" || (err?.message && String(err.message).includes("ECONNREFUSED"))) {
+        console.error(`\x1b[33m  💡 [Tip]\x1b[0m Server PostgreSQL offline. Chạy 'com dev' để chuyển sang PGlite hoặc comment DATABASE_URL trong .env.\x1b[0m`);
+      }
       throw err;
     }
   }
@@ -227,17 +231,67 @@ function createDbInstance(): Kysely<any> {
   }
 
   try {
+    const fs = require("fs");
+    const path = require("path");
+    const dbPath = process.env.DB_PATH || "data/app.db";
+    const resolvedDbPath = path.resolve(process.cwd(), dbPath);
+    const parentDir = path.dirname(resolvedDbPath);
+    if (!fs.existsSync(parentDir)) {
+      try { fs.mkdirSync(parentDir, { recursive: true }); } catch {}
+    }
+
     const { PGlite } = require("@electric-sql/pglite");
-    const pgliteInstance = new PGlite(process.env.DB_PATH || "data/app.db");
+    const pgliteInstance = new PGlite(dbPath);
+
+    let schemaInitPromise: Promise<void> | null = null;
+    async function initSchemaIfNeeded() {
+      const candidatePaths = [
+        process.env.COM_SCHEMA_PATH,
+        path.join(process.cwd(), "schema.sql"),
+        path.join(process.cwd(), "data", "schema.sql"),
+        path.join(process.cwd(), "migrations", "00_base_schema.sql"),
+        path.join(process.cwd(), "core", "database", "00_base_schema.sql"),
+      ].filter(Boolean);
+
+      for (const sp of candidatePaths) {
+        if (fs.existsSync(sp)) {
+          try {
+            const ddl = fs.readFileSync(sp, "utf-8");
+            await pgliteInstance.exec(ddl);
+            break;
+          } catch (e: any) {
+            // Ignore table already exists or minor DDL warnings
+          }
+        }
+      }
+
+      // Also auto-run any additional migration files in migrations/*.sql
+      const migrationsDir = path.join(process.cwd(), "migrations");
+      if (fs.existsSync(migrationsDir)) {
+        try {
+          const files = fs.readdirSync(migrationsDir).filter((f: string) => f.endsWith(".sql") && f !== "00_base_schema.sql").sort();
+          for (const file of files) {
+            try {
+              const ddl = fs.readFileSync(path.join(migrationsDir, file), "utf-8");
+              await pgliteInstance.exec(ddl);
+            } catch (_) {}
+          }
+        } catch (_) {}
+      }
+    }
+    schemaInitPromise = initSchemaIfNeeded();
 
     class PGLiteConnection implements DatabaseConnection {
       async executeQuery<R>(compiledQuery: CompiledQuery): Promise<KyselyQueryResult<R>> {
+        if (schemaInitPromise) {
+          await schemaInitPromise;
+        }
         const { sql: sqlStr, parameters } = compiledQuery;
         const res: any = await pgliteInstance.query(sqlStr, parameters as unknown[]);
         const rows = (Array.isArray(res?.rows) ? res.rows : (Array.isArray(res) ? res : [])) as R[];
         return {
           rows,
-          numAffectedRows: res?.affectedRows !== undefined ? BigInt(res.affectedRows) : undefined,
+          numAffectedRows: res?.rowCount !== undefined ? BigInt(res.rowCount) : (res?.affectedRows !== undefined ? BigInt(res.affectedRows) : undefined),
         };
       }
       async *streamQuery<R>(): AsyncIterableIterator<KyselyQueryResult<R>> {
@@ -246,7 +300,9 @@ function createDbInstance(): Kysely<any> {
     }
 
     class PGLiteDriver implements Driver {
-      async init(): Promise<void> {}
+      async init(): Promise<void> {
+        if (schemaInitPromise) await schemaInitPromise;
+      }
       async acquireConnection(): Promise<DatabaseConnection> { return new PGLiteConnection(); }
       async releaseConnection(): Promise<void> {}
       async beginTransaction(connection: DatabaseConnection): Promise<void> {
@@ -300,8 +356,18 @@ function createDbInstance(): Kysely<any> {
   }
 }
 
+let functionModule: any = null;
 export const db = new Proxy({} as Kysely<any>, {
   get(target, prop, receiver) {
+    if (prop === "fn") {
+      if (!functionModule) {
+        try {
+          const { createFunctionModule } = require("kysely");
+          functionModule = createFunctionModule();
+        } catch {}
+      }
+      return functionModule;
+    }
     if (!dbInstance) dbInstance = createDbInstance();
     const val = (dbInstance as any)[prop];
     return typeof val === "function" ? val.bind(dbInstance) : val;
@@ -1342,16 +1408,16 @@ exports.default = {
         // In-memory invocation script for Bun runner with strict output delimiters
         let runner_script = format!(
             r#"
-import * as mod from "{}";
+import * as mod from "{ts_path}";
 
 const RPC_DELIM_START = "__NATA_RPC_OUT_START__";
 const RPC_DELIM_END = "__NATA_RPC_OUT_END__";
 
 async function run() {{
-  const rawArgs = {};
+  const rawArgs = {args_json};
   const args = Array.isArray(rawArgs) ? rawArgs : (rawArgs !== null && rawArgs !== undefined ? [rawArgs] : []);
-  const actionName = "{}";
-  const incomingCookiesStr = {};
+  const actionName = "{action}";
+  const incomingCookiesStr = {incoming_cookies};
 
   const cookieMap = new Map();
   if (typeof incomingCookiesStr === "string" && incomingCookiesStr.trim()) {{
@@ -1368,6 +1434,36 @@ async function run() {{
   globalThis.__NATA_SET_COOKIES__ = [];
   globalThis.__NATA_QUERY_LOGS__ = [];
 
+  // Auto-run module lifecycle (e.g. lifecycle.ts with onInstalled(db))
+  try {{
+    const _fs = await import("fs");
+    const _path = await import("path");
+    const _modFile = "{ts_path}";
+    const _modDir = _path.dirname(_modFile);
+    const _modName = "{clean_mod}";
+    const _candidates = [
+      _path.join(_modDir, "lifecycle.ts"),
+      _path.join(_modDir, "..", "lifecycle.ts"),
+      _path.join(process.cwd(), "modules", _modName, "lifecycle.ts"),
+      _path.join(process.cwd(), "plugins", _modName, "lifecycle.ts")
+    ];
+    for (const _lcPath of _candidates) {{
+      if (_fs.existsSync(_lcPath)) {{
+        try {{
+          const _lcMod = await import(_lcPath);
+          const _lc = _lcMod?.lifecycle || _lcMod?.default || _lcMod;
+          if (_lc && typeof _lc.onInstalled === "function") {{
+            const {{ db }} = await import("core");
+            await _lc.onInstalled(db);
+          }}
+        }} catch (_lcErr) {{
+          console.warn("[Lifecycle Warning]", _lcErr);
+        }}
+        break;
+      }}
+    }}
+  }} catch (_) {{}}
+
   let target = (actionName === "default") ? (mod.default || mod) : mod[actionName];
   if (!target && mod.default && typeof mod.default === "object" && mod.default[actionName]) {{
     target = mod.default[actionName];
@@ -1379,7 +1475,7 @@ async function run() {{
     target = mod.default;
   }}
   if (!target) {{
-    throw new Error("Action '" + actionName + "' not found in module '{}'");
+    throw new Error("Action '" + actionName + "' not found in module '{clean}'");
   }}
 
   let res;
@@ -1442,11 +1538,12 @@ run().catch(err => {{
   setTimeout(() => process.exit(1), 10);
 }});
 "#,
-            clean_path(&ts_path),
-            args_json,
-            action,
-            incoming_cookies,
-            clean
+            ts_path = clean_path(&ts_path),
+            args_json = args_json,
+            action = action,
+            incoming_cookies = incoming_cookies,
+            clean = clean,
+            clean_mod = clean.trim_start_matches("modules/").trim_start_matches("plugins/")
         );
 
         let start_time = std::time::Instant::now();

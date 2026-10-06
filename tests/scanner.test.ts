@@ -54,6 +54,16 @@ describe("Dependency Scanner - normalizePackageName", () => {
     expect(normalizePackageName("bun:sqlite")).toBeNull();
   });
 
+  it("should ignore @native and @native/* library imports", () => {
+    expect(normalizePackageName("@native")).toBeNull();
+    expect(normalizePackageName("@native/")).toBeNull();
+    expect(normalizePackageName("@native/*")).toBeNull();
+    expect(normalizePackageName("@native/ui")).toBeNull();
+    expect(normalizePackageName("@native/camera")).toBeNull();
+    expect(normalizePackageName("@native/storage")).toBeNull();
+    expect(normalizePackageName("@native/device/info")).toBeNull();
+  });
+
   it("should handle empty or invalid inputs gracefully", () => {
     expect(normalizePackageName("")).toBeNull();
     expect(normalizePackageName("   ")).toBeNull();
@@ -166,5 +176,36 @@ describe("Dependency Scanner - scanFilesForDependencies", () => {
     // Dev dependencies should include TypeScript & Bun types
     expect(result.devDependencies["typescript"]).toBeDefined();
     expect(result.devDependencies["@types/react"]).toBeDefined();
+  });
+
+  it("should ignore @native and @native/* libraries during scanning", () => {
+    const files = [
+      {
+        path: "app/camera/page.tsx",
+        content: `
+          import React from "react";
+          import { Camera, requestCameraPermission } from "@native/camera";
+          import { Storage } from "@native/storage";
+          import * as Device from "@native/device/info";
+          import "@native/ui";
+          import { motion } from "framer-motion";
+        `,
+      },
+    ];
+
+    const result = scanFilesForDependencies(files);
+
+    expect(result.detectedPackages).toContain("framer-motion");
+    expect(result.detectedPackages).not.toContain("@native/camera");
+    expect(result.detectedPackages).not.toContain("@native/storage");
+    expect(result.detectedPackages).not.toContain("@native/device");
+    expect(result.detectedPackages).not.toContain("@native/ui");
+    expect(result.detectedPackages).not.toContain("@native");
+
+    expect(result.dependencies["framer-motion"]).toBe("latest");
+    expect(result.dependencies["@native/camera"]).toBeUndefined();
+    expect(result.dependencies["@native/storage"]).toBeUndefined();
+    expect(result.dependencies["@native/ui"]).toBeUndefined();
+    expect(result.dependencies["@native"]).toBeUndefined();
   });
 });

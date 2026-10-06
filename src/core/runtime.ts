@@ -172,6 +172,19 @@ function createDbInstance(): Kysely<any> {
     try { PGliteClass = require("@electric-sql/pglite").PGlite; } catch {}
   }
 
+  if (!isTestMode && PGliteClass) {
+    try {
+      const fs = require("fs");
+      const path = require("path");
+      const dbPath = process.env.DB_PATH || "data/app.db";
+      const resolvedDbPath = path.resolve(process.cwd(), dbPath);
+      const parentDir = path.dirname(resolvedDbPath);
+      if (!fs.existsSync(parentDir)) {
+        fs.mkdirSync(parentDir, { recursive: true });
+      }
+    } catch {}
+  }
+
   const pgliteInstance = PGliteClass
     ? (isTestMode ? new PGliteClass() : new PGliteClass(process.env.DB_PATH || "data/app.db"))
     : null;
@@ -186,6 +199,8 @@ function createDbInstance(): Kysely<any> {
       join(currentDir, "schema.sql"),
       join(process.cwd(), "schema.sql"),
       join(process.cwd(), "data", "schema.sql"),
+      join(process.cwd(), "migrations", "00_base_schema.sql"),
+      join(process.cwd(), "core", "database", "00_base_schema.sql"),
     ].filter(Boolean) as string[];
 
     for (const sp of candidatePaths) {
@@ -198,6 +213,20 @@ function createDbInstance(): Kysely<any> {
           // Ignore table already exists or minor DDL warnings
         }
       }
+    }
+
+    const migrationsDir = join(process.cwd(), "migrations");
+    if (existsSync(migrationsDir)) {
+      try {
+        const { readdirSync } = require("fs");
+        const files = readdirSync(migrationsDir).filter((f: string) => f.endsWith(".sql") && f !== "00_base_schema.sql").sort();
+        for (const file of files) {
+          try {
+            const ddl = readFileSync(join(migrationsDir, file), "utf-8");
+            await pgliteInstance.exec(ddl);
+          } catch (_) {}
+        }
+      } catch (_) {}
     }
   }
 
@@ -253,8 +282,18 @@ function createDbInstance(): Kysely<any> {
   });
 }
 
+let functionModule: any = null;
 export const db = new Proxy({} as Kysely<any>, {
   get(target, prop, receiver) {
+    if (prop === "fn") {
+      if (!functionModule) {
+        try {
+          const { createFunctionModule } = require("kysely");
+          functionModule = createFunctionModule();
+        } catch {}
+      }
+      return functionModule;
+    }
     if (!dbInstance) dbInstance = createDbInstance();
     const val = (dbInstance as any)[prop];
     return typeof val === "function" ? val.bind(dbInstance) : val;

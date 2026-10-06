@@ -23,7 +23,7 @@ export function normalizePackageName(specifier: string): string | null {
   const trimmed = specifier.trim();
   if (!trimmed) return null;
 
-  // 1. Ignore relative paths, URLs, and internal aliases
+  // 1. Ignore relative paths, URLs, internal aliases, and @native modules
   if (
     trimmed.startsWith(".") ||
     trimmed.startsWith("/") ||
@@ -37,6 +37,8 @@ export function normalizePackageName(specifier: string): string | null {
     trimmed.startsWith("components/") ||
     trimmed === "core" ||
     trimmed.startsWith("core/") ||
+    trimmed === "@native" ||
+    trimmed.startsWith("@native/") ||
     trimmed.includes("://") ||
     trimmed.includes(":")
   ) {
@@ -60,6 +62,11 @@ export function normalizePackageName(specifier: string): string | null {
     }
   } else {
     candidate = trimmed.split("/")[0];
+  }
+
+  // 4. Ignore @native and @native/* candidate packages
+  if (candidate === "@native" || candidate.startsWith("@native/")) {
+    return null;
   }
 
   // Validate npm package name pattern
@@ -122,7 +129,7 @@ export function scanFilesForDependencies(
     const rawSpecifiers = extractImportsFromCode(content);
     for (const spec of rawSpecifiers) {
       const pkg = normalizePackageName(spec);
-      if (pkg) {
+      if (pkg && pkg !== "@native" && !pkg.startsWith("@native/")) {
         discovered.add(pkg);
       }
     }
@@ -132,8 +139,21 @@ export function scanFilesForDependencies(
   const devDependencies: Record<string, string> = { ...DEFAULT_DEV_DEPENDENCIES };
 
   for (const pkg of discovered) {
+    if (pkg === "@native" || pkg.startsWith("@native/")) continue;
     if (!dependencies[pkg] && !devDependencies[pkg]) {
       dependencies[pkg] = "latest";
+    }
+  }
+
+  // Ensure no @native libraries exist in dependencies or devDependencies
+  for (const key of Object.keys(dependencies)) {
+    if (key === "@native" || key.startsWith("@native/")) {
+      delete dependencies[key];
+    }
+  }
+  for (const key of Object.keys(devDependencies)) {
+    if (key === "@native" || key.startsWith("@native/")) {
+      delete devDependencies[key];
     }
   }
 

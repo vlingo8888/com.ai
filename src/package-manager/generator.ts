@@ -26,6 +26,20 @@ export function createPackageManifest(
     .replace(/[^a-z0-9_-]/g, "-")
     .replace(/^-+|-+$/g, "") || "com-view-app";
 
+  const cleanDependencies: Record<string, string> = {};
+  for (const [pkg, ver] of Object.entries(scanResult.dependencies || {})) {
+    if (pkg !== "@native" && !pkg.startsWith("@native/")) {
+      cleanDependencies[pkg] = ver;
+    }
+  }
+
+  const cleanDevDependencies: Record<string, string> = {};
+  for (const [pkg, ver] of Object.entries(scanResult.devDependencies || {})) {
+    if (pkg !== "@native" && !pkg.startsWith("@native/")) {
+      cleanDevDependencies[pkg] = ver;
+    }
+  }
+
   return {
     name: normalizedName,
     version: "1.0.0",
@@ -35,8 +49,8 @@ export function createPackageManifest(
       start: "com dev",
       build: "bun build ./index.tsx --outfile dist/bundle.js",
     },
-    dependencies: scanResult.dependencies,
-    devDependencies: scanResult.devDependencies,
+    dependencies: cleanDependencies,
+    devDependencies: cleanDevDependencies,
   };
 }
 

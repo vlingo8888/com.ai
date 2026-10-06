@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, readdirSync } from "fs";
+import { existsSync, readFileSync, readdirSync, writeFileSync, mkdirSync } from "fs";
 import { join, resolve } from "path";
 import { createConnection, createServer } from "net";
 import { logger, colors } from "../core/logger";
@@ -86,30 +86,40 @@ async function promptTargetSelection(projectDir: string): Promise<"zalo" | "web"
   });
 }
 
-async function detectDatabaseStatus(projectDir: string): Promise<{ label: string; color: string }> {
-  let dbUrl = process.env.DATABASE_URL || process.env.POSTGRES_URL;
+export interface DatabaseStatus {
+  label: string;
+  color: string;
+  isLive: boolean;
+  isConfigured: boolean;
+  target?: string;
+  dbUrl?: string;
+  envFile?: string;
+}
 
-  if (!dbUrl) {
-    const envFiles = [".env.local", ".env.development", ".env"];
-    for (const file of envFiles) {
-      const fullPath = join(projectDir, file);
-      if (existsSync(fullPath)) {
-        try {
-          const content = readFileSync(fullPath, "utf-8");
-          for (const line of content.split("\n")) {
-            const trimmed = line.trim();
-            if (!trimmed || trimmed.startsWith("#") || !trimmed.includes("=")) continue;
-            const [key, ...rest] = trimmed.split("=");
-            const val = rest.join("=").trim().replace(/^["']|["']$/g, "");
-            if ((key.trim() === "DATABASE_URL" || key.trim() === "POSTGRES_URL") && val) {
-              dbUrl = val;
-              break;
-            }
+export async function detectDatabaseStatus(projectDir: string): Promise<DatabaseStatus> {
+  let dbUrl = process.env.DATABASE_URL || process.env.POSTGRES_URL;
+  let envFile: string | undefined = undefined;
+
+  const envFiles = [".env.local", ".env.development", ".env"];
+  for (const file of envFiles) {
+    const fullPath = join(projectDir, file);
+    if (existsSync(fullPath)) {
+      try {
+        const content = readFileSync(fullPath, "utf-8");
+        for (const line of content.split("\n")) {
+          const trimmed = line.trim();
+          if (!trimmed || trimmed.startsWith("#") || !trimmed.includes("=")) continue;
+          const [key, ...rest] = trimmed.split("=");
+          const val = rest.join("=").trim().replace(/^["']|["']$/g, "");
+          if ((key.trim() === "DATABASE_URL" || key.trim() === "POSTGRES_URL") && val) {
+            if (!dbUrl) dbUrl = val;
+            envFile = fullPath;
+            break;
           }
-        } catch {}
-      }
-      if (dbUrl) break;
+        }
+      } catch {}
     }
+    if (envFile) break;
   }
 
   if (dbUrl) {
@@ -137,11 +147,21 @@ async function detectDatabaseStatus(projectDir: string): Promise<{ label: string
         return {
           label: `PostgreSQL (${target})`,
           color: colors.green,
+          isLive: true,
+          isConfigured: true,
+          target,
+          dbUrl,
+          envFile,
         };
       } else {
         return {
           label: `PostgreSQL (${target} - offline)`,
           color: colors.yellow,
+          isLive: false,
+          isConfigured: true,
+          target,
+          dbUrl,
+          envFile,
         };
       }
     } catch {
@@ -149,20 +169,80 @@ async function detectDatabaseStatus(projectDir: string): Promise<{ label: string
       return {
         label: `PostgreSQL (${masked})`,
         color: colors.green,
+        isLive: true,
+        isConfigured: true,
+        target: masked,
+        dbUrl,
+        envFile,
       };
     }
   }
 
   return {
-    label: "PGlite (in-memory)",
-    color: colors.dim,
+    label: "PGlite (embedded)",
+    color: colors.cyan,
+    isLive: true,
+    isConfigured: false,
   };
+}
+
+async function promptSwitchToPglite(target: string): Promise<boolean> {
+  if (!process.stdin.isTTY) {
+    return false;
+  }
+
+  const readline = await import("readline");
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+  });
+
+  console.log(`\n  ${colors.yellow}▲${colors.reset} ${colors.bold}PostgreSQL (${target}) is offline / unreachable.${colors.reset}`);
+  console.log(`    ${colors.dim}Không thể kết nối đến server PostgreSQL tại địa chỉ này.${colors.reset}\n`);
+
+  return new Promise((resolve) => {
+    rl.question(
+      `  ${colors.cyan}?${colors.reset} ${colors.bold}Chuyển sang dùng PGlite (cơ sở dữ liệu nhúng local) để tiếp tục phát triển?${colors.reset} ${colors.dim}[Y/n] (mặc định: Y):${colors.reset} `,
+      (answer) => {
+        rl.close();
+        const clean = answer.trim().toLowerCase();
+        if (clean === "" || clean === "y" || clean === "yes") {
+          resolve(true);
+        } else {
+          resolve(false);
+        }
+      }
+    );
+  });
+}
+
+function commentOutDatabaseUrlInEnv(envFilePath: string) {
+  try {
+    const content = readFileSync(envFilePath, "utf-8");
+    const updated = content
+      .split("\n")
+      .map((line) => {
+        const trimmed = line.trim();
+        if (trimmed.startsWith("DATABASE_URL=") || trimmed.startsWith("POSTGRES_URL=")) {
+          return `# ${line} # (tạm tắt bởi com dev - chuyển sang PGlite)`;
+        }
+        return line;
+      })
+      .join("\n");
+    writeFileSync(envFilePath, updated, "utf-8");
+  } catch {}
 }
 
 import { getLocalNetworkIp, generateZaloDeepLink, printZaloDevQrCode, resolveOrPromptAppId, setupAdbReverse, ensureHrConfigFile } from "../zalominiapp/dev";
 
 export async function devCommand(options: DevOptions = {}) {
   const projectDir = resolve(process.cwd(), options.dir || ".");
+
+  // Ensure local data directory exists for embedded PGlite
+  const initialDataDir = join(projectDir, "data");
+  if (!existsSync(initialDataDir)) {
+    try { mkdirSync(initialDataDir, { recursive: true }); } catch {}
+  }
 
   // Check if project has an App Router structure
   const hasAppDir =
@@ -257,7 +337,37 @@ export async function devCommand(options: DevOptions = {}) {
     }
   }
 
-  const dbStatus = await detectDatabaseStatus(projectDir);
+  let dbStatus = await detectDatabaseStatus(projectDir);
+
+  if (dbStatus.isConfigured && !dbStatus.isLive) {
+    const shouldSwitch = await promptSwitchToPglite(dbStatus.target || "PostgreSQL");
+    if (shouldSwitch) {
+      if (dbStatus.envFile) {
+        commentOutDatabaseUrlInEnv(dbStatus.envFile);
+      }
+      delete process.env.DATABASE_URL;
+      delete process.env.POSTGRES_URL;
+      const dataDir = join(projectDir, "data");
+      if (!existsSync(dataDir)) {
+        try { mkdirSync(dataDir, { recursive: true }); } catch {}
+      }
+      dbStatus = {
+        label: "PGlite (embedded)",
+        color: colors.cyan,
+        isLive: true,
+        isConfigured: false,
+      };
+      logger.success("Đã chuyển sang PGlite (data/app.db). Bạn có thể bật lại PostgreSQL bất cứ lúc nào trong .env\n");
+    } else {
+      logger.warn("Tiếp tục chạy với PostgreSQL offline. Các truy vấn CSDL có thể gặp lỗi kết nối.\n");
+    }
+  } else if (!dbStatus.isConfigured || dbStatus.label.includes("PGlite")) {
+    const dataDir = join(projectDir, "data");
+    if (!existsSync(dataDir)) {
+      try { mkdirSync(dataDir, { recursive: true }); } catch {}
+    }
+  }
+
   const localIp = getLocalNetworkIp() || "localhost";
   const networkUrl = `http://${localIp}:${port}`;
 
@@ -265,7 +375,7 @@ export async function devCommand(options: DevOptions = {}) {
   const typesPath = join(projectDir, "types", "db.d.ts");
   if (!existsSync(typesPath)) {
     const dbUrl = process.env.DATABASE_URL || process.env.POSTGRES_URL;
-    if (dbUrl) {
+    if (dbUrl && dbStatus.isLive) {
       try {
         const { introspectAndGenerateSchema } = await import("./db");
         await introspectAndGenerateSchema(projectDir, dbUrl);
