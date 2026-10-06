@@ -14,6 +14,7 @@ import {
   dbSearchCommand,
 } from "../src/commands/db";
 import { loginCommand, logoutCommand, whoamiCommand } from "../src/commands/login";
+import { saveCommand } from "../src/commands/save";
 import { logger, colors } from "../src/core/logger";
 import packageJson from "../package.json";
 
@@ -470,9 +471,27 @@ async function main() {
 
     case "push":
     case "save": {
-      logger.hero();
-      logger.section("SYNC / PUSH VIEW");
-      logger.info("Cloud synchronization engine is ready...");
+      let viewId: string | number | undefined = args[1]?.startsWith("-") ? undefined : args[1];
+      let dir: string | undefined;
+      let api: string | undefined;
+      let token: string | undefined;
+      let dryRun = false;
+
+      for (let i = 1; i < args.length; i++) {
+        if ((args[i] === "--dir" || args[i] === "-d") && args[i + 1]) {
+          dir = args[++i];
+        } else if (args[i] === "--api" && args[i + 1]) {
+          api = args[++i];
+        } else if (args[i] === "--token" && args[i + 1]) {
+          token = args[++i];
+        } else if ((args[i] === "--view" || args[i] === "-v") && args[i + 1]) {
+          viewId = args[++i];
+        } else if (args[i] === "--dry-run" || args[i] === "-n") {
+          dryRun = true;
+        }
+      }
+
+      await saveCommand({ dir, api, token, viewId, dryRun });
       break;
     }
 

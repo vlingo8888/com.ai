@@ -106,4 +106,52 @@ export class NataApiClient {
       files,
     };
   }
+
+  async saveViewRawFiles(
+    viewId: number | string,
+    files: Array<{ path: string; content: string }>,
+    options: { name?: string; description?: string } = {}
+  ): Promise<{ success: boolean; id: number; files_count?: number }> {
+    const rawFilesUrl = `${this.apiUrl}/api/views/${viewId}/raw_files`;
+    const payload = {
+      files,
+      name: options.name,
+      description: options.description,
+      code: JSON.stringify({ files }),
+    };
+
+    // 1. Try POST /api/views/:id/raw_files
+    let res = await fetch(rawFilesUrl, {
+      method: "POST",
+      headers: this.getHeaders(),
+      body: JSON.stringify(payload),
+    });
+
+    // 2. If endpoint not found (404/405), fallback to POST /api/views/:id/save
+    if (!res.ok && (res.status === 404 || res.status === 405)) {
+      const saveUrl = `${this.apiUrl}/api/views/${viewId}/save`;
+      res = await fetch(saveUrl, {
+        method: "POST",
+        headers: this.getHeaders(),
+        body: JSON.stringify(payload),
+      });
+    }
+
+    // 3. Fallback to standard PUT /api/views/:id
+    if (!res.ok && (res.status === 404 || res.status === 405)) {
+      const updateUrl = `${this.apiUrl}/api/views/${viewId}`;
+      res = await fetch(updateUrl, {
+        method: "PUT",
+        headers: this.getHeaders(),
+        body: JSON.stringify(payload),
+      });
+    }
+
+    if (!res.ok) {
+      const errorText = await res.text();
+      throw new Error(`Failed to save view to cloud (${res.status}): ${errorText}`);
+    }
+
+    return await res.json();
+  }
 }
