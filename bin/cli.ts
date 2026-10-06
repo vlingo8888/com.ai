@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
 import { cloneView } from "../src/commands/clone";
+import { createProject } from "../src/commands/create";
 import { devCommand } from "../src/commands/dev";
 import { tunnelCommand } from "../src/commands/tunnel";
 import { buildCommand } from "../src/commands/build";
@@ -23,6 +24,7 @@ function printHelp() {
     ${colors.cyan}$ com${colors.reset} ${colors.green}<command>${colors.reset} [options]
 
   ${colors.bold}${colors.white}COMMANDS:${colors.reset}
+    ${colors.green}create | new${colors.reset}  ${colors.sky}[name]${colors.reset}       Create a new local Next.js project with embedded PGlite
     ${colors.green}login${colors.reset}                 Authenticate via Google (Center Auth)
     ${colors.green}whoami${colors.reset}                Display the currently authenticated user
     ${colors.green}logout${colors.reset}                Log out and revoke local credentials
@@ -90,8 +92,15 @@ function printHelp() {
 }
 
 async function main() {
-  const args = process.argv.slice(2);
-  const command = args[0];
+  const isCreateBinary = process.argv[1]?.endsWith("create-com-app");
+  let args = process.argv.slice(2);
+  let command = args[0];
+
+  if (isCreateBinary && command !== "create" && command !== "new" && command !== "init" && command !== "--help" && command !== "-h") {
+    // If invoked as `create-com-app <project-name>`, inject "create" as command
+    args = ["create", ...args];
+    command = "create";
+  }
 
   if (!command || command === "--help" || command === "-h" || command === "help") {
     printHelp();
@@ -138,6 +147,33 @@ async function main() {
   }
 
   switch (command) {
+    case "create":
+    case "new":
+    case "init": {
+      let projectName = args[1]?.startsWith("-") ? undefined : args[1];
+      let dir: string | undefined;
+      let force = false;
+      let install = false;
+      let template: string | undefined;
+
+      for (let i = 1; i < args.length; i++) {
+        if ((args[i] === "--dir" || args[i] === "-d") && args[i + 1]) {
+          dir = args[++i];
+        } else if (args[i] === "--force" || args[i] === "-f") {
+          force = true;
+        } else if (args[i] === "--install") {
+          install = true;
+        } else if (args[i] === "--no-install") {
+          install = false;
+        } else if (args[i] === "--template" && args[i + 1]) {
+          template = args[++i];
+        }
+      }
+
+      await createProject(projectName, { dir, force, install, template });
+      break;
+    }
+
     case "login": {
       let token: string | undefined;
       let api: string | undefined;

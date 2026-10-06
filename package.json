@@ -5,7 +5,8 @@
   "bin": {
     "com": "./bin/cli.ts",
     "cai": "./bin/cli.ts",
-    "aivn": "./bin/cli.ts"
+    "aivn": "./bin/cli.ts",
+    "create-com-app": "./bin/cli.ts"
   },
   "scripts": {
     "start": "bun ./bin/cli.ts",

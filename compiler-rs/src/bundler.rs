@@ -236,6 +236,8 @@ impl ClientTransformer {
       "next/router": "/_nata/shims/next/router",
       "next/head": "/_nata/shims/next/head",
       "next/headers": "/_nata/shims/next/headers",
+      "next-intl/server": "/_nata/shims/next-intl/server",
+      "next-intl": "https://esm.sh/next-intl@4.14.9?external=react,react-dom",
       "lucide-react": "https://esm.sh/lucide-react@0.460.0?external=react,react-dom",
       "framer-motion": "https://esm.sh/framer-motion@11.11.17?external=react,react-dom",
       "clsx": "https://esm.sh/clsx@2.1.1",

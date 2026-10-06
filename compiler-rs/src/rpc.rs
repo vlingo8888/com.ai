@@ -859,6 +859,167 @@ export default {
 "#;
         let _ = std::fs::write(nata_dir.join("server.ts"), server_ts);
 
+        let next_intl_server_ts = r#"import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+
+const _messagesCache = new Map<string, any>();
+
+function getCookiesFromGlobal(): Map<string, string> {
+  return (globalThis as any).__NATA_COOKIES__ || new Map<string, string>();
+}
+
+export async function getLocale(): Promise<string> {
+  const cookies = getCookiesFromGlobal();
+  if (cookies.has("NEXT_LOCALE")) {
+    return cookies.get("NEXT_LOCALE")!;
+  }
+  if (typeof process !== "undefined" && process.env.DEFAULT_LOCALE) {
+    return process.env.DEFAULT_LOCALE;
+  }
+  return "vi";
+}
+
+export async function getMessages(opts?: { locale?: string }): Promise<Record<string, any>> {
+  const locale = opts?.locale || (await getLocale());
+  if (_messagesCache.has(locale)) {
+    return _messagesCache.get(locale);
+  }
+
+  const reqConfigPaths = [
+    join(process.cwd(), "i18n", "request.ts"),
+    join(process.cwd(), "src", "i18n", "request.ts"),
+    join(process.cwd(), "i18n.ts"),
+    join(process.cwd(), "src", "i18n.ts"),
+  ];
+
+  for (const reqPath of reqConfigPaths) {
+    if (existsSync(reqPath)) {
+      try {
+        const mod = await import(reqPath);
+        const configFn = mod.default || mod.getRequestConfig;
+        if (typeof configFn === "function") {
+          const res = await configFn({ locale });
+          if (res && res.messages) {
+            _messagesCache.set(locale, res.messages);
+            return res.messages;
+          }
+        }
+      } catch {}
+    }
+  }
+
+  const candidateFiles = [
+    join(process.cwd(), "config", "locales", `${locale}.json`),
+    join(process.cwd(), "messages", `${locale}.json`),
+    join(process.cwd(), "locales", `${locale}.json`),
+    join(process.cwd(), "public", "locales", `${locale}.json`),
+    join(process.cwd(), "config", "locales", "vi.json"),
+    join(process.cwd(), "messages", "vi.json"),
+    join(process.cwd(), "config", "locales", "en.json"),
+    join(process.cwd(), "messages", "en.json"),
+  ];
+
+  for (const filePath of candidateFiles) {
+    if (existsSync(filePath)) {
+      try {
+        const content = readFileSync(filePath, "utf-8");
+        const json = JSON.parse(content);
+        _messagesCache.set(locale, json);
+        return json;
+      } catch {}
+    }
+  }
+
+  return {};
+}
+
+function getNestedValue(obj: any, keyPath: string): any {
+  if (!obj || !keyPath) return undefined;
+  const parts = keyPath.split(".");
+  let curr = obj;
+  for (const p of parts) {
+    if (curr && typeof curr === "object" && p in curr) {
+      curr = curr[p];
+    } else {
+      return undefined;
+    }
+  }
+  return curr;
+}
+
+export async function getTranslations(optsOrNamespace?: any) {
+  const namespace = typeof optsOrNamespace === "string" ? optsOrNamespace : optsOrNamespace?.namespace;
+  const locale = (typeof optsOrNamespace === "object" && optsOrNamespace?.locale) || (await getLocale());
+  const messages = (typeof optsOrNamespace === "object" && optsOrNamespace?.messages) || (await getMessages({ locale }));
+  const scopeObj = namespace ? getNestedValue(messages, namespace) || {} : messages;
+
+  function t(key: string, params?: Record<string, any>) {
+    let raw = getNestedValue(scopeObj, key) || getNestedValue(messages, key) || key;
+    if (typeof raw !== "string") {
+      if (raw === undefined || raw === null) return key;
+      return String(raw);
+    }
+    let res = raw;
+    if (params && typeof params === "object") {
+      for (const [k, v] of Object.entries(params)) {
+        res = res.replace(new RegExp(`\\{${k}\\}`, "g"), String(v));
+      }
+    }
+    return res;
+  }
+
+  t.raw = (key: string) => getNestedValue(scopeObj, key) || key;
+  t.rich = (key: string, values?: any) => t(key, values);
+  t.has = (key: string) => getNestedValue(scopeObj, key) !== undefined;
+
+  return t;
+}
+
+export function getRequestConfig(fn: any) {
+  return fn;
+}
+
+export function setRequestLocale(locale: string) {
+  const cookies = getCookiesFromGlobal();
+  cookies.set("NEXT_LOCALE", locale);
+}
+
+export async function getTimeZone() {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+  } catch {
+    return "UTC";
+  }
+}
+
+export async function getNow() {
+  return new Date();
+}
+
+export async function getFormatter() {
+  return {
+    dateTime: (date: any, opts: any) => new Intl.DateTimeFormat(undefined, opts).format(date),
+    number: (num: any, opts: any) => new Intl.NumberFormat(undefined, opts).format(num),
+    relativeTime: (val: any, unit: any, opts: any) => new Intl.RelativeTimeFormat(undefined, opts).format(val, unit)
+  };
+}
+
+export const getExtracted = () => ({});
+
+export default {
+  getLocale,
+  getMessages,
+  getTranslations,
+  getRequestConfig,
+  setRequestLocale,
+  getTimeZone,
+  getNow,
+  getFormatter,
+  getExtracted
+};
+"#;
+        let _ = std::fs::write(nata_dir.join("next-intl-server.ts"), next_intl_server_ts);
+
         // 4. Ensure node_modules/core has canonical NATA package files (overriding any broken ancient core package)
         let nm_core = root.join("node_modules").join("core");
         let _ = std::fs::create_dir_all(&nm_core);
@@ -1108,6 +1269,7 @@ exports.default = {
                                 paths_obj.insert("core".to_string(), serde_json::json!(["./.nata/core.ts"]));
                                 paths_obj.insert("next/headers".to_string(), serde_json::json!(["./.nata/headers.ts"]));
                                 paths_obj.insert("next/server".to_string(), serde_json::json!(["./.nata/server.ts"]));
+                                paths_obj.insert("next-intl/server".to_string(), serde_json::json!(["./.nata/next-intl-server.ts"]));
                                 if !paths_obj.contains_key("@/*") {
                                     paths_obj.insert("@/*".to_string(), serde_json::json!(["./*", "./src/*"]));
                                 }
@@ -1135,12 +1297,21 @@ exports.default = {
                         "core": ["./.nata/core.ts"],
                         "next/headers": ["./.nata/headers.ts"],
                         "next/server": ["./.nata/server.ts"],
+                        "next-intl/server": ["./.nata/next-intl-server.ts"],
                         "@/*": ["./*", "./src/*"],
                         "~/*": ["./*", "./src/*"]
                     }
                 }
             });
             let _ = std::fs::write(&tsconfig_path, serde_json::to_string_pretty(&standard_tsconfig).unwrap());
+        }
+
+        let nm_next_intl = root.join("node_modules").join("next-intl");
+        if nm_next_intl.exists() {
+            let _ = std::fs::write(
+                nm_next_intl.join("server.js"),
+                r#"module.exports = require("../../.nata/next-intl-server.ts");"#,
+            );
         }
 
         // 6. Ensure global.css <-> globals.css compatibility for Next.js starter templates

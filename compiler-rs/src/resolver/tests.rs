@@ -537,5 +537,22 @@ export default function Nav() {
     assert!(swc_res.is_ok(), "SWC failed to compile Nav.tsx: {:?}", swc_res.err());
 }
 
+#[test]
+fn test_next_intl_server_shim() {
+    let code = r#"
+import { getLocale, getMessages } from "next-intl/server";
+export default async function Layout() {
+    const locale = await getLocale();
+    const messages = await getMessages();
+    return <div>{locale}</div>;
+}
+"#;
+    let transformed = ImportResolver::transform_source(code, "app/layout.tsx");
+    assert!(transformed.contains("/_nata/shims/next-intl/server"));
+
+    let swc_res = crate::swc_compiler::SwcCompiler::compile(&transformed, "app/layout.tsx");
+    assert!(swc_res.is_ok(), "SWC failed to compile layout with next-intl/server: {:?}", swc_res.err());
+}
+
 
 

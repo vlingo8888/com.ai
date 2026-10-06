@@ -587,6 +587,181 @@ export async function introspectPostgres(dbUrl: string): Promise<DatabaseSchema>
 }
 
 /**
+ * Introspects embedded PGlite database (@pglite/core) from file or schema.sql
+ */
+export async function introspectPGLite(
+  projectDir: string,
+  customDbPath?: string
+): Promise<DatabaseSchema> {
+  let PGliteClass: any = null;
+  try {
+    const pglitePkg = require("@pglite/core");
+    PGliteClass = pglitePkg.PGLite || pglitePkg.PGLiteNative;
+  } catch {}
+  if (!PGliteClass) {
+    try {
+      PGliteClass = require("@electric-sql/pglite").PGlite;
+    } catch {}
+  }
+  if (!PGliteClass) {
+    throw new Error("@pglite/core is not available in the current runtime environment");
+  }
+
+  const dbRelative = customDbPath || process.env.DB_PATH || "data/app.db";
+  const fullDbPath = join(projectDir, dbRelative);
+  const schemaSqlPath = join(projectDir, "schema.sql");
+
+  let pglite: any;
+  if (existsSync(fullDbPath)) {
+    pglite = new PGliteClass(fullDbPath);
+  } else if (existsSync(schemaSqlPath)) {
+    pglite = new PGliteClass();
+    const ddl = readFileSync(schemaSqlPath, "utf-8");
+    await pglite.exec(ddl);
+  } else {
+    throw new Error(`No database file found at ${fullDbPath} and no schema.sql found at ${schemaSqlPath}`);
+  }
+
+  try {
+    let tableRowsRaw: any = await pglite.query(`
+      SELECT table_name, comment 
+      FROM information_schema.tables 
+      WHERE table_schema = 'public' 
+        AND table_type = 'BASE TABLE'
+      ORDER BY table_name;
+    `);
+    let tableRows = Array.isArray(tableRowsRaw?.rows) ? tableRowsRaw.rows : (Array.isArray(tableRowsRaw) ? tableRowsRaw : []);
+
+    if (tableRows.length === 0 && existsSync(schemaSqlPath)) {
+      try {
+        const ddl = readFileSync(schemaSqlPath, "utf-8");
+        await pglite.exec(ddl);
+        tableRowsRaw = await pglite.query(`
+          SELECT table_name, comment 
+          FROM information_schema.tables 
+          WHERE table_schema = 'public' 
+            AND table_type = 'BASE TABLE'
+          ORDER BY table_name;
+        `);
+        tableRows = Array.isArray(tableRowsRaw?.rows) ? tableRowsRaw.rows : (Array.isArray(tableRowsRaw) ? tableRowsRaw : []);
+      } catch {}
+    }
+
+    const columnRowsRaw: any = await pglite.query(`
+      SELECT 
+        table_name,
+        column_name,
+        data_type,
+        udt_name,
+        is_nullable,
+        column_default,
+        comment
+      FROM information_schema.columns 
+      WHERE table_schema = 'public' 
+      ORDER BY table_name, ordinal_position;
+    `);
+    const columnRows = Array.isArray(columnRowsRaw?.rows) ? columnRowsRaw.rows : (Array.isArray(columnRowsRaw) ? columnRowsRaw : []);
+
+    const pkRowsRaw: any = await pglite.query(`
+      SELECT
+        tc.table_name, 
+        kcu.column_name
+      FROM information_schema.table_constraints tc
+      JOIN information_schema.key_column_usage kcu
+        ON tc.constraint_name = kcu.constraint_name
+        AND tc.table_schema = kcu.table_schema
+      WHERE tc.constraint_type = 'PRIMARY KEY'
+        AND tc.table_schema = 'public';
+    `);
+    const pkRows = Array.isArray(pkRowsRaw?.rows) ? pkRowsRaw.rows : (Array.isArray(pkRowsRaw) ? pkRowsRaw : []);
+
+    const fkRowsRaw: any = await pglite.query(`
+      SELECT 
+        tc.table_name,
+        kcu.column_name,
+        ccu.table_name AS foreign_table_name,
+        ccu.column_name AS foreign_column_name
+      FROM information_schema.table_constraints AS tc
+      JOIN information_schema.key_column_usage AS kcu
+        ON tc.constraint_name = kcu.constraint_name
+        AND tc.table_schema = kcu.table_schema
+      JOIN information_schema.constraint_column_usage AS ccu
+        ON ccu.constraint_name = tc.constraint_name
+        AND ccu.table_schema = tc.table_schema
+      WHERE tc.constraint_type = 'FOREIGN KEY'
+        AND tc.table_schema = 'public';
+    `);
+    const fkRows = Array.isArray(fkRowsRaw?.rows) ? fkRowsRaw.rows : (Array.isArray(fkRowsRaw) ? fkRowsRaw : []);
+
+    const primaryKeyMap = new Set<string>();
+    for (const row of pkRows) {
+      primaryKeyMap.add(`${row.table_name}.${row.column_name}`);
+    }
+
+    const fkMap = new Map<string, { foreignTable: string; foreignColumn: string }>();
+    for (const row of fkRows) {
+      fkMap.set(`${row.table_name}.${row.column_name}`, {
+        foreignTable: row.foreign_table_name,
+        foreignColumn: row.foreign_column_name,
+      });
+    }
+
+    const tablesMap = new Map<string, ColumnMeta[]>();
+    for (const t of tableRows) {
+      tablesMap.set(t.table_name, []);
+    }
+
+    for (const col of columnRows) {
+      const key = `${col.table_name}.${col.column_name}`;
+      const isPk = primaryKeyMap.has(key);
+      const fk = fkMap.get(key);
+      const comment = parseJsonComment(col.comment || null);
+      const formattedDefault = formatDefaultValue(
+        col.column_default,
+        col.udt_name,
+        col.data_type,
+        col.column_name
+      );
+
+      const colMeta: ColumnMeta = {
+        name: col.column_name,
+        dataType: col.data_type,
+        udtName: col.udt_name,
+        isNullable: col.is_nullable === "YES",
+        columnDefault: formattedDefault,
+        comment,
+        isPrimaryKey: isPk,
+        foreignKey: fk,
+      };
+
+      if (tablesMap.has(col.table_name)) {
+        tablesMap.get(col.table_name)!.push(colMeta);
+      }
+    }
+
+    const tables: TableMeta[] = [];
+    for (const t of tableRows) {
+      const rawTableComment = t.comment || null;
+      const tableComment = parseJsonComment(rawTableComment);
+      tables.push({
+        name: t.table_name,
+        comment: tableComment,
+        columns: tablesMap.get(t.table_name) || [],
+      });
+    }
+
+    return {
+      tables,
+      introspectedAt: new Date().toISOString(),
+    };
+  } finally {
+    try {
+      await pglite.close();
+    } catch {}
+  }
+}
+
+/**
  * Generates TypeScript type definitions for Kysely (types/db.d.ts)
  */
 export function generateTypeScriptTypes(schema: DatabaseSchema): string {
@@ -901,14 +1076,75 @@ export function findDatabaseUrl(projectDir: string, customEnv?: string): string 
 }
 
 /**
+ * Finds local embedded PGlite database file path from environment or .env file
+ */
+export function findDbPath(projectDir: string, customEnv?: string): string | null {
+  if (process.env.DB_PATH) return process.env.DB_PATH;
+
+  const envFiles = customEnv ? [customEnv] : [".env", ".env.local", ".env.development"];
+  for (const file of envFiles) {
+    const envPath = join(projectDir, file);
+    if (existsSync(envPath)) {
+      try {
+        const content = readFileSync(envPath, "utf-8");
+        for (const line of content.split("\n")) {
+          const trimmed = line.trim();
+          if (trimmed.startsWith("#") || !trimmed.includes("=")) continue;
+          const [key, ...vals] = trimmed.split("=");
+          if (key.trim() === "DB_PATH") {
+            return vals.join("=").trim().replace(/^["']|["']$/g, "");
+          }
+        }
+      } catch {}
+    }
+  }
+
+  const defaultDbPath = join(projectDir, "data", "app.db");
+  if (existsSync(defaultDbPath)) {
+    return "data/app.db";
+  }
+
+  return null;
+}
+
+/**
+ * Universal introspector: auto-detects remote Postgres (DATABASE_URL) or embedded PGlite
+ */
+export async function introspectSchema(
+  projectDir: string,
+  options: { dbUrl?: string; env?: string } = {}
+): Promise<{ schema: DatabaseSchema; engine: "postgres" | "pglite"; target: string }> {
+  const dbUrl = options.dbUrl || findDatabaseUrl(projectDir, options.env);
+  if (dbUrl && (dbUrl.startsWith("postgres://") || dbUrl.startsWith("postgresql://"))) {
+    const schema = await introspectPostgres(dbUrl);
+    return { schema, engine: "postgres", target: dbUrl };
+  }
+
+  const pglitePath = findDbPath(projectDir, options.env);
+  if (pglitePath) {
+    const schema = await introspectPGLite(projectDir, pglitePath);
+    return { schema, engine: "pglite", target: pglitePath };
+  }
+
+  if (existsSync(join(projectDir, "schema.sql"))) {
+    const schema = await introspectPGLite(projectDir);
+    return { schema, engine: "pglite", target: "schema.sql" };
+  }
+
+  throw new Error(
+    "No DATABASE_URL or local PGlite database found! Please configure DATABASE_URL or DB_PATH in .env or provide --url option."
+  );
+}
+
+/**
  * Executes the full schema pull and generation workflow
  */
 export async function introspectAndGenerateSchema(
   projectDir: string,
-  dbUrl: string,
-  options: { silent?: boolean } = {}
-): Promise<{ tableCount: number; typesPath: string; schemaPath: string }> {
-  const schema = await introspectPostgres(dbUrl);
+  dbUrl?: string,
+  options: { silent?: boolean; env?: string } = {}
+): Promise<{ tableCount: number; typesPath: string; schemaPath: string; engine: "postgres" | "pglite" }> {
+  const { schema, engine } = await introspectSchema(projectDir, { dbUrl, env: options.env });
 
   // 1. Write types/db.d.ts
   const typesDir = join(projectDir, "types");
@@ -960,6 +1196,7 @@ export async function introspectAndGenerateSchema(
     tableCount: schema.tables.length,
     typesPath,
     schemaPath,
+    engine,
   };
 }
 
@@ -972,26 +1209,19 @@ export async function dbPullCommand(options: {
   dbUrl?: string;
 } = {}): Promise<void> {
   const projectDir = options.dir || process.cwd();
-  const dbUrl = options.dbUrl || findDatabaseUrl(projectDir, options.env);
 
   logger.hero();
   logger.section("DATABASE SCHEMA INTROSPECTION & SYNC");
 
-  if (!dbUrl) {
-    logger.error(
-      "No DATABASE_URL or POSTGRES_URL found!",
-      "Please configure DATABASE_URL in your .env file or provide --url option."
-    );
-    process.exit(1);
-  }
-
-  const maskedUrl = dbUrl.replace(/:([^:@]+)@/, ":****@");
-  logger.info(`Connecting to database: ${colors.sky}${maskedUrl}${colors.reset}`);
-
   try {
-    const result = await introspectAndGenerateSchema(projectDir, dbUrl);
+    const result = await introspectAndGenerateSchema(projectDir, options.dbUrl, { env: options.env });
 
     logger.card("DATABASE SYNC COMPLETE", [
+      {
+        label: "Database Engine",
+        value: result.engine === "pglite" ? "PGlite Embedded (@pglite/core)" : "Remote PostgreSQL",
+        color: colors.bold + colors.sky,
+      },
       {
         label: "Tables Found",
         value: `${result.tableCount} tables`,
@@ -1033,17 +1263,17 @@ export async function dbListCommand(options: {
   json?: boolean;
 } = {}): Promise<void> {
   const projectDir = options.dir || process.cwd();
-  const dbUrl = options.dbUrl || findDatabaseUrl(projectDir, options.env);
 
-  if (!dbUrl) {
-    logger.error(
-      "No DATABASE_URL found!",
-      "Please configure DATABASE_URL in your .env file or provide --url option."
-    );
+  let schema: DatabaseSchema;
+  let engine: string;
+  try {
+    const res = await introspectSchema(projectDir, { dbUrl: options.dbUrl, env: options.env });
+    schema = res.schema;
+    engine = res.engine;
+  } catch (err: any) {
+    logger.error(err.message || String(err));
     process.exit(1);
   }
-
-  const schema = await introspectPostgres(dbUrl);
 
   if (options.json) {
     const list = schema.tables.map((t) => ({
@@ -1064,7 +1294,8 @@ export async function dbListCommand(options: {
   }
 
   logger.hero();
-  logger.section(`DATABASE TABLES (${schema.tables.length} tables total)`);
+  const engineLabel = engine === "pglite" ? "PGlite Embedded" : "PostgreSQL";
+  logger.section(`DATABASE TABLES (${schema.tables.length} tables total - ${engineLabel})`);
 
   for (const t of schema.tables) {
     const desc =
@@ -1096,25 +1327,24 @@ export async function dbDescribeCommand(
   } = {}
 ): Promise<void> {
   const projectDir = options.dir || process.cwd();
-  const dbUrl = options.dbUrl || findDatabaseUrl(projectDir, options.env);
 
   if (!tableName || !tableName.trim()) {
     logger.error(
       "Missing required <table_name> argument!",
-      "Usage: com db describe <table_name>\n    Example: com db describe wellness_assessments"
+      "Usage: com db describe <table_name>\n    Example: com db describe items"
     );
     process.exit(1);
   }
 
-  if (!dbUrl) {
-    logger.error(
-      "No DATABASE_URL found!",
-      "Please configure DATABASE_URL in your .env file or provide --url option."
-    );
+  let schema: DatabaseSchema;
+  try {
+    const res = await introspectSchema(projectDir, { dbUrl: options.dbUrl, env: options.env });
+    schema = res.schema;
+  } catch (err: any) {
+    logger.error(err.message || String(err));
     process.exit(1);
   }
 
-  const schema = await introspectPostgres(dbUrl);
   const target = schema.tables.find(
     (t) => t.name.toLowerCase() === tableName.trim().toLowerCase()
   );
@@ -1193,26 +1423,25 @@ export async function dbSearchCommand(
   } = {}
 ): Promise<void> {
   const projectDir = options.dir || process.cwd();
-  const dbUrl = options.dbUrl || findDatabaseUrl(projectDir, options.env);
 
   if (!query || !query.trim()) {
     logger.error(
       "Missing search query!",
-      "Usage: com db search <keyword>\n    Example: com db search \"khảo sát\""
+      "Usage: com db search <keyword>\n    Example: com db search \"công việc\""
     );
     process.exit(1);
   }
 
-  if (!dbUrl) {
-    logger.error(
-      "No DATABASE_URL found!",
-      "Please configure DATABASE_URL in your .env file or provide --url option."
-    );
+  let schema: DatabaseSchema;
+  try {
+    const res = await introspectSchema(projectDir, { dbUrl: options.dbUrl, env: options.env });
+    schema = res.schema;
+  } catch (err: any) {
+    logger.error(err.message || String(err));
     process.exit(1);
   }
 
   const q = query.trim().toLowerCase();
-  const schema = await introspectPostgres(dbUrl);
 
   const matchedTables: {
     table: TableMeta;

@@ -827,6 +827,8 @@ async fn zmp_js_handler(State(state): State<AppState>) -> impl IntoResponse {
         "next/router": serverOrigin + "/_nata/shims/next/router",
         "next/head": serverOrigin + "/_nata/shims/next/head",
         "next/headers": serverOrigin + "/_nata/shims/next/headers",
+        "next-intl/server": serverOrigin + "/_nata/shims/next-intl/server",
+        "next-intl": "https://esm.sh/next-intl@4.14.9?external=react,react-dom",
         "lucide-react": "https://esm.sh/lucide-react@0.460.0?external=react,react-dom",
         "framer-motion": "https://esm.sh/framer-motion@11.11.17?external=react,react-dom",
         "clsx": "https://esm.sh/clsx@2.1.1",
@@ -1435,6 +1437,148 @@ export class NextRequest extends Request {
   }
 }
 export default { NextResponse, NextRequest };
+"##
+        }
+        "next-intl/server" | "next-intl" => {
+            r##"const _messagesCache = new Map();
+
+export async function getLocale() {
+  if (typeof document !== "undefined" && document.cookie) {
+    const match = document.cookie.match(/(?:^|;\s*)NEXT_LOCALE=([^;]+)/);
+    if (match) return decodeURIComponent(match[1]);
+  }
+  if (typeof localStorage !== "undefined") {
+    try {
+      const val = localStorage.getItem("NEXT_LOCALE");
+      if (val) return val;
+    } catch {}
+  }
+  if (typeof navigator !== "undefined" && navigator.language) {
+    return navigator.language.split("-")[0] || "vi";
+  }
+  return "vi";
+}
+
+export async function getMessages(opts) {
+  const locale = (opts && opts.locale) || (await getLocale());
+  if (_messagesCache.has(locale)) {
+    return _messagesCache.get(locale);
+  }
+
+  const candidatePaths = [
+    `/config/locales/${locale}.json`,
+    `/messages/${locale}.json`,
+    `/locales/${locale}.json`,
+    `/config/locales/vi.json`,
+    `/messages/vi.json`,
+    `/config/locales/en.json`,
+    `/messages/en.json`
+  ];
+
+  if (typeof window !== "undefined") {
+    for (const path of candidatePaths) {
+      try {
+        const res = await fetch(path);
+        if (res.ok) {
+          const data = await res.json();
+          if (data && typeof data === "object") {
+            _messagesCache.set(locale, data);
+            return data;
+          }
+        }
+      } catch {}
+    }
+  }
+
+  return {};
+}
+
+function getNestedValue(obj, keyPath) {
+  if (!obj || !keyPath) return undefined;
+  const parts = keyPath.split(".");
+  let curr = obj;
+  for (const p of parts) {
+    if (curr && typeof curr === "object" && p in curr) {
+      curr = curr[p];
+    } else {
+      return undefined;
+    }
+  }
+  return curr;
+}
+
+export async function getTranslations(optsOrNamespace) {
+  const namespace = typeof optsOrNamespace === "string" ? optsOrNamespace : optsOrNamespace?.namespace;
+  const locale = (typeof optsOrNamespace === "object" && optsOrNamespace?.locale) || (await getLocale());
+  const messages = (typeof optsOrNamespace === "object" && optsOrNamespace?.messages) || (await getMessages({ locale }));
+  const scopeObj = namespace ? getNestedValue(messages, namespace) || {} : messages;
+
+  function t(key, params) {
+    let raw = getNestedValue(scopeObj, key) || getNestedValue(messages, key) || key;
+    if (typeof raw !== "string") {
+      if (raw === undefined || raw === null) return key;
+      return String(raw);
+    }
+    let res = raw;
+    if (params && typeof params === "object") {
+      for (const [k, v] of Object.entries(params)) {
+        res = res.replace(new RegExp(`\\{${k}\\}`, "g"), String(v));
+      }
+    }
+    return res;
+  }
+
+  t.raw = (key) => getNestedValue(scopeObj, key) || key;
+  t.rich = (key, values) => t(key, values);
+  t.has = (key) => getNestedValue(scopeObj, key) !== undefined;
+
+  return t;
+}
+
+export function getRequestConfig(fn) {
+  return fn;
+}
+
+export function setRequestLocale(locale) {
+  if (typeof document !== "undefined") {
+    document.cookie = `NEXT_LOCALE=${encodeURIComponent(locale)}; Path=/; SameSite=Lax`;
+    try { localStorage.setItem("NEXT_LOCALE", locale); } catch {}
+  }
+}
+
+export async function getTimeZone() {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+  } catch {
+    return "UTC";
+  }
+}
+
+export async function getNow() {
+  return new Date();
+}
+
+export async function getFormatter() {
+  return {
+    dateTime: (date, opts) => new Intl.DateTimeFormat(undefined, opts).format(date),
+    number: (num, opts) => new Intl.NumberFormat(undefined, opts).format(num),
+    relativeTime: (val, unit, opts) => new Intl.RelativeTimeFormat(undefined, opts).format(val, unit)
+  };
+}
+
+export const getExtracted = () => ({});
+
+export default {
+  getLocale,
+  getMessages,
+  getTranslations,
+  getRequestConfig,
+  setRequestLocale,
+  getTimeZone,
+  getNow,
+  getFormatter,
+  getExtracted
+};
 "##
         }
         _ => {

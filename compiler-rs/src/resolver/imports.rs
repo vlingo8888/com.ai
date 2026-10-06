@@ -57,6 +57,10 @@ impl ImportResolver {
             return ImportKind::Absolute("/_nata/shims/core".to_string());
         }
 
+        if trimmed == "next-intl/server" || trimmed.starts_with("next-intl/server") {
+            return ImportKind::Absolute("/_nata/shims/next-intl/server".to_string());
+        }
+
         // Check if custom tsconfig has an alias matching this specifier
         if tsconfig.resolve_path_alias(trimmed).is_some() {
             return ImportKind::PathAlias(trimmed.to_string());
@@ -138,6 +142,8 @@ impl ImportResolver {
             "next/router" => "/_nata/shims/next/router".to_string(),
             "next/head" => "/_nata/shims/next/head".to_string(),
             "next/server" => "/_nata/shims/next/server".to_string(),
+            "next-intl/server" => "/_nata/shims/next-intl/server".to_string(),
+            "next-intl" => "https://esm.sh/next-intl@4.14.9?external=react,react-dom".to_string(),
             _ => {
                 if pkg.starts_with("next/") {
                     format!("/_nata/shims/{}", pkg)
