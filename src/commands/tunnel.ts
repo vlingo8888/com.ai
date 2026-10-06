@@ -29,7 +29,7 @@ export async function start123cTunnel(options: TunnelOptions = {}): Promise<{
   proc: any;
 }> {
   const port = String(options.port || 3000);
-  const args = ["bun", "x", "localtunnel", "--host", "https://mini.123c.vn", "--port", port];
+  const args = [process.execPath, "x", "localtunnel", "--host", "https://mini.123c.vn", "--port", port];
   if (options.subdomain) {
     args.push("--subdomain", options.subdomain);
   }

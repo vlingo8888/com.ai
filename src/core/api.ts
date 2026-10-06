@@ -154,4 +154,50 @@ export class NataApiClient {
 
     return await res.json();
   }
+
+  async publishView(
+    viewId: number | string,
+    options: { domain?: string } = {}
+  ): Promise<{ success: boolean; viewId: number; message?: string }> {
+    const publishUrl = `${this.apiUrl}/api/views/publish/v2`;
+    const payload = {
+      viewId: Number(viewId),
+      view_id: Number(viewId),
+      domain: options.domain,
+    };
+
+    // 1. Try POST /api/views/publish/v2
+    let res = await fetch(publishUrl, {
+      method: "POST",
+      headers: this.getHeaders(),
+      body: JSON.stringify(payload),
+    });
+
+    // 2. Fallback to POST /api/views/publish
+    if (!res.ok && (res.status === 404 || res.status === 405)) {
+      const fallbackUrl = `${this.apiUrl}/api/views/publish`;
+      res = await fetch(fallbackUrl, {
+        method: "POST",
+        headers: this.getHeaders(),
+        body: JSON.stringify(payload),
+      });
+    }
+
+    // 3. Fallback to POST /api/views/:id/publish
+    if (!res.ok && (res.status === 404 || res.status === 405)) {
+      const idUrl = `${this.apiUrl}/api/views/${viewId}/publish`;
+      res = await fetch(idUrl, {
+        method: "POST",
+        headers: this.getHeaders(),
+        body: JSON.stringify(payload),
+      });
+    }
+
+    if (!res.ok) {
+      const errorText = await res.text();
+      throw new Error(`Failed to publish view (${res.status}): ${errorText}`);
+    }
+
+    return await res.json();
+  }
 }

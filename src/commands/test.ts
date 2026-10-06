@@ -137,7 +137,7 @@ export async function testCommand(rawArgs: string[] = [], options: TestOptions =
   }
 
   // Spawn bun test with inherited stdio to preserve rich colors, terminal dimensions, and interactive controls
-  const proc = Bun.spawn(["bun", ...bunArgs], {
+  const proc = Bun.spawn([process.execPath, ...bunArgs], {
     cwd: projectDir,
     stdout: "inherit",
     stderr: "inherit",

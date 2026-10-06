@@ -90,6 +90,36 @@ describe("API Client - saveViewRawFiles", () => {
       mockServer.stop();
     }
   });
+
+  it("should trigger publish endpoint with viewId", async () => {
+    let capturedMethod = "";
+    let capturedBody: any = null;
+
+    const mockServer = Bun.serve({
+      port: 0,
+      fetch(req) {
+        capturedMethod = req.method;
+        return req.json().then((body) => {
+          capturedBody = body;
+          return Response.json({ success: true, viewId: body.viewId || body.view_id });
+        });
+      },
+    });
+
+    try {
+      const client = new NataApiClient(`http://localhost:${mockServer.port}`, "test-token");
+      const res = await client.publishView(888, { domain: "demo.com.ai.vn" });
+
+      expect(capturedMethod).toBe("POST");
+      expect(capturedBody).toBeDefined();
+      expect(capturedBody.viewId).toBe(888);
+      expect(capturedBody.domain).toBe("demo.com.ai.vn");
+      expect(res.success).toBe(true);
+      expect(res.viewId).toBe(888);
+    } finally {
+      mockServer.stop();
+    }
+  });
 });
 
 describe("Local Config - saveLocalViewConfig & getLocalViewConfig", () => {

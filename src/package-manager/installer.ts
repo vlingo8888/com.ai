@@ -9,7 +9,7 @@ export async function installDependencies(options: InstallOptions): Promise<bool
   const spinner = !options.silent ? logger.spinner("Installing project dependencies with Bun...") : null;
 
   try {
-    const proc = Bun.spawn(["bun", "install"], {
+    const proc = Bun.spawn([process.execPath, "install"], {
       cwd: options.cwd,
       stdout: "ignore",
       stderr: "ignore",

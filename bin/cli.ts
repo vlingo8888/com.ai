@@ -15,6 +15,7 @@ import {
 } from "../src/commands/db";
 import { loginCommand, logoutCommand, whoamiCommand } from "../src/commands/login";
 import { saveCommand } from "../src/commands/save";
+import { publishCommand } from "../src/commands/publish";
 import { logger, colors } from "../src/core/logger";
 import packageJson from "../package.json";
 
@@ -42,6 +43,7 @@ function printHelp() {
     ${colors.green}migrate${colors.reset}  ${colors.sky}<sql|file>${colors.reset}  Execute SQL migration and auto-sync database schema
     ${colors.green}version | -v${colors.reset}          Display system, CLI, and runtime engine versions
     ${colors.green}push | save${colors.reset}           Synchronize local changes back to the Cloud
+    ${colors.green}publish${colors.reset}       ${colors.sky}[viewId]${colors.reset}       Publish View to Production & activate public live endpoint
 
   ${colors.bold}${colors.white}OPTIONS:${colors.reset}
     ${colors.yellow}--watch, -w${colors.reset}            Watch files for changes and re-run tests
@@ -492,6 +494,34 @@ async function main() {
       }
 
       await saveCommand({ dir, api, token, viewId, dryRun });
+      break;
+    }
+
+    case "publish": {
+      let viewId: string | number | undefined = args[1]?.startsWith("-") ? undefined : args[1];
+      let dir: string | undefined;
+      let api: string | undefined;
+      let token: string | undefined;
+      let domain: string | undefined;
+      let skipSave = false;
+
+      for (let i = 1; i < args.length; i++) {
+        if ((args[i] === "--dir" || args[i] === "-d") && args[i + 1]) {
+          dir = args[++i];
+        } else if (args[i] === "--api" && args[i + 1]) {
+          api = args[++i];
+        } else if (args[i] === "--token" && args[i + 1]) {
+          token = args[++i];
+        } else if ((args[i] === "--view" || args[i] === "-v") && args[i + 1]) {
+          viewId = args[++i];
+        } else if (args[i] === "--domain" && args[i + 1]) {
+          domain = args[++i];
+        } else if (args[i] === "--skip-save") {
+          skipSave = true;
+        }
+      }
+
+      await publishCommand({ dir, api, token, viewId, domain, skipSave });
       break;
     }
 

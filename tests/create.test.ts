@@ -89,7 +89,7 @@ describe("Command: com create (Next.js Clean Architecture with PGlite)", () => {
 
   it("executes bun test inside the generated project successfully with in-memory PGlite", async () => {
     // Run unit tests inside the newly generated project
-    const proc = Bun.spawn(["bun", "test"], {
+    const proc = Bun.spawn([process.execPath, "test"], {
       cwd: TEST_PROJECT_DIR,
       stdout: "pipe",
       stderr: "pipe",

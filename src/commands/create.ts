@@ -1380,7 +1380,7 @@ export async function createProject(
   if (options.install) {
     const installSpinner = logger.spinner("Installing project dependencies with Bun...");
     try {
-      const proc = Bun.spawn(["bun", "install"], { cwd: targetDir });
+      const proc = Bun.spawn([process.execPath, "install"], { cwd: targetDir });
       await proc.exited;
       installSpinner.stop(true, "Dependencies installed successfully");
     } catch {
