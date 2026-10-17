@@ -1,0 +1,13 @@
+{
+  "checks": [
+    { "name": "next/font: className and CSS variable class on the document", "path": "/", "ssr": ["class=\"__variable_", "class=\"__className_", "font-family: '__Inter_"] },
+    { "name": "next/font: size-adjusted fallback face", "path": "/", "ssr": ["__Inter_Fallback_", "src: local(\"Arial\")"] },
+    { "name": "next/image: static import gets srcSet from the optimizer", "path": "/", "ssr": ["srcSet=\"/_next/image?url=%2F_nata%2Fmedia%2Fapp%2Fphoto.png&amp;w=640&amp;q=75 640w", "width=\"1200\"", "data:image/png;base64,"] },
+    { "name": "next/image: fixed size image gets 1x/2x", "path": "/", "ssr": ["/_next/image?url=%2Favatar.png&amp;w=32&amp;q=75 1x", "&amp;w=64&amp;q=75 2x"] },
+    { "name": "image optimizer resizes to WebP", "path": "/_next/image?url=%2F_nata%2Fmedia%2Fapp%2Fphoto.png&w=640&q=75", "api": { "status": 200, "requestHeaders": { "accept": "image/webp,image/*" }, "headers": { "content-type": "image/webp" } } },
+    { "name": "image optimizer rejects widths outside the config", "path": "/_next/image?url=%2Favatar.png&w=123&q=75", "api": { "status": 400, "text": "is not allowed" } },
+    { "name": "next/script afterInteractive runs after hydration", "path": "/", "contains": ["script ran"] },
+    { "name": "next/dynamic ssr:false: loading on the server, component in the browser", "path": "/dynamic", "ssr": ["Loading widget..."], "notInHtml": ["Widget loaded"], "contains": ["Widget loaded in the browser (object)"] },
+    { "name": "next/og ImageResponse renders a PNG", "path": "/og", "api": { "status": 200, "headers": { "content-type": "image/png" } } }
+  ]
+}

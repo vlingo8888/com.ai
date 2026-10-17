@@ -1,0 +1,166 @@
+{
+  "checks": [
+    {
+      "name": "headers() and cookies() read the request",
+      "path": "/headers",
+      "api": {
+        "status": 200,
+        "requestHeaders": {
+          "x-compat": "hello",
+          "cookie": "theme=light"
+        },
+        "text": "Header x-compat: <!-- -->hello"
+      }
+    },
+    {
+      "name": "cookies() in the page",
+      "path": "/headers",
+      "api": {
+        "status": 200,
+        "requestHeaders": {
+          "cookie": "theme=light"
+        },
+        "text": "light"
+      }
+    },
+    {
+      "name": "route handler streams its body",
+      "path": "/api/stream",
+      "api": {
+        "status": 200,
+        "headers": {
+          "x-streamed": "yes"
+        },
+        "text": "one two three"
+      }
+    },
+    {
+      "name": "cookies().set() and NextResponse cookies become Set-Cookie headers",
+      "path": "/api/cookies",
+      "api": {
+        "status": 200,
+        "headers": {
+          "set-cookie": "theme=dark"
+        },
+        "json": {
+          "ok": true
+        }
+      }
+    },
+    {
+      "name": "cookies().set() in a route handler",
+      "path": "/api/cookies",
+      "api": {
+        "status": 200,
+        "headers": {
+          "set-cookie": "session=abc"
+        }
+      }
+    },
+    {
+      "name": "NextResponse.redirect with status",
+      "path": "/api/cookies",
+      "api": {
+        "method": "POST",
+        "status": 303,
+        "headers": {
+          "location": "/headers"
+        }
+      }
+    },
+    {
+      "name": "after() runs once the response is sent",
+      "path": "/api/after",
+      "api": {
+        "status": 200,
+        "json": {
+          "scheduled": true
+        }
+      }
+    },
+    {
+      "name": "after() callback ran",
+      "path": "/api/after?mode=check",
+      "api": {
+        "status": 200,
+        "json": {
+          "ran": true
+        }
+      }
+    },
+    {
+      "name": "userAgent() and request.nextUrl",
+      "path": "/api/agent",
+      "api": {
+        "status": 200,
+        "requestHeaders": {
+          "user-agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
+        },
+        "json": {
+          "browser": "Safari",
+          "os": "iOS",
+          "mobile": true,
+          "path": "/api/agent"
+        }
+      }
+    },
+    {
+      "name": "forbidden() renders forbidden.tsx with 403",
+      "path": "/admin",
+      "status": 403,
+      "ssr": [
+        "Access denied (403)"
+      ]
+    },
+    {
+      "name": "unauthorized() renders unauthorized.tsx with 401",
+      "path": "/account",
+      "status": 401,
+      "ssr": [
+        "Please sign in (401)"
+      ]
+    },
+    {
+      "name": "middleware redirect",
+      "path": "/old",
+      "api": {
+        "status": 307,
+        "headers": {
+          "location": "/headers"
+        }
+      }
+    },
+    {
+      "name": "middleware rewrite keeps the URL and overrides request headers",
+      "path": "/rewritten",
+      "api": {
+        "status": 200,
+        "headers": {
+          "x-middleware-ran": "1",
+          "set-cookie": "visited=yes"
+        },
+        "text": "Header x-compat: <!-- -->from-middleware"
+      }
+    },
+    {
+      "name": "middleware responds directly",
+      "path": "/api/blocked/x",
+      "api": {
+        "status": 401,
+        "json": {
+          "error": "blocked by middleware"
+        }
+      }
+    },
+    {
+      "name": "middleware headers reach pages through NextResponse.next",
+      "path": "/headers",
+      "api": {
+        "status": 200,
+        "headers": {
+          "x-middleware-ran": "1"
+        }
+      }
+    }
+  ]
+}

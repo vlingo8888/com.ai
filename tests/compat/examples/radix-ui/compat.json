@@ -1,0 +1,1 @@
+{ "checks": [{ "name": "renders Radix dropdown and icons", "path": "/", "status": 200, "selector": "button[aria-label='Customise options']", "noIssues": true }] }

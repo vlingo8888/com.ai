@@ -1,0 +1,1 @@
+{ "Home": { "title": "Xin chào", "items": "{count, plural, =0 {Không có mục nào} other {# mục}}", "bold": "Điều này <b>quan trọng</b>" }, "About": { "locale": "Ngôn ngữ hiện tại: {locale}" } }

@@ -1,0 +1,7 @@
+{
+  "checks": [
+    { "name": "home lists markdown posts read on the server", "path": "/", "status": 200, "ssr": ["Dynamic Routing and Static Generation", "Preview Mode for Static Generation"] },
+    { "name": "post page renders markdown (generateStaticParams, generateMetadata)", "path": "/posts/hello-world", "status": 200, "ssr": ["Learn How to Pre-render Pages Using Static Generation with Next.js"] },
+    { "name": "unknown post fails like next dev (the example reads a missing file: 500)", "path": "/posts/nope", "status": 500 }
+  ]
+}

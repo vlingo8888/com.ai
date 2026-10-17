@@ -24,6 +24,10 @@ import { AppRoot } from "./rsc/boundaries.js";
 const CONFIG = window.__NATA_CONFIG__ || {};
 const IS_ZALO = CONFIG.mode === "zalo";
 const ORIGIN = (CONFIG.origin || "").replace(/\/$/, "");
+// next.config basePath: app paths given to the router get it in front
+const BASE_PATH = CONFIG.basePath || "";
+const withBasePath = (href) =>
+  BASE_PATH && typeof href === "string" && href.startsWith("/") && !href.startsWith("//") && href !== BASE_PATH && !href.startsWith(BASE_PATH + "/") ? BASE_PATH + href : href;
 
 // Code compiled for the classic JSX runtime, or written against a global React
 window.React ??= React;
@@ -63,11 +67,35 @@ function writeHistory(method, url, extra) {
   }
 }
 
-function fetchModel(path, keys, fresh = false) {
+function fetchModel(path, keys, fresh = false, from = null) {
   // Zalo packages built with `com build --target zalo` carry the payloads of their static routes
   const prerendered = IS_ZALO && !fresh && window.__NATA_PRERENDERED__ && window.__NATA_PRERENDERED__[path];
   if (prerendered) return createFromFetch(fetch("./" + prerendered), { callServer });
-  return createFromFetch(fetch(ORIGIN + path, { headers: { RSC: "1", "Nata-Router-State": routerState(keys) } }), { callServer });
+  const headers = { RSC: "1", "Nata-Router-State": routerState(keys) };
+  // Where the navigation comes from: intercepting routes (modals) depend on it
+  if (from) headers["Nata-Url"] = encodeURIComponent(from);
+  const response = fetch(ORIGIN + path, { headers }).then((res) => {
+    syncFonts(res.headers.get("x-nata-fonts"));
+    return res;
+  });
+  return createFromFetch(response, { callServer });
+}
+
+/** The page uses a font the document does not have yet (next/font): fetch the font stylesheet */
+async function syncFonts(version) {
+  if (!version) return;
+  let style = document.getElementById("_nata_fonts");
+  if (style && style.dataset.v === version) return;
+  try {
+    const css = await (await fetch(ORIGIN + "/_nata/fonts.css")).text();
+    if (!style) {
+      style = document.createElement("style");
+      style.id = "_nata_fonts";
+      document.head.appendChild(style);
+    }
+    style.textContent = css;
+    style.dataset.v = version;
+  } catch {}
 }
 
 /** Nodes the server left out (same key as what is shown) are reused, keeping their state */
@@ -88,6 +116,7 @@ function saveScroll() {
 }
 
 async function navigate(href, { replace = false, scroll = true, pop = false } = {}) {
+  href = pop ? href : withBasePath(href);
   const here = currentUrl();
   const url = new URL(href, here);
   if (url.origin !== here.origin || !current) {
@@ -105,7 +134,7 @@ async function navigate(href, { replace = false, scroll = true, pop = false } = 
   const id = ++navigationId;
   let model;
   try {
-    model = await (takePrefetched(pathOf(url)) || fetchModel(pathOf(url), current.keys));
+    model = await (takePrefetched(pathOf(url)) || fetchModel(pathOf(url), current.keys, false, pop ? null : pathOf(here)));
   } catch (error) {
     console.error("[router] client navigation failed, loading the page instead:", error);
     if (IS_ZALO) reportIssue(error, "runtime");
@@ -119,6 +148,7 @@ async function navigate(href, { replace = false, scroll = true, pop = false } = 
 }
 
 function prefetch(href) {
+  href = withBasePath(href);
   const conn = navigator.connection;
   if (!current || (conn && (conn.saveData || /2g/.test(conn.effectiveType || "")))) return;
   const url = new URL(href, currentUrl());

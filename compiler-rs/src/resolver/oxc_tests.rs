@@ -148,3 +148,4 @@ fn oxc_007_builtins_and_package_names() {
     assert_eq!(package_name("lodash"), "lodash");
 }
 
+

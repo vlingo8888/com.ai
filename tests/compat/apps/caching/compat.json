@@ -1,0 +1,7 @@
+{
+  "checks": [
+    { "name": "\"use cache\" page renders", "path": "/use-cache", "status": 200, "ssr": ["stamp-"] },
+    { "name": "generateStaticParams param renders", "path": "/static/first", "status": 200, "ssr": ["Static first"] },
+    { "name": "dynamicParams = false: other params are 404", "path": "/static/third", "status": 404 }
+  ]
+}

@@ -7,6 +7,34 @@ const ROUTE_DELIM_END: &str = "__NATA_ROUTE_OUT_END__";
 pub struct RouteHandlerWorker;
 
 impl RouteHandlerWorker {
+    /// Input of the worker's `route` command (`root` canonical)
+    pub fn input_json(root: &Path, request: &RouteHandlerRequest) -> serde_json::Value {
+        let handler_file_path = crate::rpc::clean_path(if request.file_path.is_absolute() {
+            request.file_path.clone()
+        } else {
+            root.join(&request.file_path)
+        });
+        serde_json::json!({
+            "filePath": handler_file_path,
+            "moduleSpecifier": crate::module_graph::server_module_specifier(root, &handler_file_path),
+            "url": request.url,
+            "method": request.method,
+            "params": request.params,
+            "searchParams": request.search_params,
+            "headers": request.headers,
+            "cookiesStr": request.cookies.clone().unwrap_or_default(),
+        })
+    }
+
+    /// Runs the route handler and streams its response (React Server Components mode)
+    pub async fn stream(root: &Path, request: RouteHandlerRequest) -> axum::response::Response {
+        let root = crate::rpc::dunce_canonicalize(root);
+        crate::rpc::RpcExecutor::ensure_runtime_env(&root);
+        let mut input = Self::input_json(&root, &request);
+        input["stream"] = serde_json::Value::Bool(true);
+        crate::rsc::stream_response(&root, "route", input, request.body).await
+    }
+
     /// Executes a Next.js App Router route handler via Bun/Node runner
     pub async fn execute<P: AsRef<Path>>(
         project_dir: P,
@@ -20,23 +48,8 @@ impl RouteHandlerWorker {
         let root = &root_canon;
         crate::rpc::RpcExecutor::ensure_runtime_env(root);
 
-        // 2. Prepare paths
-        let handler_file_path = crate::rpc::clean_path(if request.file_path.is_absolute() {
-            request.file_path.clone()
-        } else {
-            root.join(&request.file_path)
-        });
-
-        let input = serde_json::json!({
-            "filePath": handler_file_path,
-            "moduleSpecifier": crate::module_graph::server_module_specifier(root, &handler_file_path),
-            "url": request.url,
-            "method": request.method,
-            "params": request.params,
-            "searchParams": request.search_params,
-            "headers": request.headers,
-            "cookiesStr": request.cookies.clone().unwrap_or_default(),
-        });
+        // 2. Input of the worker's `route` command
+        let input = Self::input_json(root, request);
         let failed = |error: String| RouteHandlerResponse {
             status: 500,
             status_text: "Internal Server Error".to_string(),

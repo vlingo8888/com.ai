@@ -16,6 +16,10 @@ import {
   renderToReadableStream,
 } from "react-server-dom-webpack/server.edge";
 import { resolveCascadeMetadata } from "./metadata_runtime.ts";
+import { installFetchCache } from "./next/cache-runtime.ts";
+
+// fetch(url, { cache: "force-cache", next: { revalidate, tags } }) goes through the data cache
+installFetchCache();
 
 export { decodeAction, decodeFormState, decodeReply };
 
@@ -28,6 +32,17 @@ interface SegmentInput {
   error?: string | null;
   loading?: string | null;
   notFound?: string | null;
+  forbidden?: string | null;
+  unauthorized?: string | null;
+  /** Parallel routes: `@name` folders of this layout, resolved for the URL */
+  slots?: SlotInput[];
+}
+
+interface SlotInput {
+  name: string;
+  segments: SegmentInput[];
+  page: string;
+  params: Record<string, unknown>;
 }
 
 export interface RscInput {
@@ -41,8 +56,9 @@ export interface RscInput {
   globalError?: string | null;
   /** How many leading nodes the client router already has (sent back as null) */
   skip?: number;
-  /** Render the not-found UI of this segment in place of its children */
+  /** Render a fallback UI of this segment (`fallback`, not-found by default) in place of its children */
   notFoundAt?: number | null;
+  fallback?: "notFound" | "forbidden" | "unauthorized";
   /** Per node: the URL segments below it (`useSelectedLayoutSegments`) */
   selected?: string[][];
 }
@@ -117,6 +133,8 @@ export async function buildModel(input: RscInput) {
       error: await load(seg.error),
       loading: await load(seg.loading),
       notFound: await load(seg.notFound),
+      forbidden: await load(seg.forbidden),
+      unauthorized: await load(seg.unauthorized),
     })),
   );
   const notFoundAt = input.notFoundAt ?? null;
@@ -135,15 +153,21 @@ export async function buildModel(input: RscInput) {
     // is reused); `depth` is that segment's index
     const depth = i + 1;
 
+    const fallbackUi = (kind: "notFound" | "forbidden" | "unauthorized") => {
+      const Component = componentOf(mods[kind], /NotFound|Forbidden|Unauthorized/);
+      return Component ? h(Component, {}) : null;
+    };
     let inner: any;
     if (notFoundAt === i) {
-      const NotFound = componentOf(mods.notFound, /NotFound/);
-      inner = NotFound ? h(NotFound, {}) : h(DefaultNotFound, {});
+      const kind = input.fallback ?? "notFound";
+      inner = fallbackUi(kind) ?? h(DefaultFallback, { kind });
     } else {
       inner = h(Outlet, { depth: i + 1 });
     }
-    const NotFound = componentOf(mods.notFound, /NotFound/);
-    if (NotFound && notFoundAt !== i) inner = h(NotFoundBoundary, { notFound: h(NotFound, {}), depth }, inner);
+    const fallbacks = { notFound: fallbackUi("notFound"), forbidden: fallbackUi("forbidden"), unauthorized: fallbackUi("unauthorized") };
+    if (notFoundAt !== i && (fallbacks.notFound || fallbacks.forbidden || fallbacks.unauthorized)) {
+      inner = h(NotFoundBoundary, { ...fallbacks, depth }, inner);
+    }
     const Loading = componentOf(mods.loading, /Loading/);
     if (Loading) inner = h(LoadingBoundary, { fallback: h(Loading, {}), depth }, inner);
     const ErrorComponent = componentOf(mods.error, /Error/);
@@ -152,7 +176,10 @@ export async function buildModel(input: RscInput) {
     if (Template) inner = h(TemplateBoundary, { depth }, h(Template, {}, inner));
 
     const Layout = componentOf(mods.layout, /Layout/);
-    let node: any = Layout ? h(Layout, { params }, inner) : inner;
+    // Parallel routes: each slot is a prop of the layout (`@team` → `team`)
+    const slotProps: Record<string, unknown> = {};
+    for (const slot of input.segments[i].slots ?? []) slotProps[slot.name] = await buildSlot(slot, params);
+    let node: any = Layout ? h(Layout, { params, ...slotProps }, inner) : inner;
     if (i === 0) {
       // A root layout renders <html>; without one, provide the document like Next's default
       if (!Layout) node = h("html", { lang: "en" }, h("body", null, node));
@@ -162,6 +189,9 @@ export async function buildModel(input: RscInput) {
     nodes.push(node);
   }
   if (input.segments.length === 0) nodes.push(h("html", { lang: "en" }, h("body", null, h(Outlet, { depth: 1 }))));
+
+  if (notFoundAt === null) await checkStaticParams(pageMod, segmentModules.map((m) => m.layout), input.params);
+  applySegmentConfig([...segmentModules.map((m) => m.layout), pageMod]);
 
   if (notFoundAt === null) {
     const Page = componentOf(pageMod, /Page$|^[A-Z]/);
@@ -174,7 +204,7 @@ export async function buildModel(input: RscInput) {
     .slice(0, lastSegment + 1)
     .map((m) => m.layout)
     .filter(Boolean);
-  cascade.push(notFoundAt === null ? pageMod : segmentModules[notFoundAt].notFound);
+  cascade.push(notFoundAt === null ? pageMod : segmentModules[notFoundAt][input.fallback ?? "notFound"]);
   const { resolvedTitle, headHtml } = await resolveCascadeMetadata(cascade, {
     params: input.params,
     searchParams: input.searchParams,
@@ -188,18 +218,81 @@ export async function buildModel(input: RscInput) {
     keys,
     params: input.params,
     selected: input.selected ?? [],
-    title: resolvedTitle ?? (notFoundAt === null ? null : "404: This page could not be found."),
+    title: resolvedTitle ?? (notFoundAt === null ? null : FALLBACK_TEXT[input.fallback ?? "notFound"].title),
     head: headHtml,
   };
 }
 
-function DefaultNotFound() {
+const FALLBACK_TEXT = {
+  notFound: { status: "404", message: "This page could not be found.", title: "404: This page could not be found." },
+  forbidden: { status: "403", message: "This page is forbidden.", title: "403: This page is forbidden." },
+  unauthorized: { status: "401", message: "You're not authorized to access this page.", title: "401: Unauthorized." },
+};
+
+/** Next.js's built-in 404 / 403 / 401 page */
+function DefaultFallback({ kind }: { kind: keyof typeof FALLBACK_TEXT }) {
+  const text = FALLBACK_TEXT[kind];
   return h(
     "div",
     { style: { fontFamily: "system-ui, sans-serif", height: "100vh", display: "flex", alignItems: "center", justifyContent: "center" } },
-    h("h1", { style: { fontSize: 24, fontWeight: 500, paddingRight: 23, marginRight: 20, borderRight: "1px solid rgba(0,0,0,.3)" } }, "404"),
-    h("h2", { style: { fontSize: 14, fontWeight: 400 } }, "This page could not be found."),
+    h("h1", { style: { fontSize: 24, fontWeight: 500, paddingRight: 23, marginRight: 20, borderRight: "1px solid rgba(0,0,0,.3)" } }, text.status),
+    h("h2", { style: { fontSize: 14, fontWeight: 400 } }, text.message),
   );
+}
+
+/** A slot's own tree: its layouts (and their boundaries) around its page or default.tsx */
+async function buildSlot(slot: SlotInput, parentParams: Promise<any> & Record<string, unknown>) {
+  const params = asyncProps({ ...parentParams, ...slot.params });
+  const Page = componentOf(await load(slot.page), /Page$|Default$|^[A-Z]/);
+  let node: any = Page ? h(Page, { params }) : null;
+  for (let i = slot.segments.length - 1; i >= 0; i--) {
+    const seg = slot.segments[i];
+    const [layout, loading, error, notFound, template] = await Promise.all([load(seg.layout), load(seg.loading), load(seg.error), load(seg.notFound), load(seg.template)]);
+    const NotFound = componentOf(notFound, /NotFound/);
+    if (NotFound) node = h(NotFoundBoundary, { notFound: h(NotFound, {}), depth: -1 }, node);
+    const Loading = componentOf(loading, /Loading/);
+    if (Loading) node = h(LoadingBoundary, { fallback: h(Loading, {}), depth: -1 }, node);
+    const ErrorComponent = componentOf(error, /Error/);
+    if (ErrorComponent) node = h(ErrorBoundary, { errorComponent: ErrorComponent, depth: -1 }, node);
+    const Template = componentOf(template, /Template/);
+    if (Template) node = h(Template, {}, node);
+    const Layout = componentOf(layout, /Layout/);
+    if (Layout) node = h(Layout, { params }, node);
+  }
+  return node;
+}
+
+/**
+ * Route segment config (`dynamic`, `revalidate`, `fetchCache`) of the layouts and the page, the
+ * deepest segment winning: how `fetch` caches during this render. `runtime`, `preferredRegion` and
+ * `maxDuration` are accepted and have no effect in development.
+ */
+function applySegmentConfig(modules: any[]) {
+  const config: { dynamic?: string; revalidate?: number | false; fetchCache?: string } = {};
+  for (const mod of modules) {
+    if (!mod) continue;
+    if (typeof mod.dynamic === "string") config.dynamic = mod.dynamic;
+    if (typeof mod.revalidate === "number" || mod.revalidate === false) config.revalidate = mod.revalidate;
+    if (typeof mod.fetchCache === "string") config.fetchCache = mod.fetchCache;
+  }
+  (globalThis as any).__NATA_SEGMENT_CONFIG__ = config;
+}
+
+/**
+ * `export const dynamicParams = false` with `generateStaticParams`: params outside the generated list
+ * are a 404, like Next.js (the default, `true`, renders them on demand)
+ */
+async function checkStaticParams(pageMod: any, layouts: any[], params: Record<string, unknown>) {
+  const dynamicParams = [...layouts, pageMod].reduce((value, mod) => (mod && typeof mod.dynamicParams === "boolean" ? mod.dynamicParams : value), true);
+  if (dynamicParams || typeof pageMod?.generateStaticParams !== "function") return;
+  const list = await pageMod.generateStaticParams({ params });
+  const same = (a: unknown, b: unknown) => (Array.isArray(a) || Array.isArray(b) ? [a].flat().join("/") === [b].flat().join("/") : String(a) === String(b));
+  const allowed = Array.isArray(list) && list.some((entry: Record<string, unknown>) => Object.entries(entry).every(([k, v]) => same(params[k], v)));
+  if (!allowed) {
+    const err: any = new Error("NEXT_NOT_FOUND");
+    err.digest = "NEXT_NOT_FOUND";
+    throw err;
+  }
 }
 
 export function onFlightError(error: any) {

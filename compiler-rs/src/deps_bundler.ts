@@ -135,11 +135,13 @@ function cjsExportNames(file: string, nodeEnv: string, seen = new Set<string>())
  * - CommonJS packages get a wrapper entry with explicit named exports (read from the module itself)
  *   and a default export of `module.exports`.
  */
-export async function bundleDependency(input: { spec: string; outFile: string; nodeEnv?: string }) {
+export async function bundleDependency(input: { spec: string; outFile: string; nodeEnv?: string; resolveDir?: string }) {
   const { spec, outFile } = input;
   const nodeEnv = input.nodeEnv || "development";
+  // The framework's React (see framework_react.rs) is resolved from its own install directory
+  const resolveDir = input.resolveDir || process.cwd();
 
-  const entryDir = join(nataDir, "deps", ".entries");
+  const entryDir = input.resolveDir ? join(input.resolveDir, ".entries") : join(nataDir, "deps", ".entries");
   mkdirSync(entryDir, { recursive: true });
   const base = join(entryDir, spec.replace(/[^\w.-]/g, "_"));
   const probe = base + ".probe.js";
@@ -151,7 +153,7 @@ export async function bundleDependency(input: { spec: string; outFile: string; n
   let names: string[] = [];
   if (!esm) {
     try {
-      const mod = await import(Bun.resolveSync(spec, process.cwd()));
+      const mod = await import(Bun.resolveSync(spec, resolveDir));
       names = Object.keys(mod).filter((n) => n !== "default" && IDENTIFIER.test(n));
     } catch {
       // Browser-only packages may throw on the server; read their exports from the source instead

@@ -1,0 +1,1 @@
+{ "Home": { "title": "Welcome", "items": "{count, plural, =0 {No items} one {# item} other {# items}}", "bold": "This is <b>important</b>" }, "About": { "locale": "Current locale: {locale}" } }

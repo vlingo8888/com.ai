@@ -1,0 +1,6 @@
+{
+  "checks": [
+    { "name": "renders", "path": "/", "status": 200, "ssr": ["Hello World! This is the Home page"] },
+    { "name": "client navigation", "path": "/", "navigate": { "click": "a[href='/about']", "expectText": "Back to", "expectPath": "/about" } }
+  ]
+}

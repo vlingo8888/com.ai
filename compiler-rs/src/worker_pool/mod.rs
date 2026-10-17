@@ -180,25 +180,32 @@ pub fn apply_runner_env(cmd: &mut Command, root: &Path) {
         cmd.env("PATH", paths.join(sep));
     }
 
-    for env_file in &[".env", ".env.development", ".env.local"] {
-        let Ok(content) = std::fs::read_to_string(root.join(env_file)) else { continue };
-        for line in content.lines() {
-            let trimmed = line.trim();
-            if trimmed.is_empty() || trimmed.starts_with('#') {
-                continue;
+    // next.config `env` (once the config is loaded)
+    if let Some(config) = crate::next_config::for_root(root) {
+        for (k, v) in config["env"].as_object().into_iter().flatten() {
+            if let Some(v) = v.as_str() {
+                cmd.env(k, v);
             }
-            if let Some((key, val)) = trimmed.split_once('=') {
-                let k = key.trim();
-                if !k.is_empty() {
-                    cmd.env(k, val.trim().trim_matches('"').trim_matches('\''));
-                }
-            }
+        }
+    }
+    // Next.js precedence; the process environment wins (inherited, so file values never override it)
+    for (k, v) in crate::env::load_files(root) {
+        if std::env::var_os(&k).is_none() {
+            cmd.env(k, v);
         }
     }
 
     cmd.env("NODE_ENV", "development");
     // The dev server renders SQL (including errors) from the query log itself
     cmd.env("COM_DEV_QUERY_LOG", "1");
+}
+
+/// `instrumentation.(ts|js)` at the project root or in `src/`
+pub fn instrumentation_file(root: &Path) -> Option<PathBuf> {
+    [root.to_path_buf(), root.join("src")]
+        .iter()
+        .flat_map(|dir| ["ts", "js", "mjs"].map(|ext| dir.join(format!("instrumentation.{ext}"))))
+        .find(|p| p.is_file())
 }
 
 /// Writes the worker and the runtimes it imports into `.nata/`
@@ -326,7 +333,7 @@ async fn spawn(root: &Path) -> Result<Arc<Handle>, String> {
                         tokio::spawn(async move {
                             let cmd = meta["cmd"].as_str().unwrap_or("").to_string();
                             let (reply_meta, reply_body) =
-                                crate::module_server::handle_call(&root, &cmd, &meta["input"], body).await;
+                                crate::module_server::handle_call(root, cmd, meta["input"].clone(), body).await;
                             let frame = encode_frame(KIND_REPLY, id, &reply_meta, &reply_body);
                             let mut stdin = stdin.lock().await;
                             let _ = stdin.write_all(&frame).await;
@@ -341,6 +348,30 @@ async fn spawn(root: &Path) -> Result<Arc<Handle>, String> {
             alive.store(false, Ordering::SeqCst);
             pending.lock().unwrap_or_else(|e| e.into_inner()).clear();
         });
+    }
+
+    // instrumentation.ts: `register()` finishes before the worker takes requests
+    if let Some(file) = instrumentation_file(root) {
+        if let Some(specifier) = crate::module_graph::server_module_specifier(root, &file) {
+            let id = u32::MAX;
+            let (tx, rx) = oneshot::channel();
+            pending.lock().unwrap_or_else(|e| e.into_inner()).insert(id, PendingEntry::Once(tx));
+            let frame = encode_frame(KIND_REQUEST, id, &serde_json::json!({ "cmd": "instrumentation", "input": { "specifier": specifier } }), &[]);
+            {
+                let mut stdin = stdin.lock().await;
+                let _ = stdin.write_all(&frame).await;
+                let _ = stdin.flush().await;
+            }
+            match tokio::time::timeout(STARTUP_TIMEOUT, rx).await {
+                Ok(Ok(reply)) => {
+                    crate::ssr::worker::print_logs(reply.stdout(), reply.stderr());
+                    if let Some(err) = reply.error() {
+                        crate::term::error("instrumentation.ts register() failed", Some(err), None);
+                    }
+                }
+                _ => crate::term::warn("instrumentation.ts register() did not finish in time"),
+            }
+        }
     }
 
     let concurrency = env_number("COM_WORKER_CONCURRENCY", 32).max(1) as usize;

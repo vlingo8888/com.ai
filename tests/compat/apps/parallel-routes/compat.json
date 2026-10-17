@@ -1,0 +1,10 @@
+{
+  "checks": [
+    { "name": "slot page for the root URL", "path": "/", "status": 200, "ssr": ["Home page", "Team overview"] },
+    { "name": "slot follows the URL", "path": "/settings", "status": 200, "ssr": ["Settings page", "Team settings"] },
+    { "name": "slot without a match renders default.tsx", "path": "/about", "status": 200, "ssr": ["About page", "Team default"] },
+    { "name": "loading an intercepted URL renders the real page", "path": "/photos/1", "status": 200, "ssr": ["Photo 1 full page"], "notInHtml": ["in a modal"] },
+    { "name": "client navigation is intercepted: modal over the current page", "path": "/", "navigate": { "click": "a[href='/photos/1']", "expectText": "Photo 1 in a modal", "expectPath": "/photos/1", "keepText": "Home page" } },
+    { "name": "client navigation updates slots", "path": "/", "navigate": { "click": "a[href='/settings']", "expectText": "Team settings", "expectPath": "/settings" } }
+  ]
+}

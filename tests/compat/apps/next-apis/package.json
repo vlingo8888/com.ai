@@ -1,0 +1,7 @@
+{
+  "name": "compat-next-apis",
+  "private": true,
+  "description": "Next.js server APIs: headers()/cookies(), after(), route handlers (streaming, cookies, redirect, userAgent), forbidden()/unauthorized()",
+  "dependencies": { "react": "^19.0.0", "react-dom": "^19.0.0", "react-server-dom-webpack": "^19.0.0" },
+  "devDependencies": { "react-refresh": "^0.19.0" }
+}

@@ -1,4 +1,5 @@
 pub mod matcher;
+pub mod parallel;
 pub mod scanner;
 pub mod segment;
 pub mod types;

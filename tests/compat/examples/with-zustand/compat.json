@@ -1,0 +1,6 @@
+{
+  "checks": [
+    { "name": "renders the store (src/app)", "path": "/", "status": 200, "ssr": ["Count: "], "noIssues": true },
+    { "name": "store updates from a client component", "path": "/", "click": "button", "expectText": "Count: 1" }
+  ]
+}

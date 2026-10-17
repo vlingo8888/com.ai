@@ -1,0 +1,7 @@
+{
+  "checks": [
+    { "name": "dynamic components render on the server, ssr:false only in the browser", "path": "/", "status": 200, "ssr": ["Hello World 1 (imported dynamically)", "Loading ..."], "notInHtml": ["Hello World 3"] },
+    { "name": "ssr:false component loads in the browser", "path": "/", "contains": ["Hello World 3 (imported dynamically)"] },
+    { "name": "load on demand", "path": "/", "click": "button", "expectText": "Hello World 5" }
+  ]
+}

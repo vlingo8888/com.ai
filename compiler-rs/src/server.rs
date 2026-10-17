@@ -66,9 +66,10 @@ pub struct DevServer;
 impl DevServer {
     pub async fn run(root_dir: PathBuf, initial_port: u16, target: String) -> Result<(), Box<dyn std::error::Error>> {
         let root_dir = root_dir.canonicalize().unwrap_or(root_dir);
-        if let Some(major) = crate::module_graph::check_react_support(&root_dir) {
+        if let Some(major) = crate::module_graph::check_react_support(&root_dir).await {
             crate::term::warn(&format!(
-                "React {major} found: Server Components, Server Actions and streaming need React 19, so pages render on the client. Upgrade with: bun add react@19 react-dom@19 react-server-dom-webpack@19"
+                "React {major} found and the framework's React {} could not be installed (offline?): Server Components, Server Actions and streaming need React 19, so pages render on the client. Upgrade with: bun add react@19 react-dom@19 react-server-dom-webpack@19",
+                crate::framework_react::VERSION
             ));
         }
         // Pre-create .nata runtime and shim files
@@ -76,6 +77,12 @@ impl DevServer {
         // Start the Bun worker now so the first render / Server Action does not pay its startup
         crate::worker_pool::prewarm(&crate::rpc::dunce_canonicalize(&root_dir));
         crate::rsc::prewarm(&root_dir);
+        {
+            let root = root_dir.clone();
+            tokio::spawn(async move {
+                crate::next_config::ensure_loaded(&root).await;
+            });
+        }
 
         if target == "zalo" {
             let _ = crate::zmp::ZmpConfigGenerator::ensure_app_config(&root_dir);
@@ -106,6 +113,18 @@ impl DevServer {
             .route("/_nata/client.js", get(client_runtime_handler))
             .route("/_nata/overlay.js", get(overlay_handler))
             .route("/_nata/debug.js", get(|| async { javascript_response(crate::client::DEBUG_JS) }))
+            .route("/_next/image", get(next_image_handler))
+            .route("/_nata/fonts.css", get(|State(state): State<AppState>| async move {
+                let (css, _) = crate::font_loader::stylesheet(&state.root_dir).await;
+                ([(header::CONTENT_TYPE, "text/css; charset=utf-8"), (header::CACHE_CONTROL, "no-cache")], css)
+            }))
+            .route("/_nata/fonts/{*path}", get(|State(state): State<AppState>, Path(path): Path<String>| async move {
+                crate::font_loader::serve(&state.root_dir, path.trim_start_matches('/')).await
+            }))
+            .route("/_nata/media/{*path}", get(|State(state): State<AppState>, Path(path): Path<String>| async move {
+                crate::image_optimizer::media(&state.root_dir, path.trim_start_matches('/')).await
+            }))
+            .route("/_nata/image-module/{*path}", get(image_module_handler))
             .route(
                 "/_nata/refresh.js",
                 get(|| async {
@@ -1178,78 +1197,10 @@ export const draftMode = () => ({
 export default { cookies, headers, draftMode };
 "##
         }
-        "next/link" | "link" => {
-            r##"import React from "react";
-
-function hrefString(href) {
-  if (typeof href === "string") return href;
-  if (!href || typeof href !== "object") return "#";
-  const query = href.query && typeof href.query === "object" ? new URLSearchParams(href.query).toString() : "";
-  return (href.pathname || "") + (query ? "?" + query : "") + (href.hash ? (href.hash.startsWith("#") ? href.hash : "#" + href.hash) : "");
-}
-
-const isInternal = (url, target) =>
-  url && !target && !/^(https?:)?\/\//.test(url) && !url.startsWith("mailto:") && !url.startsWith("tel:") && !url.startsWith("#");
-
-// Like Next.js, links prefetch automatically only in production builds (`__NATA_CONFIG__.prefetch`):
-// in development a prefetch would run the whole page on every link in view. `prefetch={true}` and
-// router.prefetch() always work.
-const autoPrefetch = (prefetch) =>
-  prefetch === true || (prefetch !== false && typeof window !== "undefined" && !!(window.__NATA_CONFIG__ || {}).prefetch);
-
-export default function Link({ href, children, onClick, onMouseEnter, target, replace, scroll, prefetch, shallow, passHref, legacyBehavior, locale, ...props }) {
-  const url = hrefString(href);
-  const ref = React.useRef(null);
-  // Prefetch when the link scrolls into view and the browser is idle (the router skips Save-Data/2G)
-  React.useEffect(() => {
-    const router = typeof window !== "undefined" ? window.__NATA_ROUTER__ : null;
-    if (!autoPrefetch(prefetch) || !router || !isInternal(url, target) || typeof IntersectionObserver === "undefined" || !ref.current) return;
-    const observer = new IntersectionObserver((entries) => {
-      if (!entries.some((e) => e.isIntersecting)) return;
-      observer.disconnect();
-      (window.requestIdleCallback || setTimeout)(() => router.prefetch(url));
-    });
-    observer.observe(ref.current);
-    return () => observer.disconnect();
-  }, [url, prefetch, target]);
-  const handleClick = (e) => {
-    if (onClick) onClick(e);
-    if (e.defaultPrevented || !isInternal(url, target) || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
-    e.preventDefault();
-    if (typeof window.__NATA_NAVIGATE__ === "function") window.__NATA_NAVIGATE__(url, { replace, scroll: scroll !== false });
-    else if (replace) window.location.replace(url);
-    else window.location.href = url;
-  };
-  const handleMouseEnter = (e) => {
-    if (onMouseEnter) onMouseEnter(e);
-    if (autoPrefetch(prefetch) && window.__NATA_ROUTER__ && isInternal(url, target)) window.__NATA_ROUTER__.prefetch(url);
-  };
-  return React.createElement("a", { ...props, ref, href: url, target, onClick: handleClick, onMouseEnter: handleMouseEnter }, children);
-}
-export { Link };
-"##
-        }
-        "next/image" | "image" => {
-            r##"import React from "react";
-export default function Image({ src, alt, width, height, className, style, fill, priority, ...props }) {
-  const imgSrc = (src && typeof src === "object") ? (src.src || src.default || "") : src;
-  const imgStyle = fill
-    ? { position: "absolute", height: "100%", width: "100%", left: 0, top: 0, right: 0, bottom: 0, objectFit: "cover", ...style }
-    : style;
-  return React.createElement("img", {
-    src: imgSrc,
-    alt: alt || "",
-    width: fill ? undefined : width,
-    height: fill ? undefined : height,
-    className,
-    style: imgStyle,
-    loading: priority ? "eager" : "lazy",
-    ...props
-  });
-}
-export { Image };
-"##
-        }
+        "next/link" | "link" => crate::next_shims::LINK_JS,
+        "next/image" | "image" => crate::next_shims::IMAGE_JS,
+        "next/dynamic" | "dynamic" => crate::next_shims::DYNAMIC_JS,
+        "next/script" | "script" => crate::next_shims::SCRIPT_JS,
         "next/navigation" | "navigation" => {
             r##"import React from "react";
 import { SelectedLayoutContext } from "/_nata/rsc/boundaries.js";
@@ -1260,10 +1211,14 @@ export const useSelectedLayoutSegment = () => {
   const segments = useSelectedLayoutSegments();
   return segments.length ? segments[0] : null;
 };
-// The client runtime keeps the App Router location here (virtual in Zalo Mini Apps)
+// The client runtime keeps the App Router location here (virtual in Zalo Mini Apps); app paths are
+// reported without the next.config basePath, like Next.js
 const nataLocation = () => {
   if (typeof window === "undefined") return { pathname: "/", search: "" };
-  return window.__NATA_LOCATION__ || window.location;
+  const location = window.__NATA_LOCATION__ || window.location;
+  const base = (window.__NATA_CONFIG__ || {}).basePath || "";
+  if (!base || !location.pathname.startsWith(base)) return location;
+  return { pathname: location.pathname.slice(base.length) || "/", search: location.search, href: location.href };
 };
 
 export const useRouter = () => ({
@@ -1346,10 +1301,10 @@ export const useParams = () => {
   return params;
 };
 
-export const redirect = (url) => {
+export const redirect = (url, type = "replace") => {
   if (typeof window !== "undefined") {
     if (typeof window.__NATA_NAVIGATE__ === "function") {
-      window.__NATA_NAVIGATE__(url, { replace: true });
+      window.__NATA_NAVIGATE__(url, { replace: type !== "push" });
     } else {
       window.location.href = url;
     }
@@ -1361,74 +1316,23 @@ export const notFound = () => {
   err.digest = "NEXT_NOT_FOUND";
   throw err;
 };
-export default { useRouter, usePathname, useSearchParams, useParams, redirect, notFound, useSelectedLayoutSegment, useSelectedLayoutSegments };
-"##
-        }
-        "next/router" | "router" => {
-            r##"import React from "react";
-// The client runtime keeps the App Router location here (virtual in Zalo Mini Apps)
-const nataLocation = () => {
-  if (typeof window === "undefined") return { pathname: "/", search: "" };
-  return window.__NATA_LOCATION__ || window.location;
+const httpFallback = (status) => {
+  const err = new Error("NEXT_HTTP_ERROR_FALLBACK;" + status);
+  err.digest = "NEXT_HTTP_ERROR_FALLBACK;" + status;
+  throw err;
 };
-
-export const useRouter = () => {
-  const [pathname, setPathname] = React.useState(() => nataLocation().pathname);
-  const [search, setSearch] = React.useState(() => nataLocation().search);
-  const [params, setParams] = React.useState(() => (typeof window !== "undefined" && window.__NATA_PARAMS__) ? window.__NATA_PARAMS__ : {});
-  React.useEffect(() => {
-    const handler = (e) => {
-      setPathname(nataLocation().pathname);
-      setSearch(nataLocation().search);
-      if (e && e.detail && e.detail.params) {
-        setParams(e.detail.params);
-      } else if (typeof window !== "undefined" && window.__NATA_PARAMS__) {
-        setParams(window.__NATA_PARAMS__);
-      }
-    };
-    window.addEventListener("popstate", handler);
-    window.addEventListener("_nata_navigate", handler);
-    return () => {
-      window.removeEventListener("popstate", handler);
-      window.removeEventListener("_nata_navigate", handler);
-    };
-  }, []);
-
-  return {
-    push: (url) => {
-      if (typeof window !== "undefined" && typeof window.__NATA_NAVIGATE__ === "function") {
-        window.__NATA_NAVIGATE__(url);
-      } else if (typeof window !== "undefined") {
-        window.location.href = url;
-      }
-    },
-    replace: (url) => {
-      if (typeof window !== "undefined" && typeof window.__NATA_NAVIGATE__ === "function") {
-        window.__NATA_NAVIGATE__(url, { replace: true });
-      } else if (typeof window !== "undefined") {
-        window.location.replace(url);
-      }
-    },
-    back: () => { if (typeof window !== "undefined") window.history.back(); },
-    forward: () => { if (typeof window !== "undefined") window.history.forward(); },
-    reload: () => { if (typeof window !== "undefined") window.location.reload(); },
-    pathname,
-    asPath: pathname + search,
-    query: { ...Object.fromEntries(new URLSearchParams(search)), ...params },
-    events: { on: () => {}, off: () => {}, emit: () => {} }
-  };
+export const forbidden = () => httpFallback(403);
+export const unauthorized = () => httpFallback(401);
+export const RedirectType = { push: "push", replace: "replace" };
+export const permanentRedirect = (url, type) => redirect(url, type);
+export const unstable_rethrow = (error) => {
+  if (error && typeof error.digest === "string" && /^(NEXT_REDIRECT|NEXT_NOT_FOUND|NEXT_HTTP_ERROR_FALLBACK)/.test(error.digest)) throw error;
 };
-export default { useRouter };
+export default { useRouter, usePathname, useSearchParams, useParams, redirect, permanentRedirect, notFound, forbidden, unauthorized, unstable_rethrow, RedirectType, useSelectedLayoutSegment, useSelectedLayoutSegments };
 "##
         }
-        "next/head" | "head" => {
-            r##"import React from "react";
-export default function Head({ children }) {
-  return React.createElement(React.Fragment, null, children);
-}
-export { Head };
-"##
-        }
+        "next/router" | "router" => crate::next_shims::ROUTER_JS,
+        "next/head" | "head" => crate::next_shims::HEAD_JS,
         "next/server" | "server" => {
             r##"export class NextResponse extends Response {
   static json(data, init) {
@@ -1738,6 +1642,25 @@ fn zalo_preview_document() -> String {
     )
 }
 
+/// `/_next/image?url=&w=&q=`: the next/image optimizer
+async fn next_image_handler(State(state): State<AppState>, req: axum::extract::Request) -> axum::response::Response {
+    let accept = req.headers().get(header::ACCEPT).and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
+    crate::image_optimizer::handle(&state.root_dir, req.uri().query().unwrap_or(""), &accept).await
+}
+
+/// A statically imported image, as the ES module the browser loads
+async fn image_module_handler(State(state): State<AppState>, Path(path): Path<String>) -> axum::response::Response {
+    let file = state.root_dir.join(path.trim_start_matches('/'));
+    let inside = file.canonicalize().ok().zip(state.root_dir.canonicalize().ok()).is_some_and(|(f, r)| f.starts_with(r));
+    if !inside || !crate::image_optimizer::is_image(&file) || !file.is_file() {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let mut headers = HeaderMap::new();
+    headers.insert(header::CONTENT_TYPE, "application/javascript; charset=utf-8".parse().unwrap());
+    headers.insert(header::CACHE_CONTROL, "no-cache".parse().unwrap());
+    (StatusCode::OK, headers, crate::image_optimizer::static_import_module(&state.root_dir, &file)).into_response()
+}
+
 /// What a page request asks the React Server Components pipeline for: the document, the Flight
 /// payload (`RSC: 1`, client navigations) or a Server Action (POST)
 async fn rsc_page_request<'a>(
@@ -1763,22 +1686,139 @@ async fn rsc_page_request<'a>(
     } else {
         crate::rsc::Mode::Html
     };
+    let request_headers = headers
+        .iter()
+        .filter_map(|(k, v)| v.to_str().ok().map(|v| (k.as_str().to_lowercase(), v.to_string())))
+        .collect();
     crate::rsc::PageRequest {
         pathname: path,
         query,
         route,
         params,
         cookies: header_str("cookie"),
+        headers: request_headers,
         router_state,
         mode,
         not_found_segments,
+        navigated_from: None,
     }
 }
 
-async fn app_router_fallback_handler(
-    State(state): State<AppState>,
-    req: axum::extract::Request,
-) -> impl IntoResponse {
+/// Page, route handler and static file requests: the middleware first (it may respond, rewrite or
+/// override request headers), then routing
+async fn app_router_fallback_handler(State(state): State<AppState>, mut req: axum::extract::Request) -> axum::response::Response {
+    use crate::middleware::Outcome;
+    // next.config: basePath, trailingSlash, redirects, beforeFiles rewrites; headers() for the response
+    let config = if crate::next_config::find(&state.root_dir).is_some() { crate::next_config::ensure_loaded(&state.root_dir).await } else { None };
+    let mut config_headers = Vec::new();
+    if let Some(config) = &config {
+        let path = req.uri().path().to_string();
+        let query = req.uri().query().unwrap_or("").to_string();
+        match crate::next_config::before_routing(config, &path, &query, req.headers()) {
+            crate::next_config::Decision::Redirect { status, location } => {
+                return axum::response::Response::builder()
+                    .status(StatusCode::from_u16(status).unwrap_or(StatusCode::TEMPORARY_REDIRECT))
+                    .header(header::LOCATION, location)
+                    .body(axum::body::Body::empty())
+                    .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
+            }
+            crate::next_config::Decision::NotFound => return (StatusCode::NOT_FOUND, "Not Found").into_response(),
+            crate::next_config::Decision::Continue { path_and_query } => {
+                let routed = path_and_query.split('?').next().unwrap_or("/").to_string();
+                config_headers = crate::next_config::response_headers(config, &routed, &query, req.headers());
+                if path_and_query.starts_with("http://") || path_and_query.starts_with("https://") {
+                    let mut response = proxy_external(&state.root_dir, req, &path_and_query).await;
+                    crate::middleware::apply_response_headers(&mut response, &config_headers);
+                    return response;
+                }
+                if let Ok(uri) = path_and_query.parse::<axum::http::Uri>() {
+                    *req.uri_mut() = uri;
+                }
+            }
+        }
+    }
+    let outcome = crate::middleware::run(&state.root_dir, req.method().as_str(), req.uri(), req.headers()).await;
+    let set_request_headers = |req: &mut axum::extract::Request, headers: &[(String, String)]| {
+        for (k, v) in headers {
+            if let (Ok(name), Ok(value)) = (header::HeaderName::from_bytes(k.as_bytes()), HeaderValue::from_str(v)) {
+                req.headers_mut().insert(name, value);
+            }
+        }
+    };
+    let response_headers = match outcome {
+        None => Vec::new(),
+        Some(Outcome::Respond(response)) => return response,
+        Some(Outcome::Next { request_headers, response_headers }) => {
+            set_request_headers(&mut req, &request_headers);
+            response_headers
+        }
+        Some(Outcome::Rewrite { path_and_query, request_headers, response_headers }) => {
+            set_request_headers(&mut req, &request_headers);
+            if let Ok(uri) = path_and_query.parse::<axum::http::Uri>() {
+                *req.uri_mut() = uri;
+            }
+            response_headers
+        }
+    };
+    // afterFiles / fallback rewrites: only for paths no page, route handler or file answers
+    if let Some(config) = &config {
+        let path = req.uri().path().to_string();
+        let unmatched = state.router.read().await.match_route(&path).is_none() && !static_file_exists(&state.root_dir, &path);
+        if unmatched {
+            let query = req.uri().query().unwrap_or("").to_string();
+            if let Some(destination) = crate::next_config::rewrite_unmatched(config, &path, &query, req.headers()) {
+                if destination.starts_with("http://") || destination.starts_with("https://") {
+                    let mut response = proxy_external(&state.root_dir, req, &destination).await;
+                    crate::middleware::apply_response_headers(&mut response, &config_headers);
+                    crate::middleware::apply_response_headers(&mut response, &response_headers);
+                    return response;
+                }
+                if let Ok(uri) = destination.parse::<axum::http::Uri>() {
+                    *req.uri_mut() = uri;
+                }
+            }
+        }
+    }
+    let mut response = route_request(state, req).await.into_response();
+    crate::middleware::apply_response_headers(&mut response, &config_headers);
+    crate::middleware::apply_response_headers(&mut response, &response_headers);
+    response
+}
+
+fn static_file_exists(root: &std::path::Path, path: &str) -> bool {
+    let rel = path.trim_start_matches('/');
+    !rel.is_empty() && !rel.contains("..") && (root.join("public").join(rel).is_file() || root.join(rel).is_file())
+}
+
+/// An external rewrite destination: the worker fetches it (the engine has no HTTP client)
+async fn proxy_external(root: &std::path::Path, req: axum::extract::Request, url: &str) -> axum::response::Response {
+    let method = req.method().to_string();
+    let headers: Vec<(String, String)> = req
+        .headers()
+        .iter()
+        .filter(|(k, _)| *k != header::HOST)
+        .filter_map(|(k, v)| v.to_str().ok().map(|v| (k.as_str().to_string(), v.to_string())))
+        .collect();
+    let body = axum::body::to_bytes(req.into_body(), 50 * 1024 * 1024).await.unwrap_or_default().to_vec();
+    match crate::worker_pool::call(root, "proxy", serde_json::json!({ "url": url, "method": method, "headers": headers }), body).await {
+        Ok(reply) if reply.error().is_none() => {
+            let out = reply.output();
+            let mut builder = axum::response::Response::builder().status(StatusCode::from_u16(out["status"].as_u64().unwrap_or(502) as u16).unwrap_or(StatusCode::BAD_GATEWAY));
+            for pair in out["headers"].as_array().into_iter().flatten() {
+                if let (Some(k), Some(v)) = (pair[0].as_str(), pair[1].as_str()) {
+                    if let (Ok(name), Ok(value)) = (header::HeaderName::from_bytes(k.as_bytes()), HeaderValue::from_str(v)) {
+                        builder = builder.header(name, value);
+                    }
+                }
+            }
+            builder.body(axum::body::Body::from(reply.body)).unwrap_or_else(|_| StatusCode::BAD_GATEWAY.into_response())
+        }
+        Ok(reply) => (StatusCode::BAD_GATEWAY, format!("Proxy to {url} failed: {}", reply.error().unwrap_or(""))).into_response(),
+        Err(e) => (StatusCode::BAD_GATEWAY, format!("Proxy to {url} failed: {e}")).into_response(),
+    }
+}
+
+async fn route_request(state: AppState, req: axum::extract::Request) -> impl IntoResponse {
     let path = req.uri().path().to_string();
 
     // Defense check: ZMP config and assets must never fall through to HTML
@@ -1799,7 +1839,8 @@ async fn app_router_fallback_handler(
     // Redirect CDN internal module assets to esm.sh
     if path.starts_with("/react@")
         || path.starts_with("/react-dom@")
-        || path.starts_with("/v")
+        // esm.sh build paths (`/v135/...`), not app routes such as `/vi`
+        || (path.starts_with("/v") && path[2..].split('/').next().is_some_and(|v| !v.is_empty() && v.chars().all(|c| c.is_ascii_digit())) && path[2..].contains('/'))
         || path.starts_with("/node/")
         || path.starts_with("/npm/")
         || path.starts_with("/gh/")
@@ -1857,6 +1898,9 @@ async fn app_router_fallback_handler(
                 body: body_bytes.to_vec(),
             };
 
+            if crate::module_graph::rsc_enabled() {
+                return crate::route_handler::worker::RouteHandlerWorker::stream(&state.root_dir, handler_req).await;
+            }
             let output = crate::route_handler::RouteHandlerEngine::execute(&state.root_dir, handler_req).await;
 
             let mut resp_builder = axum::response::Response::builder()
@@ -1906,7 +1950,18 @@ async fn app_router_fallback_handler(
             }
             let route = route.clone();
             let query = req.uri().query().unwrap_or("").to_string();
-            let page_req = rsc_page_request(req, &path, &query, Some(&route), params, Vec::new()).await;
+            // Client navigations say where they come from (intercepting routes depend on it)
+            let navigated_from = req
+                .headers()
+                .get("nata-url")
+                .and_then(|v| v.to_str().ok())
+                .map(crate::router::types::percent_decode)
+                .and_then(|from| {
+                    let (from_route, from_params) = router_guard.match_route(from.split('?').next().unwrap_or("/"))?;
+                    Some((from.clone(), from_route.clone(), from_params))
+                });
+            let mut page_req = rsc_page_request(req, &path, &query, Some(&route), params, Vec::new()).await;
+            page_req.navigated_from = navigated_from;
             return crate::rsc::handle(&state.root_dir, &state.target, &stylesheet_tags, page_req).await;
         }
 

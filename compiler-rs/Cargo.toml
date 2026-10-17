@@ -42,6 +42,14 @@ swc_core = { version = "79.0.0", features = [
 ] }
 oxc_resolver = { version = "=11.23.0", default-features = false }
 matchit = "0.8"
+# next/image optimizer: decode, resize (SIMD), encode JPEG/PNG and lossy WebP
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "ico"] }
+fast_image_resize = { version = "6.1", features = ["image"] }
+webp = { version = "0.3", default-features = false }
+# next/font: metrics of downloaded fonts for size-adjusted fallbacks (no layout shift)
+ttf-parser = { version = "0.25", default-features = false, features = ["std"] }
+# next/og: rasterizes the SVG Satori renders (text is already paths: no font features needed)
+resvg = { version = "0.48", default-features = false }
 
 [profile.release]
 opt-level = 3

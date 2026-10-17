@@ -1,0 +1,7 @@
+{
+  "checks": [
+    { "name": "middleware negotiates the locale", "path": "/", "api": { "status": 307, "requestHeaders": { "accept-language": "de-DE,de;q=0.9" }, "headers": { "location": "/de" } } },
+    { "name": "server dictionary for the locale", "path": "/en", "status": 200, "ssr": ["Current locale: en", "Welcome"] },
+    { "name": "client component with dictionary props", "path": "/cs", "click": "button:last-of-type", "expectText": "1" }
+  ]
+}

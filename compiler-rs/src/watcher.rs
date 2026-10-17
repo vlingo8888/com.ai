@@ -136,6 +136,9 @@ impl ProjectWatcher {
                     if Self::apply_server_changes(&canon_root, &files_to_notify) {
                         crate::worker_pool::restart(&canon_root).await;
                     }
+                    if files_to_notify.iter().any(|p| p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("next.config."))) {
+                        crate::next_config::load(&canon_root).await;
+                    }
 
                     let should_rescan_router = {
                         let r_guard = router.read().await;
@@ -213,8 +216,8 @@ impl ProjectWatcher {
                 restart = true;
                 continue;
             }
-            // Loaded by Bun itself, outside the module graph
-            if name.starts_with("lifecycle.") {
+            // Loaded by Bun itself (lifecycle), or run once per worker (instrumentation register())
+            if name.starts_with("lifecycle.") || name.starts_with("instrumentation.") {
                 restart = true;
                 continue;
             }
@@ -233,6 +236,7 @@ impl ProjectWatcher {
             });
             if !unchanged {
                 graph.invalidate(&file);
+                crate::cache_store::for_root(root).lock().unwrap_or_else(|e| e.into_inner()).invalidate_code();
             }
         }
         let recycle_after = std::env::var("COM_WORKER_RECYCLE").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(300);
@@ -245,7 +249,7 @@ impl ProjectWatcher {
     /// Whether a change adds, removes or renames a route file (page, layout, route handler, ...):
     /// editing an existing one does not change the route table
     pub fn routes_changed(root: &Path, router: &crate::router::AppRouter, files: &[PathBuf]) -> bool {
-        const SPECIAL: [&str; 9] = ["page", "layout", "template", "loading", "error", "not-found", "route", "default", "global-error"];
+        const SPECIAL: [&str; 11] = ["page", "layout", "template", "loading", "error", "not-found", "forbidden", "unauthorized", "route", "default", "global-error"];
         let mut known = HashSet::new();
         for route in &router.routes {
             known.insert(route.page_file.to_string_lossy().replace('\\', "/"));
@@ -253,7 +257,7 @@ impl ProjectWatcher {
                 known.insert(f.to_string_lossy().replace('\\', "/"));
             }
             for seg in &route.segments_files {
-                for f in [&seg.layout, &seg.template, &seg.error, &seg.loading, &seg.not_found].into_iter().flatten() {
+                for f in [&seg.layout, &seg.template, &seg.error, &seg.loading, &seg.not_found, &seg.forbidden, &seg.unauthorized].into_iter().flatten() {
                     known.insert(f.to_string_lossy().replace('\\', "/"));
                 }
             }

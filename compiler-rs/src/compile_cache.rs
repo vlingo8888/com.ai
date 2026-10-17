@@ -125,6 +125,13 @@ pub fn resolution_fingerprint(root: &Path) -> String {
             hasher.update(&mtime.to_le_bytes());
         }
     }
+    // Server modules import React from the framework's copy when the project's is too old
+    if crate::framework_react::active_modules_dir(root).is_some() {
+        hasher.update(b"framework-react:");
+        hasher.update(crate::framework_react::VERSION.as_bytes());
+    }
+    // NEXT_PUBLIC_* values are compiled into browser modules
+    hasher.update(crate::env::fingerprint(root).as_bytes());
     hasher.finalize().to_hex().to_string()
 }
 

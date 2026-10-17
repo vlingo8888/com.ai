@@ -98,7 +98,7 @@ process.exit = ((code?: number) => {
 
 // ---------- request-scoped globals ----------
 
-const REQUEST_GLOBALS = ["__NATA_COOKIES__", "__NATA_SET_COOKIES__", "__NATA_QUERY_LOGS__", "__NATA_PARAMS__", "__NATA_LOCATION__", "__NATA_REVALIDATED__"] as const;
+const REQUEST_GLOBALS = ["__NATA_COOKIES__", "__NATA_SET_COOKIES__", "__NATA_QUERY_LOGS__", "__NATA_PARAMS__", "__NATA_LOCATION__", "__NATA_REVALIDATED__", "__NATA_HEADERS__", "__NATA_AFTER__", "__NATA_SEGMENT_CONFIG__", "__NATA_INTL_LOCALE__"] as const;
 const freshGlobals = (): Record<string, unknown> => ({
   __NATA_COOKIES__: new Map<string, string>(),
   __NATA_SET_COOKIES__: [],
@@ -106,6 +106,10 @@ const freshGlobals = (): Record<string, unknown> => ({
   __NATA_PARAMS__: {},
   __NATA_LOCATION__: { pathname: "/", search: "", href: "http://localhost:3000/" },
   __NATA_REVALIDATED__: false,
+  __NATA_HEADERS__: {},
+  __NATA_AFTER__: [],
+  __NATA_SEGMENT_CONFIG__: {},
+  __NATA_INTL_LOCALE__: null,
 });
 const processGlobals = freshGlobals();
 
@@ -265,35 +269,36 @@ function buildError(meta: any): Error {
   return err;
 }
 
-// CommonJS files of the react-server layer (React, Flight, most packages): the engine sends the whole
-// `require` graph, resolved with the react-server conditions; evaluated here, one instance per file
+// CommonJS files of a server layer (React, Flight, most packages): the engine sends the whole `require`
+// graph, resolved with the layer's conditions; evaluated here, one instance per file and layer
 const cjsModules = new Map<string, { exports: any; loaded: boolean }>();
 const cjsSources = new Map<string, any>();
 const esmForRequire = new Map<string, any>();
 
-function rscRequire(file: string): any {
-  const cached = cjsModules.get(file);
+function layerRequire(layer: string, file: string): any {
+  const key = layer + ":" + file;
+  const cached = cjsModules.get(key);
   if (cached) return cached.exports;
-  const entry = cjsSources.get(file);
-  if (!entry) throw new Error(`[rsc] module not loaded: ${file}`);
+  const entry = cjsSources.get(key);
+  if (!entry) throw new Error(`[${layer}] module not loaded: ${file}`);
   if (entry.json) {
     const mod = { exports: JSON.parse(entry.code), loaded: true };
     entry.code = null;
-    cjsModules.set(file, mod);
+    cjsModules.set(key, mod);
     return mod.exports;
   }
   const mod = { exports: {} as any, loaded: false };
-  cjsModules.set(file, mod);
+  cjsModules.set(key, mod);
   const dirname = file.slice(0, file.lastIndexOf("/"));
   const localRequire = (spec: string) => {
     const target = entry.requires?.[spec];
     if (!target) return nodeRequire(spec, dirname);
     if (target.builtin) return nodeRequire(target.builtin, dirname);
-    if (target.file) return rscRequire(target.file);
+    if (target.file) return layerRequire(layer, target.file);
     if (target.esm) return esmForRequire.get(target.esm);
-    throw new Error(`Cannot find module '${spec}' from '${file}' (react-server conditions)`);
+    throw new Error(`Cannot find module '${spec}' from '${file}' (${layer} layer)`);
   };
-  const fn = new Function("module", "exports", "require", "__filename", "__dirname", entry.code + "\n//# sourceURL=rsc:" + file);
+  const fn = new Function("module", "exports", "require", "__filename", "__dirname", entry.code + "\n//# sourceURL=" + layer + ":" + file);
   // The source text is not needed once compiled (React's development builds are megabytes)
   entry.code = null;
   fn(mod, mod.exports, localRequire, file, dirname);
@@ -325,12 +330,12 @@ for (const layer of ["rsc", "ssr"] as const) {
         if (meta.kind === "esm") return { contents: decoder.decode(body), loader: "js" };
         if (meta.kind === "cjs") {
           for (const [file, entry] of Object.entries<any>(meta.files)) {
-            if (!cjsSources.has(file)) cjsSources.set(file, entry);
+            if (!cjsSources.has(layer + ":" + file)) cjsSources.set(layer + ":" + file, entry);
             for (const target of Object.values<any>(entry.requires ?? {})) {
               if (target.esm && !esmForRequire.has(target.esm)) esmForRequire.set(target.esm, await import(target.esm));
             }
           }
-          return { exports: cjsNamespace(rscRequire(meta.entry)), loader: "object" };
+          return { exports: cjsNamespace(layerRequire(layer, meta.entry)), loader: "object" };
         }
         throw buildError(meta);
       });
@@ -362,6 +367,39 @@ async function runCommand(cmd: string, input: any, body: Uint8Array): Promise<Ha
       const { renderRoute } = await import(join(nataDir, "rsc_render.ts"));
       return await renderRoute(input);
     }
+    case "instrumentation": {
+      // instrumentation.ts: register() once per worker, before any request; onRequestError for later
+      const mod = await import(input.specifier);
+      if (typeof mod.register === "function") await mod.register();
+      (globalThis as any).__NATA_ON_REQUEST_ERROR__ = mod.onRequestError;
+      return { output: { registered: typeof mod.register === "function", onRequestError: typeof mod.onRequestError === "function" } };
+    }
+    case "next_config": {
+      const { loadNextConfig } = await import(join(nataDir, "next", "config-runtime.ts"));
+      return { output: await loadNextConfig(input) };
+    }
+    case "fetch_bytes": {
+      // Remote images for the optimizer (the engine has no HTTP client)
+      const res = await fetch(input.url, { redirect: "follow", headers: input.headers ?? {} });
+      return { output: { ok: res.ok, status: res.status, contentType: res.headers.get("content-type") }, body: new Uint8Array(await res.arrayBuffer()) };
+    }
+    case "proxy": {
+      // External rewrites (next.config): forward the request, return the response as is
+      const res = await fetch(input.url, { method: input.method, headers: input.headers, body: ["GET", "HEAD"].includes(input.method) ? undefined : body, redirect: "manual" });
+      const headers: [string, string][] = [];
+      res.headers.forEach((value: string, key: string) => {
+        if (!["content-encoding", "content-length", "transfer-encoding", "connection"].includes(key)) headers.push([key, value]);
+      });
+      return { output: { status: res.status, headers }, body: new Uint8Array(await res.arrayBuffer()) };
+    }
+    case "middleware_config": {
+      const { middlewareConfig } = await import(join(nataDir, "next", "middleware-runtime.ts"));
+      return { output: await middlewareConfig(input) };
+    }
+    case "middleware": {
+      const { runMiddleware } = await import(join(nataDir, "next", "middleware-runtime.ts"));
+      return await runMiddleware(input);
+    }
     case "action": {
       const { runAction } = await import(join(nataDir, "rsc_render.ts"));
       return await runAction(input, body);
@@ -369,6 +407,7 @@ async function runCommand(cmd: string, input: any, body: Uint8Array): Promise<Ha
     case "route": {
       const { handleRoute } = await import(join(nataDir, "route_handler_runtime.ts"));
       const result = await handleRoute({ ...input, bodyBytes: body });
+      if ("head" in result) return result;
       return { output: result.output, body: result.body };
     }
     case "rpc": {
@@ -470,7 +509,26 @@ async function handleRequest(id: number, meta: any, body: Uint8Array) {
   }
   result.logs = { stdout: store.stdout.join("").replace(DELIMITED, ""), stderr: store.stderr.join("") };
   sendFrame(KIND_RESULT, id, result, responseBody);
+  await runAfterCallbacks(store);
   scheduleIdleGc();
+}
+
+/** `after()` callbacks: run in the request's context once its response has been sent */
+async function runAfterCallbacks(store: Store) {
+  const queue = store.globals.__NATA_AFTER__ as Array<() => unknown>;
+  if (!Array.isArray(queue) || queue.length === 0) return;
+  await als.run(store, async () => {
+    while (queue.length) {
+      const task = queue.shift()!;
+      try {
+        await task();
+      } catch (error: any) {
+        realStderrWrite(`⨯ Error in after(): ${error?.stack || error}\n`);
+      }
+    }
+  });
+  const logs = store.stdout.join("") + store.stderr.join("");
+  if (logs.trim()) realStderrWrite(logs);
 }
 
 /**

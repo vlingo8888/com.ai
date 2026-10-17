@@ -1,0 +1,8 @@
+{
+  "checks": [
+    { "name": "index renders images", "path": "/", "status": 200, "ssr": ["Image Component with Next.js", "/_next/image?url="], "noIssues": true },
+    { "name": "responsive images", "path": "/responsive", "status": 200, "selector": "img[srcset]" },
+    { "name": "fill images", "path": "/fill", "status": 200, "selector": "img" },
+    { "name": "blur placeholder", "path": "/placeholder", "status": 200, "selector": "img" }
+  ]
+}

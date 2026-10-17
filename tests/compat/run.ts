@@ -8,7 +8,7 @@
 // supported yet: its failure is reported as XFAIL and does not fail the run, while an unexpected pass
 // (XPASS) is reported so the gap can be removed from compat.json and ROADMAP.md.
 
-import { readdirSync, readFileSync, rmSync, writeFileSync } from "fs";
+import { existsSync, readdirSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
 import { Browser, copyToTemp, findEngine, readJson, serverRssMb, sleep, startDev, type DevServer, type Page } from "./lib/harness";
 
@@ -34,7 +34,8 @@ interface Check {
   navigate?: { click: string; expectText: string; expectPath?: string; expectLoading?: string; keepText?: string };
   click?: string;
   expectText?: string;
-  api?: { method?: string; body?: unknown; status: number; json?: unknown };
+  /** `text`: contained in the body; `headers`: header -> substring (all Set-Cookie lines joined by "\n") */
+  api?: { method?: string; body?: unknown; status: number; json?: unknown; text?: string; headers?: Record<string, string>; requestHeaders?: Record<string, string> };
   /**
    * Edit a project file after the steps above (put such checks last: the edit stays): the page must
    * show `expectText` without reloading, and still show `keepText` (state from before the edit)
@@ -57,8 +58,12 @@ const flag = (name: string) => {
 };
 const engine = findEngine(flag("--engine"));
 const jsonOut = flag("--json");
+// Our fixture apps, then official Next.js examples (unmodified, see examples/README.md)
 const appsDir = join(import.meta.dir, "apps");
-const apps = args.length ? args : readdirSync(appsDir).filter((d) => !d.startsWith(".")).sort();
+const examplesDir = join(import.meta.dir, "examples");
+const listApps = (dir: string) => readdirSync(dir).filter((d) => !d.startsWith(".") && existsSync(join(dir, d, "compat.json"))).sort();
+const appDirs = new Map([...listApps(appsDir).map((a) => [a, join(appsDir, a)] as const), ...listApps(examplesDir).map((a) => [a, join(examplesDir, a)] as const)]);
+const apps = args.length ? args : [...appDirs.keys()];
 
 function isSubset(expected: unknown, actual: unknown): boolean {
   if (expected === null || typeof expected !== "object") return expected === actual;
@@ -82,10 +87,20 @@ async function runCheck(server: DevServer, page: Page, check: Check): Promise<st
   if (check.api) {
     const res = await fetch(url, {
       method: check.api.method ?? "GET",
-      headers: check.api.body !== undefined ? { "content-type": "application/json" } : undefined,
+      redirect: "manual",
+      headers: { ...(check.api.body !== undefined ? { "content-type": "application/json" } : {}), ...check.api.requestHeaders },
       body: check.api.body !== undefined ? JSON.stringify(check.api.body) : undefined,
     });
     if (res.status !== check.api.status) return `status ${res.status}, expected ${check.api.status}`;
+    for (const [name, expected] of Object.entries(check.api.headers ?? {})) {
+      const value = name.toLowerCase() === "set-cookie" ? res.headers.getSetCookie().join("\n") : res.headers.get(name) ?? "";
+      if (!value.includes(expected)) return `header ${name} = ${JSON.stringify(value)}, expected to contain ${JSON.stringify(expected)}`;
+    }
+    if (check.api.text !== undefined) {
+      const text = await res.text();
+      if (!text.includes(check.api.text)) return `body ${JSON.stringify(text.slice(0, 200))} does not contain ${JSON.stringify(check.api.text)}`;
+      return null;
+    }
     if (check.api.json !== undefined) {
       const body = await res.json().catch(() => null);
       if (!isSubset(check.api.json, body)) return `body ${JSON.stringify(body)} does not match ${JSON.stringify(check.api.json)}`;
@@ -167,7 +182,7 @@ const browser = await Browser.launch();
 
 try {
   for (const app of apps) {
-    const appDir = join(appsDir, app);
+    const appDir = appDirs.get(app) ?? join(appsDir, app);
     // `target: "zalo"` runs the app as a Zalo Mini App (client-rendered from the backend's payload)
     const { checks, target } = readJson<{ checks: Check[]; target?: "web" | "zalo" }>(join(appDir, "compat.json"));
     const dir = copyToTemp(appDir, app);

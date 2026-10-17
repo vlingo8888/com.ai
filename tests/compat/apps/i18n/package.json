@@ -1,0 +1,7 @@
+{
+  "name": "compat-i18n",
+  "private": true,
+  "description": "i18n by [locale] segment: next-intl/server (getTranslations with ICU plural/rich, getLocale), locale redirect in middleware",
+  "dependencies": { "react": "^19.0.0", "react-dom": "^19.0.0", "react-server-dom-webpack": "^19.0.0" },
+  "devDependencies": { "react-refresh": "^0.19.0" }
+}

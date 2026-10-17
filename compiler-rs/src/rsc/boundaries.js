@@ -32,7 +32,15 @@ export function Outlet({ depth }) {
 export const SelectedLayoutContext = createContext([]);
 
 const digestOf = (error) => (error && typeof error === "object" && typeof error.digest === "string" ? error.digest : "");
-export const isNotFoundError = (error) => digestOf(error) === "NEXT_NOT_FOUND";
+/** notFound() / forbidden() / unauthorized(): which fallback UI the error asks for, or null */
+export const httpFallbackOf = (error) => {
+  const digest = digestOf(error);
+  if (digest === "NEXT_NOT_FOUND" || digest === "NEXT_HTTP_ERROR_FALLBACK;404") return "notFound";
+  if (digest === "NEXT_HTTP_ERROR_FALLBACK;403") return "forbidden";
+  if (digest === "NEXT_HTTP_ERROR_FALLBACK;401") return "unauthorized";
+  return null;
+};
+export const isNotFoundError = (error) => httpFallbackOf(error) === "notFound";
 export const isRedirectError = (error) => digestOf(error).startsWith("NEXT_REDIRECT");
 export const redirectTarget = (error) => {
   const parts = digestOf(error).split(";");
@@ -52,8 +60,8 @@ class ErrorBoundaryImpl extends Component {
     this.reset = () => this.setState({ error: null });
   }
   static getDerivedStateFromError(error) {
-    // notFound() and redirect() are control flow, handled by their own boundaries
-    if (isNotFoundError(error) || isRedirectError(error)) throw error;
+    // notFound() / forbidden() / unauthorized() and redirect() are control flow, handled by their own boundaries
+    if (httpFallbackOf(error) || isRedirectError(error)) throw error;
     return { error };
   }
   static getDerivedStateFromProps(props, state) {
@@ -69,7 +77,10 @@ class ErrorBoundaryImpl extends Component {
   }
 }
 
-/** not-found.tsx: shown when notFound() is called below it */
+/**
+ * not-found.tsx / forbidden.tsx / unauthorized.tsx: shown when notFound() / forbidden() /
+ * unauthorized() is called below it (an error without a UI here goes to the boundary above)
+ */
 export function NotFoundBoundary({ depth, ...props }) {
   return createElement(NotFoundBoundaryImpl, { ...props, resetKey: useSegmentKey(depth) });
 }
@@ -77,18 +88,22 @@ export function NotFoundBoundary({ depth, ...props }) {
 class NotFoundBoundaryImpl extends Component {
   constructor(props) {
     super(props);
-    this.state = { notFound: false, resetKey: props.resetKey };
+    this.state = { fallback: null, resetKey: props.resetKey };
+    this.handles = (kind) => !!(kind && props[kind]);
   }
   static getDerivedStateFromError(error) {
-    if (isNotFoundError(error)) return { notFound: true };
-    throw error;
+    return { fallback: httpFallbackOf(error), error };
   }
   static getDerivedStateFromProps(props, state) {
-    if (props.resetKey !== state.resetKey) return { notFound: false, resetKey: props.resetKey };
+    if (props.resetKey !== state.resetKey) return { fallback: null, error: null, resetKey: props.resetKey };
     return null;
   }
   render() {
-    return this.state.notFound ? this.props.notFound ?? null : this.props.children;
+    const { fallback, error } = this.state;
+    if (fallback && this.props[fallback]) return this.props[fallback];
+    // Not ours (another kind, or a render error): pass it to the boundary above
+    if (error) throw error;
+    return this.props.children;
   }
 }
 

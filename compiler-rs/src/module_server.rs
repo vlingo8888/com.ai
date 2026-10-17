@@ -17,7 +17,13 @@ use serde_json::{json, Value};
 
 use crate::resolver::{oxc, Layer};
 
-pub async fn handle_call(root: &Path, cmd: &str, input: &Value, _body: Vec<u8>) -> (Value, Vec<u8>) {
+/// A worker CALL. Boxed: some calls use the worker themselves (fetching fonts), and the worker's
+/// reader task handles calls, so the future type would otherwise refer to itself
+pub fn handle_call(root: PathBuf, cmd: String, input: Value, body: Vec<u8>) -> std::pin::Pin<Box<dyn std::future::Future<Output = (Value, Vec<u8>)> + Send>> {
+    Box::pin(async move { handle_call_inner(&root, &cmd, &input, body).await })
+}
+
+async fn handle_call_inner(root: &Path, cmd: &str, input: &Value, _body: Vec<u8>) -> (Value, Vec<u8>) {
     match cmd {
         "load_module" => {
             let root = root.to_path_buf();
@@ -26,6 +32,19 @@ pub async fn handle_call(root: &Path, cmd: &str, input: &Value, _body: Vec<u8>) 
                 .await
                 .unwrap_or_else(|e| (json!({ "kind": "error", "message": e.to_string() }), Vec::new()))
         }
+        "svg_to_png" => match crate::og_image::svg_to_png(input["svg"].as_str().unwrap_or("")) {
+            Ok(png) => (json!({}), png),
+            Err(error) => (json!({ "error": error }), Vec::new()),
+        },
+        "og_default_font" => match crate::og_image::default_font(root).await {
+            Ok(font) => (json!({}), font),
+            Err(error) => (json!({ "error": error }), Vec::new()),
+        },
+        "font_css" => {
+            let (css, version) = crate::font_loader::stylesheet(root).await;
+            (json!({ "version": version }), css.into_bytes())
+        }
+        "cache_get" | "cache_set" | "cache_invalidate" => (crate::cache_store::handle(root, cmd, input), Vec::new()),
         "client_reference" => match crate::rsc::client_reference_specifier(root, input["id"].as_str().unwrap_or("")) {
             Ok(specifier) => (json!({ "specifier": specifier }), Vec::new()),
             Err(error) => (json!({ "error": error }), Vec::new()),
@@ -116,16 +135,20 @@ pub fn load_module(root: &Path, input: &Value) -> (Value, Vec<u8>) {
     }
 
     let file = PathBuf::from(path_str);
+    if crate::image_optimizer::is_image(&file) {
+        return (json!({ "kind": "esm" }), crate::image_optimizer::static_import_module(root, &file).into_bytes());
+    }
     let source = match std::fs::read_to_string(&file) {
         Ok(s) => s,
         Err(e) => return (json!({ "kind": "error", "message": format!("Cannot read {}: {e}", file.display()) }), Vec::new()),
     };
 
     let in_node_modules = file.components().any(|c| c.as_os_str() == "node_modules");
-    if layer == Layer::Rsc && in_node_modules && !is_esm_source(&file, &source) {
+    if in_node_modules && !is_esm_source(&file, &source) {
         // A "use client" CommonJS file still becomes client references
-        if !source.trim_start().starts_with("\"use client\"") && !source.trim_start().starts_with("'use client'") {
-            return cjs_closure(root, &file);
+        let use_client = source.trim_start().starts_with("\"use client\"") || source.trim_start().starts_with("'use client'");
+        if layer == Layer::Ssr || !use_client {
+            return cjs_closure(root, &file, layer);
         }
     }
 
@@ -156,9 +179,9 @@ fn require_regex() -> &'static Regex {
     RE.get_or_init(|| Regex::new(r#"\brequire\(\s*(?:"([^"]+)"|'([^']+)')\s*\)"#).unwrap())
 }
 
-/// The CommonJS files reachable from `entry` through `require()` (react-server conditions), with
-/// each file's source and how its `require` specifiers resolve
-fn cjs_closure(root: &Path, entry: &Path) -> (Value, Vec<u8>) {
+/// The CommonJS files reachable from `entry` through `require()` (with the conditions of `layer`),
+/// with each file's source and how its `require` specifiers resolve
+fn cjs_closure(root: &Path, entry: &Path, layer: Layer) -> (Value, Vec<u8>) {
     let resolvers = oxc::resolvers(root);
     // The worker runs with NODE_ENV=development (see `apply_runner_env`): the production build is dead code
     let unused_build = ".production.";
@@ -190,7 +213,7 @@ fn cjs_closure(root: &Path, entry: &Path) -> (Value, Vec<u8>) {
                 requires.insert(spec.to_string(), json!({ "builtin": spec }));
                 continue;
             }
-            match resolvers.resolve_rsc_require(&file, spec) {
+            match resolvers.resolve_require(layer, &file, spec) {
                 Some(resolved) => {
                     let target_source = std::fs::read_to_string(&resolved.path).unwrap_or_default();
                     if resolved.path.extension().is_some_and(|e| e == "json") || !is_esm_source(&resolved.path, &target_source) {
@@ -198,7 +221,7 @@ fn cjs_closure(root: &Path, entry: &Path) -> (Value, Vec<u8>) {
                         queue.push_back(resolved.path);
                     } else {
                         // `require()` of an ES module: loaded through the layer like an import
-                        requires.insert(spec.to_string(), json!({ "esm": crate::swc_compiler::module::server_specifier(Layer::Rsc, &resolved.path) }));
+                        requires.insert(spec.to_string(), json!({ "esm": crate::swc_compiler::module::server_specifier(layer, &resolved.path) }));
                     }
                 }
                 None => {
@@ -208,5 +231,5 @@ fn cjs_closure(root: &Path, entry: &Path) -> (Value, Vec<u8>) {
         }
         files.insert(file.to_string_lossy().to_string(), json!({ "code": source, "requires": requires }));
     }
-    (json!({ "kind": "cjs", "entry": entry.to_string_lossy(), "files": files }), Vec::new())
+    (json!({ "kind": "cjs", "layer": layer.as_str(), "entry": entry.to_string_lossy(), "files": files }), Vec::new())
 }

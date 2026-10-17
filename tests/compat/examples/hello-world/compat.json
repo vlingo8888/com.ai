@@ -1,0 +1,1 @@
+{ "checks": [{ "name": "renders", "path": "/", "status": 200, "ssr": ["Hello, Next.js!"], "noIssues": true }] }

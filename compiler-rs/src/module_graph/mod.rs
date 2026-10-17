@@ -41,6 +41,10 @@ pub struct ModuleGraph {
     package_specifiers: HashMap<PathBuf, String>,
     /// How many times server modules were invalidated since the worker started
     pub server_invalidations: u64,
+    /// `next/font` requests of every compiled module, by hash
+    fonts: std::collections::BTreeMap<String, crate::swc_compiler::fonts::FontRequest>,
+    /// Bumped when a new font request appears (the font stylesheet changes)
+    pub fonts_version: u32,
 }
 
 impl ModuleGraph {
@@ -77,6 +81,11 @@ impl ModuleGraph {
         }
         for (id, export) in &compiled.actions {
             self.actions.insert(id.clone(), (file.to_path_buf(), export.clone()));
+        }
+        for font in &compiled.fonts {
+            if self.fonts.insert(font.hash.clone(), font.clone()).is_none() {
+                self.fonts_version += 1;
+            }
         }
         let version = self.version(file, layer);
         self.nodes.insert(
@@ -138,6 +147,11 @@ impl ModuleGraph {
         self.server_invalidations = 0;
     }
 
+    /// Every `next/font` request seen so far
+    pub fn fonts(&self) -> Vec<crate::swc_compiler::fonts::FontRequest> {
+        self.fonts.values().cloned().collect()
+    }
+
     /// The module and export a server action id refers to
     pub fn action(&self, id: &str) -> Option<&(PathBuf, String)> {
         self.actions.get(id)
@@ -184,8 +198,17 @@ pub fn for_root(root: &Path) -> Arc<RwLock<ModuleGraph>> {
 
 /// Whether React Server Components are on (`COM_RSC=0` keeps the client-rendered pipeline)
 pub fn rsc_enabled() -> bool {
+    rsc_enabled_by_env() && !RSC_UNSUPPORTED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// `COM_RSC=0` turns React Server Components off
+pub fn rsc_enabled_by_env() -> bool {
     !matches!(std::env::var("COM_RSC").as_deref(), Ok("0") | Ok("false") | Ok("off"))
-        && !RSC_UNSUPPORTED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Falls back to the client-rendered pipeline (React 19 unavailable)
+pub fn disable_rsc() {
+    RSC_UNSUPPORTED.store(true, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// Set when the project's React cannot run Server Components (React 18 and older)
@@ -208,16 +231,16 @@ pub fn react_major(root: &Path) -> Option<u64> {
         .and_then(major)
 }
 
-/// React Server Components need React 19. With an older React the project keeps the
-/// client-rendered pipeline (like `COM_RSC=0`); returns the version found in that case.
-pub fn check_react_support(root: &Path) -> Option<u64> {
-    match react_major(root) {
-        Some(major) if major < 19 => {
-            RSC_UNSUPPORTED.store(true, std::sync::atomic::Ordering::Relaxed);
-            Some(major)
-        }
-        _ => None,
+/// React Server Components need React 19. A project on an older React runs on the framework's own
+/// React 19 (like Next.js); only when that cannot be installed does it keep the client-rendered
+/// pipeline (like `COM_RSC=0`). Returns the project's version in that case.
+pub async fn check_react_support(root: &Path) -> Option<u64> {
+    let major = react_major(root).filter(|major| *major < 19)?;
+    if !rsc_enabled_by_env() || crate::framework_react::ensure(root).await {
+        return None;
     }
+    disable_rsc();
+    Some(major)
 }
 
 /// The versioned `rsc:` specifier of a server module (route handler, RPC module) when React Server
@@ -241,7 +264,7 @@ pub fn compile(root: &Path, file: &Path, layer: Layer, source: &str) -> Result<C
     let hash = *blake3::hash(source.as_bytes()).as_bytes();
 
     let cache = CompileCache::for_root(&root);
-    let refresh = layer == Layer::Client && !rel.contains("node_modules/") && refresh_enabled() && crate::deps::installed_version(&root, "react-refresh").is_some();
+    let refresh = layer == Layer::Client && !rel.contains("node_modules/") && refresh_enabled() && crate::framework_react::package_version(&root, "react-refresh").is_some();
     // Browser modules use the production JSX runtime with production dependencies
     let development = layer != Layer::Client || crate::deps::deps_node_env() == "development";
     let cache_key = CompileCache::key(

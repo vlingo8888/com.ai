@@ -219,7 +219,16 @@ pub async fn resolve(root: &Path, spec: &str) -> DepResult {
         return DepResult::Error(format!("Invalid package specifier: {spec}"));
     }
     let (name, _) = split_specifier(spec);
-    let Some(version) = ensure_installed(root, &name).await else {
+    // React itself may come from the framework (projects declaring React 18, see framework_react.rs)
+    let framework_dir = crate::framework_react::PACKAGES
+        .contains(&name.as_str())
+        .then(|| crate::framework_react::active_modules_dir(root))
+        .flatten();
+    let version = match &framework_dir {
+        Some(_) => crate::framework_react::package_version(root, &name),
+        None => ensure_installed(root, &name).await,
+    };
+    let Some(version) = version else {
         return DepResult::Fallback(esm_sh_url(spec));
     };
     let node_env = deps_node_env();
@@ -230,7 +239,10 @@ pub async fn resolve(root: &Path, spec: &str) -> DepResult {
     }
 
     let started = std::time::Instant::now();
-    let input = serde_json::json!({ "spec": spec, "outFile": out_file, "nodeEnv": node_env });
+    let mut input = serde_json::json!({ "spec": spec, "outFile": out_file, "nodeEnv": node_env });
+    if let Some(dir) = framework_dir.as_ref().and_then(|d| d.parent()) {
+        input["resolveDir"] = serde_json::json!(dir);
+    }
     // A one-off process: bundling happens once per package version, and Bun.build's memory would
     // otherwise stay in the long-lived worker
     let script = format!(

@@ -44,7 +44,7 @@ impl RouteScanner {
                 || file_name == "page.ts"
             {
                 (RouteKind::Page, false)
-            } else if file_name == "route.ts" || file_name == "route.js" {
+            } else if matches!(file_name, "route.ts" | "route.js" | "route.tsx" | "route.jsx" | "route.mjs") {
                 (RouteKind::Api, true)
             } else {
                 continue;
@@ -57,6 +57,12 @@ impl RouteScanner {
                 .filter_map(|s| s.to_str())
                 .filter(|s| !s.is_empty())
                 .collect();
+
+            // Pages of parallel slots and intercepting folders are rendered through their layout / an
+            // interception (router/parallel.rs), they are not routes of their own
+            if segment_strs.iter().any(|s| s.starts_with('@') || super::parallel::is_intercepting(s)) {
+                continue;
+            }
 
             let segments = SegmentParser::parse_segments(&segment_strs);
             let (pattern, regex_str, param_names, score) =
@@ -83,6 +89,8 @@ impl RouteScanner {
                 let error = Self::find_special_file(dir, root, "error");
                 let loading = Self::find_special_file(dir, root, "loading");
                 let not_found = Self::find_special_file(dir, root, "not-found");
+                let forbidden = Self::find_special_file(dir, root, "forbidden");
+                let unauthorized = Self::find_special_file(dir, root, "unauthorized");
 
                 if let Some(ref l) = layout {
                     layout_files.push(l.clone());
@@ -95,6 +103,8 @@ impl RouteScanner {
                     error,
                     loading,
                     not_found,
+                    forbidden,
+                    unauthorized,
                 });
             }
 

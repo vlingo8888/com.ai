@@ -21,6 +21,8 @@ pub struct LayerResolvers {
     /// `require()` inside CommonJS files of the react-server layer: same as `rsc` without `import`,
     /// so a package never hands an ES module to a CommonJS `require`
     rsc_require: Resolver,
+    /// `require()` inside CommonJS files of the SSR layer
+    ssr_require: Resolver,
 }
 
 /// A specifier resolved to a file on disk
@@ -69,7 +71,24 @@ impl LayerResolvers {
             ),
         ];
 
+        // next-intl reads the project's request config through this alias (its Next.js plugin sets it)
+        let intl_config = ["i18n/request.ts", "src/i18n/request.ts", "i18n/request.js", "src/i18n/request.js", "i18n.ts", "src/i18n.ts"]
+            .iter()
+            .map(|p| root.join(p))
+            .find(|p| p.is_file());
+        let mut alias = intl_config
+            .map(|p| vec![("next-intl/config$".to_string(), vec![AliasValue::Path(path_str(p))])])
+            .unwrap_or_default();
+        // The framework's next/* modules (written by next_shims.rs); browser code never resolves
+        // `next/*` (it imports /_nata/shims/next/*)
+        let next_dir = root.join(".nata/next");
+        if next_dir.join("headers.ts").is_file() {
+            for (name, file) in crate::next_shims::SERVER_MODULES {
+                alias.push((format!("next/{name}$"), vec![AliasValue::Path(path_str(next_dir.join(file)))]));
+            }
+        }
         let base = ResolveOptions {
+            alias,
             cwd: Some(root.to_path_buf()),
             tsconfig: has_tsconfig.then_some(TsconfigDiscovery::Auto),
             extensions: EXTENSIONS.iter().map(|e| e.to_string()).collect(),
@@ -81,6 +100,10 @@ impl LayerResolvers {
             ],
             fallback: default_aliases,
             main_files: vec!["index".into()],
+            // The framework's React first when the project's is too old (see framework_react.rs)
+            modules: crate::framework_react::active_modules_dir(root)
+                .map(|dir| vec![dir.to_string_lossy().to_string(), "node_modules".into()])
+                .unwrap_or_else(|| vec!["node_modules".into()]),
             builtin_modules: true,
             symlinks: true,
             ..ResolveOptions::default()
@@ -102,8 +125,9 @@ impl LayerResolvers {
         ));
         let rsc_require =
             client.clone_with_options(with(&["react-server", "node", "require", "default"], &["main"], false));
+        let ssr_require = client.clone_with_options(with(&["node", "require", "default"], &["main"], false));
 
-        Self { root: root.to_path_buf(), client, ssr, rsc, rsc_require }
+        Self { root: root.to_path_buf(), client, ssr, rsc, rsc_require, ssr_require }
     }
 
     pub fn root(&self) -> &Path {
@@ -128,6 +152,12 @@ impl LayerResolvers {
     /// Resolves a CommonJS `require(specifier)` of the react-server layer
     pub fn resolve_rsc_require(&self, importer: &Path, specifier: &str) -> Option<ResolvedModule> {
         Self::finish(self.rsc_require.resolve_file(importer, specifier).ok()?.into_path_buf())
+    }
+
+    /// Resolves a CommonJS `require(specifier)` of a server layer
+    pub fn resolve_require(&self, layer: Layer, importer: &Path, specifier: &str) -> Option<ResolvedModule> {
+        let resolver = if layer == Layer::Rsc { &self.rsc_require } else { &self.ssr_require };
+        Self::finish(resolver.resolve_file(importer, specifier).ok()?.into_path_buf())
     }
 
     /// Resolves `specifier` from the project root

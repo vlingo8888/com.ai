@@ -7,7 +7,8 @@ use crate::resolver::Layer;
 
 fn project(name: &str, extra: &[(&str, &str)]) -> PathBuf {
     let mut files: Vec<(&str, &str)> = vec![
-        ("package.json", r#"{"name":"app"}"#),
+        // Its own React 19 set (otherwise the App Router runs on the framework's React, see framework_react.rs)
+        ("package.json", r#"{"name":"app","dependencies":{"react":"19.3.0","react-dom":"19.3.0","react-server-dom-webpack":"19.3.0"}}"#),
         ("node_modules/react/package.json", r#"{"name":"react","exports":{".":{"react-server":"./react.react-server.js","default":"./index.js"},"./jsx-dev-runtime":{"react-server":"./jsx-dev-runtime.react-server.js","default":"./jsx-dev-runtime.js"},"./jsx-runtime":{"react-server":"./jsx-runtime.react-server.js","default":"./jsx-runtime.js"}}}"#),
         ("node_modules/react/index.js", ""),
         ("node_modules/react/react.react-server.js", ""),
@@ -186,3 +187,66 @@ fn mod_008_type_exports_are_not_exports() {
     assert_eq!(out.exports, vec!["Color".to_string(), "b".to_string()]);
 }
 
+
+#[test]
+fn mod_009_use_cache_functions_run_through_the_data_cache() {
+    let src = r#"import { cacheLife } from "next/cache";
+export async function getPosts(limit: number) {
+  "use cache";
+  cacheLife("hours");
+  return [limit];
+}
+export const getUser = async (id: string) => {
+  "use cache";
+  return { id };
+};
+export default async function Page({ tenant }: { tenant: string }) {
+  async function load(n: number) {
+    "use cache";
+    return tenant + n;
+  }
+  return await load(1);
+}
+export async function notCached() { return 1; }
+"#;
+    let root = project("use_cache", &[("app/page.tsx", src), (".nata/next/cache-runtime.ts", "export function cacheCall() {}")]);
+    let out = compile(&root, "app/page.tsx", Layer::Rsc);
+    let code = &out.code;
+    assert!(code.contains("import { cacheCall as __nata_cache_call } from \"rsc:"), "{code}");
+    assert!(code.contains("__nata_cache_call(\"app/page.tsx#getPosts\", [\n"), "{code}");
+    assert!(code.contains("export async function getPosts(...$$nata_args)"), "keeps the name and hoisting: {code}");
+    assert!(code.contains("\"app/page.tsx#getUser\""), "{code}");
+    // Closed-over variables are part of the key
+    assert!(code.contains("\"app/page.tsx#load\""), "{code}");
+    assert!(code.contains("tenant\n"), "captured tenant: {code}");
+    assert!(!code.contains("\"use cache\""), "{code}");
+    assert!(code.contains("export async function notCached() {\n    return 1;"), "{code}");
+    // Browser code is never wrapped
+    let client = compile(&root, "app/page.tsx", Layer::Client);
+    assert!(!client.code.contains("__nata_cache_call"));
+}
+
+#[test]
+fn mod_010_file_level_use_cache_wraps_every_async_export() {
+    let src = "\"use cache\";\nexport async function a() { return 1; }\nexport async function b(x: number) { return x; }\nexport function sync() { return 2; }\n";
+    let root = project("use_cache_file", &[("lib/data.ts", src)]);
+    let out = compile(&root, "lib/data.ts", Layer::Rsc);
+    assert!(out.code.contains("\"lib/data.ts#a\""), "{}", out.code);
+    assert!(out.code.contains("\"lib/data.ts#b\""), "{}", out.code);
+    assert!(out.code.contains("export function sync() {\n    return 2;"), "{}", out.code);
+}
+
+#[test]
+fn mod_011_public_env_is_inlined_in_the_browser_only() {
+    let src = "export const a = process.env.NEXT_PUBLIC_API;\nexport const b = process.env.SECRET_KEY;\nexport const c = process.env.NODE_ENV;\nexport const d = process.env[\"NEXT_PUBLIC_API\"];\n";
+    let root = project("env_inline", &[("app/config.ts", src), (".env", "NEXT_PUBLIC_API=https://api.example.com\nSECRET_KEY=s3cret\n")]);
+    let client = compile(&root, "app/config.ts", Layer::Client);
+    assert!(client.code.contains("export const a = \"https://api.example.com\""), "{}", client.code);
+    assert!(client.code.contains("export const b = undefined"), "{}", client.code);
+    assert!(client.code.contains("export const c = \"development\""), "{}", client.code);
+    assert!(client.code.contains("export const d = \"https://api.example.com\""), "{}", client.code);
+    assert!(!client.code.contains("s3cret"));
+    // The server reads its environment at runtime
+    let server = compile(&root, "app/config.ts", Layer::Rsc);
+    assert!(server.code.contains("process.env.SECRET_KEY"), "{}", server.code);
+}

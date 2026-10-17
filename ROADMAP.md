@@ -139,36 +139,36 @@ Việc đầu tiên của mỗi giai đoạn là chạy lại bảng này (`bun 
 ### P2: Đầy đủ API Next.js
 
 **Routing**
-- [ ] `middleware.ts` (M): `matcher` compile thành regex trong Rust; chạy trong worker trước khi render; `NextResponse.next` / `redirect` / `rewrite`, sửa header/cookie. (Next 16 đổi tên thành `proxy.ts`, hỗ trợ cả hai.)
-- [ ] Parallel routes `@slot` + `default.tsx` (M)
-- [ ] Intercepting routes `(.)` `(..)` `(...)` (M)
-- [ ] `route.ts` đầy đủ: `NextRequest` / `NextResponse`, `export const dynamic`, streaming response (M)
-- [ ] `forbidden.tsx`, `unauthorized.tsx`, `global-error.tsx` (M)
-- [ ] i18n theo segment `[locale]` + `next-intl` server (M)
+- [x] `middleware.ts` (M): `matcher` compile thành regex trong Rust; chạy trong worker trước khi render; `NextResponse.next` / `redirect` / `rewrite`, sửa header/cookie. (Next 16 đổi tên thành `proxy.ts`, hỗ trợ cả hai.)
+- [x] Parallel routes `@slot` + `default.tsx` (M)
+- [x] Intercepting routes `(.)` `(..)` `(...)` (M)
+- [x] `route.ts` đầy đủ: `NextRequest` / `NextResponse`, `export const dynamic`, streaming response (M)
+- [x] `forbidden.tsx`, `unauthorized.tsx`, `global-error.tsx` (M)
+- [x] i18n theo segment `[locale]` + `next-intl` server (M)
 
 **Dữ liệu & cache**
-- [ ] `fetch` cache + `next: { revalidate, tags }` (M)
-- [ ] `"use cache"`, `cacheLife`, `cacheTag` (M): cache store trong Rust (LRU trong RAM + đĩa)
-- [ ] `unstable_cache`, `revalidatePath`, `revalidateTag`, `refresh` (M)
-- [ ] Route segment config: `dynamic`, `revalidate`, `fetchCache`, `runtime`, `preferredRegion` (chấp nhận nhưng có thể bỏ qua), `maxDuration` (M)
-- [ ] `generateStaticParams`, `dynamicParams` (M)
-- [ ] `after()` (M)
+- [x] `fetch` cache + `next: { revalidate, tags }` (M)
+- [x] `"use cache"`, `cacheLife`, `cacheTag` (M): cache store trong Rust (LRU trong RAM + đĩa)
+- [x] `unstable_cache`, `revalidatePath`, `revalidateTag`, `refresh` (M)
+- [x] Route segment config: `dynamic`, `revalidate`, `fetchCache`, `runtime`, `preferredRegion` (chấp nhận nhưng có thể bỏ qua), `maxDuration` (M)
+- [x] `generateStaticParams`, `dynamicParams` (M)
+- [x] `after()` (M)
 - [ ] Partial Prerendering (O, làm sau cùng): shell tĩnh + lỗ động streaming
 
 **Request APIs**
-- [ ] `cookies()`, `headers()`, `draftMode()` async theo Next 15 (M), dựa trên ALS của P0.3
-- [ ] `connection()`, `userAgent()` (M)
+- [x] `cookies()`, `headers()`, `draftMode()` async theo Next 15 (M), dựa trên ALS của P0.3
+- [x] `connection()`, `userAgent()` (M)
 
 **Shims gói `next/*`**
-- [ ] `next/font/google`, `next/font/local` (M+O): tải và tự host lúc build, sinh `@font-face` + fallback metric (`ttf-parser`), trả về `className` / `variable` / `style` giống Next
-- [ ] `next/image` (M+O): endpoint `/_next/image?url=&w=&q=` (giữ đúng URL của Next), resize bằng `fast_image_resize`, WebP/AVIF, cache trên đĩa, `srcset` và `sizes` đúng
-- [ ] `next/dynamic` (M): `ssr: false`, `loading`
-- [ ] `next/script` (M): `beforeInteractive`, `afterInteractive`, `lazyOnload`, `worker` (bỏ qua)
-- [ ] `next/og` `ImageResponse` (O): Satori + resvg (resvg là crate Rust)
-- [ ] `next/server`: `NextRequest`, `NextResponse`, `userAgent`, `after` (M)
-- [ ] `next.config.(js|ts|mjs)` (M): `basePath`, `redirects`, `rewrites`, `headers`, `images`, `env`, `trailingSlash`, `output`, `serverExternalPackages`, `experimental` (đọc và cảnh báo option chưa hỗ trợ)
-- [ ] `instrumentation.ts` + `onRequestError` (M)
-- [ ] Env: `.env*` theo thứ tự ưu tiên của Next; `NEXT_PUBLIC_*` inline vào bundle client (M)
+- [x] `next/font/google`, `next/font/local` (M+O): tải và tự host lúc build, sinh `@font-face` + fallback metric (`ttf-parser`), trả về `className` / `variable` / `style` giống Next
+- [x] `next/image` (M+O): endpoint `/_next/image?url=&w=&q=` (giữ đúng URL của Next), resize bằng `fast_image_resize`, WebP/AVIF, cache trên đĩa, `srcset` và `sizes` đúng
+- [x] `next/dynamic` (M): `ssr: false`, `loading`
+- [x] `next/script` (M): `beforeInteractive`, `afterInteractive`, `lazyOnload`, `worker` (bỏ qua)
+- [x] `next/og` `ImageResponse` (O): Satori + resvg (resvg là crate Rust)
+- [x] `next/server`: `NextRequest`, `NextResponse`, `userAgent`, `after` (M)
+- [x] `next.config.(js|ts|mjs)` (M): `basePath`, `redirects`, `rewrites`, `headers`, `images`, `env`, `trailingSlash`, `output`, `serverExternalPackages`, `experimental` (đọc và cảnh báo option chưa hỗ trợ)
+- [x] `instrumentation.ts` + `onRequestError` (M)
+- [x] Env: `.env*` theo thứ tự ưu tiên của Next; `NEXT_PUBLIC_*` inline vào bundle client (M)
 
 **Xong P2 khi:** cả 4 app compat chạy `com dev` không sửa code; thêm 5–10 app thật (ví dụ các mẫu chính thức trong `vercel/next.js/examples`) vào bộ compat.
 

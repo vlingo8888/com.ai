@@ -1,0 +1,9 @@
+{
+  "checks": [
+    { "name": "middleware redirects to a locale", "path": "/", "api": { "status": 307, "headers": { "location": "/vi" } } },
+    { "name": "Vietnamese messages for /vi", "path": "/vi", "status": 200, "ssr": ["<html lang=\"vi\"", "Xin chào", "Không có mục nào", "3 mục"] },
+    { "name": "English messages and ICU plural for /en", "path": "/en", "ssr": ["<html lang=\"en\"", "Welcome", "No items", "3 items"] },
+    { "name": "t.rich renders elements", "path": "/en", "ssr": ["This is <b>important</b>"] },
+    { "name": "getLocale() follows the [locale] segment", "path": "/vi/about", "ssr": ["Ngôn ngữ hiện tại: vi"] }
+  ]
+}

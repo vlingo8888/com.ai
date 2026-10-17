@@ -1,0 +1,7 @@
+{
+  "checks": [
+    { "name": "home renders with the nav", "path": "/", "status": 200, "ssr": ["Dynamic Route"], "noIssues": true },
+    { "name": "client navigation to a dynamic route; usePathname updates", "path": "/", "navigate": { "click": "a[href='/dynamic-route']", "expectText": "Hello, I'm the /dynamic-route page", "expectPath": "/dynamic-route" } },
+    { "name": "active link class follows the pathname", "path": "/about", "selector": "a.nav-link.active[href='/about']" }
+  ]
+}

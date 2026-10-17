@@ -1,0 +1,7 @@
+{
+  "name": "compat-next-config",
+  "private": true,
+  "description": "next.config (redirects, rewrites, headers, env, trailingSlash), .env* precedence, NEXT_PUBLIC_* inlining, instrumentation.ts",
+  "dependencies": { "react": "^19.0.0", "react-dom": "^19.0.0", "react-server-dom-webpack": "^19.0.0" },
+  "devDependencies": { "react-refresh": "^0.19.0" }
+}

@@ -1,0 +1,1 @@
+{ "checks": [{ "name": "renders with Jotai, CSS Modules and global CSS", "path": "/", "status": 200, "ssr": ["With Jotai example"], "title": "with-jotai", "noIssues": true }] }

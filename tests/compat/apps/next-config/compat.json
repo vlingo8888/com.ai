@@ -1,0 +1,15 @@
+{
+  "checks": [
+    { "name": "redirects() with params", "path": "/old-blog/hello", "api": { "status": 308, "headers": { "location": "/real?from=hello" } } },
+    { "name": "beforeFiles rewrite keeps the URL", "path": "/alias", "status": 200, "ssr": ["Real page"] },
+    { "name": "afterFiles rewrite for unmatched paths", "path": "/legacy/a/b", "status": 200, "ssr": ["Real page"] },
+    { "name": "headers() on every response", "path": "/", "api": { "status": 200, "headers": { "x-com-config": "applied" } } },
+    { "name": "trailingSlash: false redirects /real/ to /real", "path": "/real/", "api": { "status": 308, "headers": { "location": "/real" } } },
+    { "name": "server code reads .env and next.config env", "path": "/real", "ssr": ["server secret=hidden-value", "custom=from-config"] },
+    { "name": "instrumentation register() ran before rendering", "path": "/real", "ssr": ["registered=yes"] },
+    { "name": "NEXT_PUBLIC_* inlined in the browser (.env.local wins), server-only values are not", "path": "/real", "contains": ["client greeting=local-wins secret=none custom=from-config"] },
+    { "name": "server-only env never reaches the browser bundle", "path": "/_bundle/app/real/client.tsx", "notInHtml": ["hidden-value"] },
+    { "name": "a render error reaches instrumentation onRequestError (500 like Next.js)", "path": "/boom", "status": 500 },
+    { "name": "onRequestError received it", "path": "/api/errors", "api": { "status": 200, "text": "/boom: boom on purpose" } }
+  ]
+}

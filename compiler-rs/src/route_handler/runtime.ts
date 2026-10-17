@@ -20,6 +20,14 @@ interface RouteHandlerInput {
   bodyBase64?: string | null;
   /** Raw request body (persistent worker); takes precedence over `bodyBase64` */
   bodyBytes?: Uint8Array | null;
+  /** Stream the response body to the engine (persistent worker with React Server Components) */
+  stream?: boolean;
+}
+
+/** A streamed response: status and headers first, then the body as it is produced */
+interface RouteHandlerStream {
+  head: { status: number; headers: Record<string, string | string[]> };
+  stream?: ReadableStream<Uint8Array> | null;
 }
 
 interface RouteHandlerResult {
@@ -38,7 +46,7 @@ export async function runRouteHandler(input: RouteHandlerInput) {
 }
 
 /** Runs the route handler and returns the response body as raw bytes (persistent worker entry point) */
-export async function handleRoute(input: RouteHandlerInput): Promise<RouteHandlerResult> {
+export async function handleRoute(input: RouteHandlerInput): Promise<RouteHandlerResult | RouteHandlerStream> {
   const startTime = performance.now();
 
   try {
@@ -56,6 +64,9 @@ export async function handleRoute(input: RouteHandlerInput): Promise<RouteHandle
     }
     (globalThis as any).__NATA_COOKIES__ = cookieMap;
     (globalThis as any).__NATA_SET_COOKIES__ = [];
+    const lowerHeaders: Record<string, string> = {};
+    for (const [k, v] of Object.entries(input.headers || {})) lowerHeaders[k.toLowerCase()] = v;
+    (globalThis as any).__NATA_HEADERS__ = lowerHeaders;
 
     // 2. Import Next.js server shims
     const serverModule = await import("./server.ts").catch(() => null);
@@ -155,6 +166,22 @@ export async function handleRoute(input: RouteHandlerInput): Promise<RouteHandle
     const responseHeaders: Record<string, string> = {};
     let body: Uint8Array = new Uint8Array();
 
+    if (input.stream) {
+      // Response headers plus every cookie as its own Set-Cookie header; the body streams as produced
+      const { serializeCookie } = await import("./next/request.ts");
+      const headers: Record<string, string | string[]> = {};
+      let response: Response;
+      if (responseResult instanceof Response) response = responseResult;
+      else if (responseResult === null || responseResult === undefined) response = new Response(null, { status: 204 });
+      else response = Response.json(responseResult);
+      response.headers.forEach((value, key) => {
+        if (key !== "set-cookie") headers[key] = value;
+      });
+      const cookies = [...(response.headers.getSetCookie?.() ?? []), ...((globalThis as any).__NATA_SET_COOKIES__ || []).map(serializeCookie)];
+      if (cookies.length) headers["set-cookie"] = cookies;
+      return { head: { status: response.status, headers }, stream: response.body };
+    }
+
     if (responseResult instanceof Response) {
       status = responseResult.status;
       statusText = responseResult.statusText || (status === 200 ? "OK" : "");
@@ -218,6 +245,10 @@ export async function handleRoute(input: RouteHandlerInput): Promise<RouteHandle
     const errMsg = err?.message || String(err);
     const errStack = err?.stack || "";
     console.error(`\x1b[31m✖ [Route Handler Error]\x1b[0m ${errMsg}\n${errStack}`);
+    try {
+      const { reportRequestError } = await import("./next/request.ts");
+      await reportRequestError(err, { routeType: "route", routePath: new URL(input.url).pathname });
+    } catch {}
 
     const output = {
       status: 500,
@@ -228,6 +259,10 @@ export async function handleRoute(input: RouteHandlerInput): Promise<RouteHandle
       error: errMsg,
     };
 
-    return { output, body: encoder.encode(JSON.stringify({ error: errMsg, stack: errStack })) };
+    const errorBody = encoder.encode(JSON.stringify({ error: errMsg, stack: errStack }));
+    if (input.stream) {
+      return { head: { status: 500, headers: { "content-type": "application/json; charset=utf-8" } }, stream: new Response(errorBody).body };
+    }
+    return { output, body: errorBody };
   }
 }

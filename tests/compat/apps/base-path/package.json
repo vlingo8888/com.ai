@@ -1,0 +1,7 @@
+{
+  "name": "compat-base-path",
+  "private": true,
+  "description": "next.config basePath: routes, links and client navigation under /docs",
+  "dependencies": { "react": "^19.0.0", "react-dom": "^19.0.0", "react-server-dom-webpack": "^19.0.0" },
+  "devDependencies": { "react-refresh": "^0.19.0" }
+}

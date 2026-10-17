@@ -1,0 +1,8 @@
+{
+  "checks": [
+    { "name": "pages are served under basePath", "path": "/docs", "status": 200, "ssr": ["Docs home"] },
+    { "name": "paths outside basePath are 404", "path": "/about", "api": { "status": 404 } },
+    { "name": "links get basePath", "path": "/docs", "ssr": ["href=\"/docs/about\""] },
+    { "name": "client navigation under basePath; usePathname without it", "path": "/docs", "navigate": { "click": "a[href='/docs/about']", "expectText": "pathname=/about", "expectPath": "/docs/about" } }
+  ]
+}

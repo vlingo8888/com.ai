@@ -82,6 +82,12 @@ pub struct SegmentFiles {
     pub loading: Option<PathBuf>,
     /// `not-found.tsx` / `not-found.jsx` / `not-found.js` / `not-found.ts`
     pub not_found: Option<PathBuf>,
+    /// `forbidden.tsx`: shown by `forbidden()` (status 403)
+    #[serde(default)]
+    pub forbidden: Option<PathBuf>,
+    /// `unauthorized.tsx`: shown by `unauthorized()` (status 401)
+    #[serde(default)]
+    pub unauthorized: Option<PathBuf>,
 }
 
 /// Represents an indexable, matchable App Router route entry

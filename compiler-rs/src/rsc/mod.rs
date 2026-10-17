@@ -39,11 +39,16 @@ pub struct PageRequest<'a> {
     pub route: Option<&'a RouteEntry>,
     pub params: HashMap<String, String>,
     pub cookies: Option<String>,
+    /// Request headers (lower-case names), for headers()
+    pub headers: HashMap<String, String>,
     /// Segment keys the client router already has (`Nata-Router-State`)
     pub router_state: Vec<String>,
     pub mode: Mode,
     /// Root segment files for the not-found page when no route matched
     pub not_found_segments: Vec<SegmentFiles>,
+    /// Client navigations: the page the browser is on (`Nata-Url`) and its route, for intercepting
+    /// routes
+    pub navigated_from: Option<(String, RouteEntry, HashMap<String, String>)>,
 }
 
 /// `app/blog/[slug]` with `slug=hello` → `app/blog/hello`: identifies a segment's rendered output
@@ -85,29 +90,101 @@ fn abs(root: &Path, p: &Path) -> PathBuf {
     joined.canonicalize().unwrap_or(joined)
 }
 
-/// The route as the worker's `buildModel` takes it: segment files as versioned `rsc:` specifiers
+/// The route as the worker's `buildModel` takes it: segment files as versioned `rsc:` specifiers,
+/// with the parallel slots of each layout and, for client navigations, intercepting routes applied
 pub fn route_input(root: &Path, req: &PageRequest) -> Value {
+    let root_c = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let app_dir = ["app", "src/app"].iter().map(|d| root_c.join(d)).find(|d| d.is_dir()).unwrap_or_else(|| root_c.join("app"));
     let graph = crate::module_graph::for_root(root);
     let graph = graph.read().unwrap_or_else(|e| e.into_inner());
     let spec = |p: &Option<PathBuf>| p.as_ref().map(|p| graph.specifier(&abs(root, p), Layer::Rsc));
-    let segments_files = match req.route {
-        Some(route) => &route.segments_files,
-        None => &req.not_found_segments,
+
+    // Soft navigation to an intercepted URL: render the intercepting page (in a slot of the page the
+    // browser is on, or in place of the target)
+    let interception = match (&req.mode, &req.navigated_from) {
+        (Mode::Flight, Some((from, _, _))) => crate::router::parallel::find_interception(&root_c, &app_dir, req.pathname, from),
+        _ => None,
+    };
+    let (route, params, pathname): (Option<&RouteEntry>, HashMap<String, String>, String) = match (&interception, &req.navigated_from) {
+        (Some(i), Some((from, from_route, from_params))) if i.slot.is_some() => (Some(from_route), from_params.clone(), from.split('?').next().unwrap_or("/").to_string()),
+        _ => (req.route, req.params.clone(), req.pathname.to_string()),
+    };
+    let mut segments_files: Vec<SegmentFiles> = match route {
+        Some(route) => route.segments_files.clone(),
+        None => req.not_found_segments.clone(),
+    };
+    let mut page = route.map(|r| r.page_file.clone());
+    let mut page_params = params.clone();
+    if let Some(i) = interception.as_ref().filter(|i| i.slot.is_none()) {
+        // `(..)photo` inside `feed/`: the intercepting folders hang under the folder holding them
+        let holder = i.sub.segments.first().map(|s| s.folder.parent().map(Path::to_path_buf).unwrap_or_default()).unwrap_or_default();
+        segments_files.retain(|s| holder.starts_with(&s.folder));
+        segments_files.extend(i.sub.segments.iter().cloned());
+        page = Some(i.sub.page.clone());
+        page_params = i.sub.params.clone();
+    }
+
+    let url_parts: Vec<&str> = pathname.split('/').filter(|p| !p.is_empty()).collect();
+    let segment_json = |s: &SegmentFiles, key: String, slots: Value| {
+        json!({
+            "key": key,
+            "layout": spec(&s.layout),
+            "template": spec(&s.template),
+            "error": spec(&s.error),
+            "loading": spec(&s.loading),
+            "notFound": spec(&s.not_found),
+            "forbidden": spec(&s.forbidden),
+            "unauthorized": spec(&s.unauthorized),
+            "slots": slots,
+        })
+    };
+    let sub_json = |sub: &crate::router::parallel::SubRoute| {
+        json!({
+            "segments": sub.segments.iter().map(|s| segment_json(s, String::new(), json!([]))).collect::<Vec<_>>(),
+            "page": graph.specifier(&abs(root, &sub.page), Layer::Rsc),
+            "params": sub.params,
+        })
     };
     let segments: Vec<Value> = segments_files
         .iter()
         .map(|s| {
-            json!({
-                "key": segment_key(&s.folder, &req.params),
-                "layout": spec(&s.layout),
-                "template": spec(&s.template),
-                "error": spec(&s.error),
-                "loading": spec(&s.loading),
-                "notFound": spec(&s.not_found),
-            })
+            let folder_abs = abs(root, &s.folder);
+            let consumed = folder_abs.strip_prefix(&app_dir).map(|rel| {
+                rel.iter().filter_map(|c| c.to_str()).filter(|c| !(c.starts_with('(') && c.ends_with(')')) && !c.starts_with('@')).count()
+            }).unwrap_or(0).min(url_parts.len());
+            let mut slots = crate::router::parallel::match_slots(&root_c, &folder_abs, &url_parts[consumed..]);
+            if let Some((slot_folder, slot_name)) = interception.as_ref().and_then(|i| i.slot.as_ref()) {
+                if abs(root, slot_folder) == folder_abs {
+                    let sub = interception.as_ref().unwrap().sub.clone();
+                    slots.retain(|(n, _)| n != slot_name);
+                    slots.push((slot_name.clone(), sub));
+                }
+            }
+            // The slots' pages are part of the layout's identity: a slot change re-renders it
+            let mut key = segment_key(&s.folder, &params);
+            for (name, sub) in &slots {
+                key.push_str(&format!("|@{name}={}", sub.page.to_string_lossy()));
+                for (k, v) in &sub.params {
+                    key.push_str(&format!(";{k}={v}"));
+                }
+            }
+            let slots_json: Vec<Value> = slots.iter().map(|(name, sub)| {
+                let mut v = sub_json(sub);
+                v["name"] = json!(name);
+                v
+            }).collect();
+            segment_json(s, key, Value::Array(slots_json))
         })
         .collect();
     let keys: Vec<&str> = segments.iter().filter_map(|s| s["key"].as_str()).collect();
+    // Layouts the client already shows come back empty; the page is always rendered
+    let skip = req.router_state.iter().zip(keys.iter()).take_while(|(a, b)| a == b).count();
+    let search = if req.query.is_empty() { String::new() } else { format!("?{}", req.query) };
+    let params_value = match (route, interception.as_ref().filter(|i| i.slot.is_none())) {
+        (_, Some(i)) => json!(i.sub.params),
+        (Some(r), None) => r.params_json(&page_params),
+        (None, None) => json!({}),
+    };
     // Per node, the URL segments below it: what useSelectedLayoutSegments() returns in its layout
     let own_segment: Vec<Option<String>> = segments_files
         .iter()
@@ -118,29 +195,23 @@ pub fn route_input(root: &Path, req: &PageRequest) -> Value {
             if i == 0 || folder_last.starts_with('(') || folder_last.starts_with('@') {
                 return None;
             }
-            let key = segment_key(&s.folder, &req.params);
+            let key = segment_key(&s.folder, &params);
             key.rsplit('/').next().filter(|last| !last.is_empty()).map(|last| last.to_string())
         })
         .collect();
-    let selected: Vec<Vec<String>> = (0..=own_segment.len())
-        .map(|i| own_segment.iter().skip(i + 1).flatten().cloned().collect())
-        .collect();
-    // Layouts the client already shows come back empty; the page is always rendered
-    let skip = req.router_state.iter().zip(keys.iter()).take_while(|(a, b)| a == b).count();
-    let search = if req.query.is_empty() { String::new() } else { format!("?{}", req.query) };
-    let params = req.route.map(|r| r.params_json(&req.params)).unwrap_or_else(|| json!({}));
+    let selected: Vec<Vec<String>> = (0..=own_segment.len()).map(|i| own_segment.iter().skip(i + 1).flatten().cloned().collect()).collect();
     json!({
         "pathname": req.pathname,
         "search": search,
-        "params": params,
+        "params": params_value,
         "searchParams": query_json(req.query),
         "segments": segments,
-        "page": req.route.map(|r| graph.specifier(&abs(root, &r.page_file), Layer::Rsc)),
-        "pageKey": format!("{}{}", req.route.map(|r| r.page_file.to_string_lossy().replace('\\', "/")).unwrap_or_default(), search),
-        "globalError": req.route.and_then(|r| r.global_error_file.as_ref()).map(|p| graph.specifier(&abs(root, p), Layer::Rsc)),
+        "page": page.as_ref().map(|p| graph.specifier(&abs(root, p), Layer::Rsc)),
+        "pageKey": format!("{}{}", page.map(|p| p.to_string_lossy().replace('\\', "/")).unwrap_or_default(), search),
+        "globalError": route.and_then(|r| r.global_error_file.as_ref()).map(|p| graph.specifier(&abs(root, p), Layer::Rsc)),
         "skip": skip,
         "selected": selected,
-        "notFoundAt": if req.route.is_none() { json!(0) } else { Value::Null },
+        "notFoundAt": if route.is_none() { json!(0) } else { Value::Null },
     })
 }
 
@@ -149,11 +220,25 @@ pub fn route_input(root: &Path, req: &PageRequest) -> Value {
 const WEBPACK_GLOBALS: &str = "(function(){var m=self.__nata_modules=new Map();self.__webpack_chunk_load__=function(id){return import(id).then(function(x){m.set(id,x)})};self.__webpack_require__=function(id){return m.get(id)};self.__webpack_require__.u=function(c){return c};self.__webpack_get_script_filename__=function(c){return c}})();";
 
 /// Everything the document needs before the page's own `<head>` content: styles, import map, config
-pub fn head_start(stylesheet_tags: &str, target: &str) -> String {
+/// next/image settings shared by the server render and the browser (same srcset on both sides)
+pub fn images_client_config(root: &Path) -> Value {
+    let config = crate::next_config::for_root(root);
+    let images = config.as_ref().map(|c| c["images"].clone()).unwrap_or(Value::Null);
+    let base = crate::next_config::base_path(root);
+    json!({
+        "path": images["path"].as_str().map(String::from).unwrap_or_else(|| format!("{base}/_next/image")),
+        "deviceSizes": images["deviceSizes"],
+        "imageSizes": images["imageSizes"],
+        "unoptimized": images["unoptimized"],
+    })
+}
+
+pub fn head_start(root: &Path, stylesheet_tags: &str, target: &str) -> String {
     let import_map = serde_json::to_string(&crate::bundler::ClientTransformer::import_map("")).unwrap_or_else(|_| "{}".into());
-    let config = serde_json::to_string(&json!({ "mode": "web", "rsc": true, "origin": "" }))
+    let config = serde_json::to_string(&json!({ "mode": "web", "rsc": true, "origin": "", "basePath": crate::next_config::base_path(root) }))
         .unwrap_or_else(|_| "{}".into())
         .replace("</", "<\\/");
+    let images = serde_json::to_string(&images_client_config(root)).unwrap_or_else(|_| "{}".into()).replace("</", "<\\/");
     let backend = serde_json::to_string(&std::env::var("COM_BACKEND_URL").unwrap_or_default()).unwrap_or_default();
     let zmp = if target == "zalo" {
         format!("<script>{}</script>", crate::zmp::ZmpMockBridge::get_browser_mock_script())
@@ -163,7 +248,7 @@ pub fn head_start(stylesheet_tags: &str, target: &str) -> String {
     format!(
         "<meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
          <script type=\"importmap\">{import_map}</script>\
-         <script>window.__NATA_CONFIG__={config};window.__COM_BACKEND_URL__={backend};self.__nata_f=self.__nata_f||[];{WEBPACK_GLOBALS}</script>\
+         <script>window.__NATA_CONFIG__={config};window.__NATA_IMAGES__={images};window.__COM_BACKEND_URL__={backend};self.__nata_f=self.__nata_f||[];{WEBPACK_GLOBALS}</script>\
          {zmp}{stylesheet_tags}"
     )
 }
@@ -179,22 +264,38 @@ pub fn prewarm(root: &Path) {
     let root = root.to_path_buf();
     tokio::spawn(async move {
         let _ = ensure_flight_runtime(&root).await;
+        // next/og renders with Satori: install it when the app generates images
+        if project_mentions(&root, &["next/og", "ImageResponse"]) {
+            let _ = crate::deps::ensure_dev_packages(&root, &["satori"]).await;
+        }
     });
 }
 
-/// The Flight runtime must match the project's React version exactly
+/// Whether a source file of the app mentions one of `needles` (cheap scan of `app/` and `src/`)
+fn project_mentions(root: &Path, needles: &[&str]) -> bool {
+    ["app", "src"].iter().any(|dir| {
+        walkdir::WalkDir::new(root.join(dir))
+            .max_depth(12)
+            .into_iter()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().is_some_and(|x| matches!(x.to_str(), Some("ts" | "tsx" | "js" | "jsx"))))
+            .any(|e| std::fs::read_to_string(e.path()).is_ok_and(|text| needles.iter().any(|n| text.contains(n))))
+    })
+}
+
+/// The Flight runtime must match the project's React version exactly. Projects on an older React
+/// use the framework's React 19 (installed once per machine, see framework_react.rs).
 async fn ensure_flight_runtime(root: &Path) -> Result<(), String> {
     let cell = FLIGHT_DEPS_READY.get_or_init(tokio::sync::OnceCell::new);
     let ok = *cell
         .get_or_init(|| async {
+            if crate::framework_react::needed(root) {
+                return crate::framework_react::ensure(root).await;
+            }
             let react = match crate::deps::ensure_installed(root, "react").await {
                 Some(v) => v,
                 None => return false,
             };
-            // React 18 has no Flight runtime to install (the engine falls back at startup)
-            if !react.starts_with(|c: char| c.is_ascii_digit()) || react.split('.').next().and_then(|m| m.parse::<u64>().ok()).is_some_and(|m| m < 19) {
-                return false;
-            }
             if crate::deps::ensure_installed(root, "react-dom").await.is_none() {
                 return false;
             }
@@ -238,10 +339,11 @@ pub async fn handle(root: &Path, target: &str, stylesheet_tags: &str, req: PageR
         return error_page(StatusCode::INTERNAL_SERVER_ERROR, &message);
     }
     let _ = crate::worker_pool::write_runtime_files(&root);
-    let runtime = crate::module_graph::for_root(&root)
-        .read()
-        .unwrap_or_else(|e| e.into_inner())
-        .specifier(&root.join(".nata/rsc_runtime.ts"), Layer::Rsc);
+    let (runtime, ssr_runtime) = {
+        let graph = crate::module_graph::for_root(&root);
+        let graph = graph.read().unwrap_or_else(|e| e.into_inner());
+        (graph.specifier(&root.join(".nata/rsc_runtime.ts"), Layer::Rsc), graph.specifier(&root.join(".nata/rsc_ssr.ts"), Layer::Ssr))
+    };
 
     let route = route_input(&root, &req);
     let (cmd, mode, action_id, content_type, body) = match req.mode {
@@ -251,16 +353,27 @@ pub async fn handle(root: &Path, target: &str, stylesheet_tags: &str, req: PageR
     };
     let input = json!({
         "runtime": runtime,
+        "ssrRuntime": ssr_runtime,
         "mode": mode,
         "route": route,
-        "headStart": head_start(stylesheet_tags, target),
+        "headStart": head_start(&root, stylesheet_tags, target),
+        "images": images_client_config(&root),
+        "basePath": crate::next_config::base_path(&root),
         "bootstrap": ROUTER_URL,
         "cookies": req.cookies,
+        "headers": req.headers,
         "actionId": action_id,
         "contentType": content_type,
     });
 
-    let mut stream = match crate::worker_pool::call_stream(&root, cmd, input, body).await {
+    stream_response(&root, cmd, input, body).await
+}
+
+/// Runs a streamed worker command (`rsc`, `action`, `route`) and turns it into an HTTP response: the
+/// first chunk carries status and headers (a header may be a list, e.g. several `set-cookie`), the
+/// following chunks are the body
+pub async fn stream_response(root: &Path, cmd: &str, input: Value, body: Vec<u8>) -> Response {
+    let mut stream = match crate::worker_pool::call_stream(root, cmd, input, body).await {
         Ok(stream) => stream,
         Err(WorkerError::Unavailable(e)) | Err(WorkerError::Failed(e)) => {
             return error_page(StatusCode::INTERNAL_SERVER_ERROR, &format!("The server worker is unavailable: {e}"))
@@ -281,14 +394,25 @@ pub async fn handle(root: &Path, target: &str, stylesheet_tags: &str, req: PageR
 
     let status = head["status"].as_u64().and_then(|s| StatusCode::from_u16(s as u16).ok()).unwrap_or(StatusCode::OK);
     let mut builder = Response::builder().status(status);
+    let mut has_cache_control = false;
     if let Some(headers) = head["headers"].as_object() {
         for (k, v) in headers {
-            if let (Ok(name), Some(Ok(value))) = (header::HeaderName::from_bytes(k.as_bytes()), v.as_str().map(HeaderValue::from_str)) {
-                builder = builder.header(name, value);
+            let Ok(name) = header::HeaderName::from_bytes(k.as_bytes()) else { continue };
+            has_cache_control |= name == header::CACHE_CONTROL;
+            let values: Vec<&str> = match v {
+                Value::Array(list) => list.iter().filter_map(|x| x.as_str()).collect(),
+                other => other.as_str().into_iter().collect(),
+            };
+            for value in values {
+                if let Ok(value) = HeaderValue::from_str(value) {
+                    builder = builder.header(name.clone(), value);
+                }
             }
         }
     }
-    builder = builder.header(header::CACHE_CONTROL, "no-store, must-revalidate");
+    if !has_cache_control {
+        builder = builder.header(header::CACHE_CONTROL, "no-store, must-revalidate");
+    }
 
     let body_stream = futures_util::stream::unfold(stream, |mut stream| async move {
         loop {
@@ -324,9 +448,22 @@ pub fn client_reference_specifier(root: &Path, id: &str) -> Result<String, Strin
         return Ok(graph.specifier(&file, Layer::Ssr));
     }
     if clean == "/_nata/rsc/boundaries.js" {
-        return Ok(root.join(".nata/rsc_boundaries.js").to_string_lossy().replace('\\', "/"));
+        // The instance rsc_ssr.ts imports (both are loaded in the SSR layer)
+        let file = root.canonicalize().unwrap_or_else(|_| root.to_path_buf()).join(".nata/rsc_boundaries.js");
+        let graph = crate::module_graph::for_root(root);
+        return Ok(graph.read().unwrap_or_else(|e| e.into_inner()).specifier(&file, Layer::Ssr));
     }
     if let Some(spec) = clean.strip_prefix("/_nata/deps/").or_else(|| clean.strip_prefix("/_nata/shims/")) {
+        // Packages load natively in the SSR layer, unless React comes from the framework: then they
+        // load through the engine, which resolves `react` to it. Framework shims are files in .nata.
+        if clean.starts_with("/_nata/shims/") || crate::framework_react::active_modules_dir(root).is_some() {
+            let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+            let resolved = crate::resolver::oxc::resolvers(&root)
+                .resolve(Layer::Ssr, &root.join("package.json"), spec)
+                .ok_or_else(|| format!("cannot resolve {spec}"))?;
+            let graph = crate::module_graph::for_root(&root);
+            return Ok(graph.read().unwrap_or_else(|e| e.into_inner()).specifier(&resolved.path, Layer::Ssr));
+        }
         return Ok(spec.to_string());
     }
     Err(format!("unknown client reference: {clean}"))
