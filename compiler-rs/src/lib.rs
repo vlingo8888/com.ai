@@ -1,5 +1,9 @@
 pub mod bundler;
+pub mod client;
+pub mod compile_cache;
 pub mod css_compiler;
+pub mod deps;
+pub mod dev_log;
 pub mod metadata;
 pub mod resolver;
 pub mod route_handler;
@@ -8,5 +12,7 @@ pub mod rpc;
 pub mod server;
 pub mod ssr;
 pub mod swc_compiler;
+pub mod term;
 pub mod watcher;
+pub mod worker_pool;
 pub mod zmp;

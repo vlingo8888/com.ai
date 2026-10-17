@@ -1,24 +1,68 @@
 {
   "name": "@com.ai.vn/cli",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Com.AI.VN Command Line Interface & High-Performance Rust Compiler Engine",
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
+  "files": [
+    "bin/cli.ts",
+    "bin/com.js",
+    "src",
+    "compiler-rs/src",
+    "compiler-rs/Cargo.toml",
+    "compiler-rs/Cargo.lock",
+    "compiler-rs/README.md",
+    "README.md",
+    "package.json",
+    "tsconfig.json"
+  ],
   "bin": {
-    "com": "./bin/cli.ts",
-    "cai": "./bin/cli.ts",
-    "aivn": "./bin/cli.ts",
-    "create-com-app": "./bin/cli.ts"
+    "com": "./bin/com.js",
+    "cai": "./bin/com.js",
+    "aivn": "./bin/com.js",
+    "create-com-app": "./bin/com.js"
   },
   "scripts": {
     "start": "bun ./bin/cli.ts",
     "test": "bun test",
     "build:rust": "cd compiler-rs && cargo build --release",
     "build:cli": "bun build --compile --minify ./bin/cli.ts --outfile com",
-    "build": "bun run build:rust && bun run build:cli"
+    "build": "bun run build:binaries",
+    "release": "bun ./scripts/publish-npm.ts",
+    "publish:npm": "bun ./scripts/publish-npm.ts",
+    "npm:pub": "npm publish --access public",
+    "build:platform-packages": "bun ./scripts/build-platform-packages.ts",
+    "build:binaries": "bun ./scripts/build-binaries.ts",
+    "build:local": "bun run build:rust && bun run build:cli",
+    "compat": "bun tests/compat/run.ts",
+    "bench": "bun scripts/bench.ts"
   },
+  "keywords": [
+    "com",
+    "ai",
+    "framework",
+    "cli",
+    "nextjs",
+    "app-router",
+    "rust",
+    "compiler",
+    "bun",
+    "pglite"
+  ],
   "dependencies": {
     "@pglite/core": "^1.0.0",
     "@types/qrcode-terminal": "^0.12.2",
+    "bun": "1.4.2",
     "qrcode-terminal": "^0.12.0"
+  },
+  "optionalDependencies": {
+    "@com.ai.vn/compiler-darwin-arm64": "1.0.2",
+    "@com.ai.vn/compiler-darwin-x64": "1.0.2",
+    "@com.ai.vn/compiler-linux-x64": "1.0.2",
+    "@com.ai.vn/compiler-linux-arm64": "1.0.2",
+    "@com.ai.vn/compiler-win32-x64": "1.0.2"
   },
   "devDependencies": {
     "@types/bun": "latest",

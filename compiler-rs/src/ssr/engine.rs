@@ -16,38 +16,37 @@ impl SsrEngine {
 
         match SsrWorker::execute(root, &request).await {
             Ok(output) => {
-                if output.mode == SsrMode::Full && !output.html.is_empty() {
-                    println!(
-                        "  \x1b[1;32m⚡ [SSR]\x1b[0m \x1b[1;36m{}\x1b[0m rendered in \x1b[1;33m{:.2}ms\x1b[0m",
-                        path, output.render_time_ms
-                    );
-                } else if let Some(ref err) = output.error {
-                    println!(
-                        "  \x1b[1;33m▲ [SSR Fallback -> CSR]\x1b[0m \x1b[1;36m{}\x1b[0m ({}ms): {}",
-                        path, output.render_time_ms, err
-                    );
+                // Successful renders are covered by the request log line (` GET /path 200 in Xms`)
+                if output.mode != SsrMode::Full || output.html.is_empty() {
+                    if let Some(ref err) = output.error {
+                        report_client_fallback(&path, &request, err);
+                    }
                 }
                 output
             }
             Err(err) => {
-                println!(
-                    "  \x1b[1;31m✖ [SSR Error -> Fallback CSR]\x1b[0m \x1b[1;36m{}\x1b[0m: {}",
-                    path, err
-                );
+                report_client_fallback(&path, &request, &err);
                 SsrOutput {
-                    html: String::new(),
-                    initial_state: serde_json::json!({ "params": request.params, "searchParams": request.search_params }),
-                    title: None,
-                    metadata: None,
-                    head_tags: None,
-                    set_cookies: Vec::new(),
-                    status_code: 200,
-                    redirect_url: None,
-                    render_time_ms: 0.0,
-                    mode: SsrMode::ClientOnly,
                     error: Some(err),
+                    ..SsrOutput::client_only(&request)
                 }
             }
         }
+    }
+}
+
+/// Missing React and async pages are known limitations reported once per page; errors thrown by user code are
+/// printed on every request, like Next.js does for server render errors.
+fn report_client_fallback(path: &str, request: &SsrRequest, err: &str) {
+    if err.contains("could not be loaded for SSR") {
+        let key = format!("{}|{}", request.page_file.display(), err);
+        crate::term::warn_once(&key, &format!("Rendered {} on the client: {}", path, err));
+    } else if err.contains("suspended while responding to synchronous input") || err.contains("NATA_ASYNC_SERVER_COMPONENT") {
+        // An `async` page/layout: rendering it on the server needs streaming SSR + Server Components
+        // (roadmap P1); until then the client renders it and fetches its data through Server Actions
+        let key = format!("{}|async", request.page_file.display());
+        crate::term::warn_once(&key, &format!("Rendered {} on the client: async Server Components are not server-rendered yet", path));
+    } else {
+        crate::term::error(&format!("Error rendering {} on the server (falling back to client rendering)", path), Some(err), None);
     }
 }

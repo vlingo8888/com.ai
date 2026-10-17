@@ -174,13 +174,14 @@ export async function loginCommand(options: LoginOptions = {}) {
 
       // Automatically launch default system browser
       try {
-        const openCmd =
+        // `start` is a cmd.exe builtin, not an executable; the empty "" is the window title
+        const openArgs =
           process.platform === "darwin"
-            ? "open"
+            ? ["open", targetLoginUrl]
             : process.platform === "win32"
-            ? "start"
-            : "xdg-open";
-        Bun.spawn([openCmd, targetLoginUrl]);
+            ? ["cmd", "/c", "start", "", targetLoginUrl]
+            : ["xdg-open", targetLoginUrl];
+        Bun.spawn(openArgs);
       } catch {
         logger.info("If the browser does not open automatically, click the URL above.");
       }

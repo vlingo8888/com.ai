@@ -16,7 +16,7 @@ use crate::{
     bundler::ClientTransformer,
     router::AppRouter,
     rpc::{RpcExecutor, RpcPayload},
-    ssr::{SsrEngine, SsrRequest},
+    ssr::{SsrEngine, SsrOutput, SsrRequest},
 };
 
 #[derive(Clone)]
@@ -26,6 +26,39 @@ pub struct AppState {
     pub hmr_tx: broadcast::Sender<String>,
     pub target: String,
     pub query_logs: Arc<RwLock<VecDeque<serde_json::Value>>>,
+    pub hmr_version: Arc<RwLock<HmrVersion>>,
+}
+
+/// Last file-change event, polled via `/_nata/hmr_version` by clients whose tunnel drops WebSockets
+#[derive(Default, Clone, serde::Serialize)]
+pub struct HmrVersion {
+    pub version: u64,
+    pub last_type: Option<String>,
+    pub last_file: Option<String>,
+}
+
+/// Mirrors watcher events (not query logs) from the HMR broadcast into `HmrVersion`
+fn spawn_hmr_version_tracker(hmr_tx: &broadcast::Sender<String>, hmr_version: Arc<RwLock<HmrVersion>>) {
+    let mut rx = hmr_tx.subscribe();
+    tokio::spawn(async move {
+        loop {
+            match rx.recv().await {
+                Ok(msg) => {
+                    let Ok(event) = serde_json::from_str::<serde_json::Value>(&msg) else { continue };
+                    let event_type = event.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                    if event_type != "reload" && event_type != "RELOAD" && event_type != "css" {
+                        continue;
+                    }
+                    let mut v = hmr_version.write().await;
+                    v.version += 1;
+                    v.last_type = Some(event_type.to_string());
+                    v.last_file = event.get("file").and_then(|f| f.as_str()).map(|f| f.to_string());
+                }
+                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    });
 }
 
 pub struct DevServer;
@@ -35,6 +68,8 @@ impl DevServer {
         let root_dir = root_dir.canonicalize().unwrap_or(root_dir);
         // Pre-create .nata runtime and shim files
         RpcExecutor::ensure_runtime_env(&root_dir);
+        // Start the Bun worker now so the first render / Server Action does not pay its startup
+        crate::worker_pool::prewarm(&crate::rpc::dunce_canonicalize(&root_dir));
 
         if target == "zalo" {
             let _ = crate::zmp::ZmpConfigGenerator::ensure_app_config(&root_dir);
@@ -44,6 +79,8 @@ impl DevServer {
         let router = Arc::new(tokio::sync::RwLock::new(AppRouter::scan(&root_dir)));
         let (hmr_tx, _) = broadcast::channel::<String>(100);
         let query_logs = Arc::new(RwLock::new(VecDeque::with_capacity(500)));
+        let hmr_version = Arc::new(RwLock::new(HmrVersion::default()));
+        spawn_hmr_version_tracker(&hmr_tx, hmr_version.clone());
 
         // Start native file system watcher for live HMR & CSS hot reload
         crate::watcher::ProjectWatcher::start(&root_dir, hmr_tx.clone(), router.clone());
@@ -54,10 +91,16 @@ impl DevServer {
             hmr_tx: hmr_tx.clone(),
             target: target.clone(),
             query_logs: query_logs.clone(),
+            hmr_version: hmr_version.clone(),
         };
 
         let app = Router::new()
             .route("/_hmr", get(ws_hmr_handler))
+            .route("/_nata/hmr_version", get(hmr_version_handler))
+            .route("/_nata/client.js", get(client_runtime_handler))
+            .route("/_nata/overlay.js", get(overlay_handler))
+            .route("/_nata/deps/{*spec}", get(deps_handler))
+            .route("/_nata/css/{*path}", get(css_module_handler))
             .route("/favicon.ico", get(favicon_handler))
             .route("/robots.txt", get(robots_handler))
             .route("/sitemap.xml", get(sitemap_handler))
@@ -82,6 +125,7 @@ impl DevServer {
             .route("/assets/app.js", get(zmp_js_handler))
             .route("/src/app.js", get(zmp_js_handler))
             .fallback(app_router_fallback_handler)
+            .layer(axum::middleware::from_fn(log_request))
             .layer(CorsLayer::permissive())
             .with_state(state);
 
@@ -91,7 +135,7 @@ impl DevServer {
             match tokio::net::TcpListener::bind(format!("0.0.0.0:{}", port)).await {
                 Ok(l) => {
                     if port != initial_port {
-                        println!("  \x1b[33m▲ Port {} is in use, automatically switched to port {}\x1b[0m", initial_port, port);
+                        crate::term::warn(&format!("Port {} is in use, using {} instead", initial_port, port));
                     }
                     break l;
                 }
@@ -109,13 +153,32 @@ impl DevServer {
         let _ = (db_status_title, db_status_detail);
 
         if std::env::var("COM_MANAGED").is_err() {
-            println!("   \x1b[90m-\x1b[0m Local:    \x1b[36mhttp://localhost:{}\x1b[0m", port);
-            println!("\n \x1b[32m✓\x1b[0m Ready\n");
+            println!("   - Local:        http://localhost:{}\n", port);
         }
+        crate::term::ready();
 
         axum::serve(listener, app).await?;
         Ok(())
     }
+}
+
+/// Page and API requests only, like Next.js: dev internals, bundles and static files stay quiet
+fn is_loggable_request(path: &str) -> bool {
+    const INTERNAL: &[&str] = &["/_hmr", "/_nata/", "/_bundle/", "/assets/", "/src/app.js"];
+    let last_segment = path.rsplit('/').next().unwrap_or("");
+    !INTERNAL.iter().any(|p| path.starts_with(p)) && !last_segment.contains('.') && !path.contains('@')
+}
+
+async fn log_request(req: axum::extract::Request, next: axum::middleware::Next) -> axum::response::Response {
+    let path = req.uri().path().to_string();
+    if !is_loggable_request(&path) {
+        return next.run(req).await;
+    }
+    let method = req.method().to_string();
+    let started = std::time::Instant::now();
+    let response = next.run(req).await;
+    crate::term::request(&method, &path, response.status().as_u16(), started.elapsed().as_secs_f64() * 1000.0);
+    response
 }
 
 fn detect_database_env(root_dir: &std::path::Path) -> (String, String) {
@@ -167,9 +230,89 @@ async fn ws_hmr_handler(
 
 async fn handle_hmr_socket(mut socket: WebSocket, hmr_tx: broadcast::Sender<String>) {
     let mut rx = hmr_tx.subscribe();
-    while let Ok(msg) = rx.recv().await {
-        if socket.send(Message::Text(msg.into())).await.is_err() {
-            break;
+    loop {
+        match rx.recv().await {
+            Ok(msg) => {
+                if socket.send(Message::Text(msg.into())).await.is_err() {
+                    break;
+                }
+            }
+            Err(broadcast::error::RecvError::Lagged(_)) => continue,
+            Err(broadcast::error::RecvError::Closed) => break,
+        }
+    }
+}
+
+async fn hmr_version_handler(State(state): State<AppState>) -> impl IntoResponse {
+    let mut headers = HeaderMap::new();
+    headers.insert(header::CACHE_CONTROL, "no-store".parse().unwrap());
+    let snapshot = state.hmr_version.read().await.clone();
+    (StatusCode::OK, headers, Json(snapshot)).into_response()
+}
+
+fn javascript_response(body: &'static str) -> axum::response::Response {
+    let mut headers = HeaderMap::new();
+    headers.insert(header::CONTENT_TYPE, "application/javascript; charset=utf-8".parse().unwrap());
+    headers.insert(header::CACHE_CONTROL, "no-cache".parse().unwrap());
+    (StatusCode::OK, headers, body).into_response()
+}
+
+async fn client_runtime_handler() -> impl IntoResponse {
+    javascript_response(crate::client::CLIENT_RUNTIME_JS)
+}
+
+async fn overlay_handler() -> impl IntoResponse {
+    javascript_response(crate::client::DEV_OVERLAY_JS)
+}
+
+/// A CSS file imported by a component, as a JS module (see `stylesheet::css_module_js`)
+async fn css_module_handler(State(state): State<AppState>, Path(path): Path<String>) -> impl IntoResponse {
+    let mut headers = HeaderMap::new();
+    headers.insert(header::CONTENT_TYPE, "application/javascript; charset=utf-8".parse().unwrap());
+    headers.insert(header::CACHE_CONTROL, "no-cache".parse().unwrap());
+    let rel = path.trim_start_matches('/');
+    match crate::css_compiler::stylesheet::css_module_js(&state.root_dir, rel) {
+        Ok(js) => (StatusCode::OK, headers, js).into_response(),
+        Err(message) => {
+            crate::term::error(&format!("Could not load ./{rel}"), Some(&message), None);
+            let js = format!(
+                "const __e = new Error({});\nif (window.__NATA_REPORT_ISSUE__) window.__NATA_REPORT_ISSUE__(__e, \"runtime\");\nexport default {{}};\n",
+                serde_json::to_string(&message).unwrap_or_default()
+            );
+            (StatusCode::OK, headers, js).into_response()
+        }
+    }
+}
+
+/// Browser build of an npm dependency (see `deps.rs`); revalidated with an ETag naming its version
+async fn deps_handler(State(state): State<AppState>, Path(spec): Path<String>, req_headers: HeaderMap) -> impl IntoResponse {
+    let spec = spec.trim_start_matches('/').trim_end_matches(".js");
+    match crate::deps::resolve(&state.root_dir, spec).await {
+        crate::deps::DepResult::Module { code, etag } => {
+            let mut headers = HeaderMap::new();
+            headers.insert(header::CONTENT_TYPE, "application/javascript; charset=utf-8".parse().unwrap());
+            headers.insert(header::CACHE_CONTROL, "no-cache".parse().unwrap());
+            if let Ok(value) = HeaderValue::from_str(&etag) {
+                headers.insert(header::ETAG, value);
+            }
+            let not_modified = req_headers.get(header::IF_NONE_MATCH).and_then(|v| v.to_str().ok()) == Some(etag.as_str());
+            if not_modified {
+                return (StatusCode::NOT_MODIFIED, headers).into_response();
+            }
+            (StatusCode::OK, headers, code).into_response()
+        }
+        crate::deps::DepResult::Fallback(url) => axum::response::Redirect::temporary(&url).into_response(),
+        crate::deps::DepResult::Error(message) => {
+            crate::term::error(&format!("Could not prepare dependency {spec}"), Some(&message), None);
+            // A module that reports through the dev overlay instead of an opaque network error
+            let payload = serde_json::json!({ "message": message });
+            let js = format!(
+                "const __e = new Error({}.message);\nif (window.__NATA_REPORT_ISSUE__) window.__NATA_REPORT_ISSUE__(__e, \"runtime\");\nthrow __e;\n",
+                payload
+            );
+            let mut headers = HeaderMap::new();
+            headers.insert(header::CONTENT_TYPE, "application/javascript; charset=utf-8".parse().unwrap());
+            (StatusCode::OK, headers, js).into_response()
         }
     }
 }
@@ -300,7 +443,7 @@ async fn rpc_handler(
             });
             let _ = state.hmr_tx.send(ws_event.to_string());
 
-            eprintln!("  \x1b[1;31m✖ [RPC Error: {}::{}]\x1b[0m {}", mod_name, action_name, err);
+            // The failure itself was already printed by the RPC log block (`dev_log::render_rpc`)
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({ "error": err })),
@@ -369,6 +512,16 @@ fn escape_cookie_val(s: &str) -> String {
     s.replace(';', "%3B").replace(',', "%2C").replace(' ', "%20").replace('=', "%3D")
 }
 
+/// Root layout used to wrap the global not-found page (both SSR fallback and client navigation)
+fn root_layout_files(router: &AppRouter) -> Vec<PathBuf> {
+    router
+        .routes
+        .first()
+        .and_then(|r| r.layout_files.first().cloned())
+        .into_iter()
+        .collect()
+}
+
 async fn route_info_handler(
     State(state): State<AppState>,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
@@ -381,48 +534,14 @@ async fn route_info_handler(
     headers.insert(header::CACHE_CONTROL, "no-cache".parse().unwrap());
 
     if let Some((route, route_params)) = router_guard.match_route(&path) {
-        let page_file = route.page_file.to_string_lossy().replace('\\', "/");
-        let layout_files: Vec<String> = route
-            .layout_files
-            .iter()
-            .map(|p| p.to_string_lossy().replace('\\', "/"))
-            .collect();
-
-        let segments_files_clean: Vec<serde_json::Value> = route
-            .segments_files
-            .iter()
-            .map(|s| {
-                let clean_opt = |opt: &Option<std::path::PathBuf>| -> serde_json::Value {
-                    match opt {
-                        Some(p) => serde_json::Value::String(p.to_string_lossy().replace('\\', "/")),
-                        None => serde_json::Value::Null,
-                    }
-                };
-                serde_json::json!({
-                    "folder": s.folder.to_string_lossy().replace('\\', "/"),
-                    "layout": clean_opt(&s.layout),
-                    "template": clean_opt(&s.template),
-                    "error": clean_opt(&s.error),
-                    "loading": clean_opt(&s.loading),
-                    "not_found": clean_opt(&s.not_found),
-                })
-            })
-            .collect();
-        let global_error = route.global_error_file.as_ref().map(|p| p.to_string_lossy().replace('\\', "/"));
-
-        (
-            StatusCode::OK,
-            headers,
-            Json(serde_json::json!({
-                "found": true,
-                "page_file": page_file,
-                "layout_files": layout_files,
-                "segments_files": segments_files_clean,
-                "global_error_file": global_error,
-                "params": route_params
-            })),
-        )
-            .into_response()
+        let info = ClientTransformer::route_info_json(
+            &route.page_file,
+            &route.layout_files,
+            &route.segments_files,
+            route.global_error_file.as_ref(),
+            &route.params_json(&route_params),
+        );
+        (StatusCode::OK, headers, Json(info)).into_response()
     } else {
         let not_found_file = router_guard
             .routes
@@ -442,6 +561,7 @@ async fn route_info_handler(
             Json(serde_json::json!({
                 "found": false,
                 "not_found_file": not_found_file,
+                "layout_files": root_layout_files(&router_guard),
                 "error": err_msg
             })),
         )
@@ -452,7 +572,8 @@ async fn route_info_handler(
 async fn styles_handler(
     State(state): State<AppState>,
 ) -> impl IntoResponse {
-    let css = crate::css_compiler::CssCompiler::compile_workspace(&state.root_dir);
+    // Compiled Tailwind stylesheet; with the browser fallback, the raw CSS for `text/tailwindcss`
+    let css = crate::css_compiler::stylesheet::project_stylesheet(&state.root_dir).await.style_content();
     let mut headers = HeaderMap::new();
     headers.insert(
         header::CONTENT_TYPE,
@@ -693,8 +814,8 @@ async fn zmp_css_handler(State(state): State<AppState>) -> impl IntoResponse {
     }
 
     // Otherwise serve compiled custom CSS (Tailwind / globals.css)
-    let custom_css = crate::css_compiler::CssCompiler::find_and_load_custom_css(&state.root_dir);
-    (StatusCode::OK, headers, custom_css).into_response()
+    let stylesheet = crate::css_compiler::stylesheet::project_stylesheet(&state.root_dir).await;
+    (StatusCode::OK, headers, stylesheet.css().to_string()).into_response()
 }
 
 async fn zmp_js_handler(State(state): State<AppState>) -> impl IntoResponse {
@@ -712,11 +833,17 @@ async fn zmp_js_handler(State(state): State<AppState>) -> impl IntoResponse {
         }
     }
 
-    // 2. Otherwise serve universal Zalo Mini App Native DOM Renderer
-    let bootstrap_js = r###"// Com.AI.VN Zalo Mini App Native DOM Runtime
-(function() {
-  console.log("[Com.AI.VN] Initializing Zalo Mini App Native DOM Runtime...");
+    // 2. Otherwise serve the bootstrap that loads the shared client runtime in Zalo (memory router) mode
+    let backend_url = std::env::var("COM_BACKEND_URL").unwrap_or_default();
+    let compiled_css = crate::css_compiler::stylesheet::project_stylesheet(&state.root_dir).await.is_compiled();
+    (StatusCode::OK, headers, zmp_bootstrap_js(&backend_url, !compiled_css)).into_response()
+}
 
+/// Classic script loaded by the Zalo container (via `hr.config.json`). The container owns the HTML page,
+/// so this injects the import map, styles and dev tooling, then boots `/_nata/client.js` client-only.
+fn zmp_bootstrap_js(backend_url: &str, tailwind_in_browser: bool) -> String {
+    let bootstrap_js = r###"// Com.AI.VN Zalo Mini App bootstrap (client-side rendering only)
+(function() {
   // 1. Resolve Server Origin accurately from script tag URL
   var currentScript = document.currentScript || document.querySelector('script[src*="app.js"]');
   var scriptOrigin = currentScript ? new URL(currentScript.src, window.location.href).origin : "";
@@ -760,6 +887,8 @@ async fn zmp_js_handler(State(state): State<AppState>) -> impl IntoResponse {
     erudaScript.onload = function() {
       if (window.eruda) {
         window.eruda.init({ tool: ["console", "network", "elements", "resources", "info"] });
+        // Eruda replaces window.fetch; re-wrap it so the overlay still attributes network errors
+        if (typeof window.__NATA_INSTRUMENT_FETCH__ === "function") window.__NATA_INSTRUMENT_FETCH__();
         console.log("[ZaloMiniApp] Eruda Mobile Console ready on device");
       }
     };
@@ -803,228 +932,38 @@ async fn zmp_js_handler(State(state): State<AppState>) -> impl IntoResponse {
     document.head.appendChild(safeAreaStyle);
   }
 
-  // 6. Inject Tailwind Browser Engine
-  if (!document.getElementById("_zmp_tailwind")) {
+  // 6. Tailwind browser engine, only when the stylesheet could not be compiled on the server
+  if (__COM_TAILWIND_BROWSER__ && !document.getElementById("_zmp_tailwind")) {
     var tw = document.createElement("script");
     tw.id = "_zmp_tailwind";
     tw.src = "https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4";
     document.head.appendChild(tw);
   }
 
-  // 7. Inject Import Map before module resolution
+  // 7. Inject Import Map before any module is resolved
   if (!document.querySelector('script[type="importmap"]')) {
     var im = document.createElement("script");
     im.type = "importmap";
-    im.textContent = JSON.stringify({
-      imports: {
-        "react": "https://esm.sh/react@18.3.1",
-        "react/jsx-runtime": "https://esm.sh/react@18.3.1/jsx-runtime",
-        "react-dom": "https://esm.sh/react-dom@18.3.1?external=react",
-        "react-dom/client": "https://esm.sh/react-dom@18.3.1/client?external=react",
-        "next/link": serverOrigin + "/_nata/shims/next/link",
-        "next/image": serverOrigin + "/_nata/shims/next/image",
-        "next/navigation": serverOrigin + "/_nata/shims/next/navigation",
-        "next/router": serverOrigin + "/_nata/shims/next/router",
-        "next/head": serverOrigin + "/_nata/shims/next/head",
-        "next/headers": serverOrigin + "/_nata/shims/next/headers",
-        "next-intl/server": serverOrigin + "/_nata/shims/next-intl/server",
-        "next-intl": "https://esm.sh/next-intl@4.14.9?external=react,react-dom",
-        "lucide-react": "https://esm.sh/lucide-react@0.460.0?external=react,react-dom",
-        "framer-motion": "https://esm.sh/framer-motion@11.11.17?external=react,react-dom",
-        "clsx": "https://esm.sh/clsx@2.1.1",
-        "tailwind-merge": "https://esm.sh/tailwind-merge@2.5.4",
-        "axios": "https://esm.sh/axios@1.7.7",
-        "date-fns": "https://esm.sh/date-fns@4.1.0",
-        "canvas-confetti": "https://esm.sh/canvas-confetti@1.9.4",
-        "@tanstack/react-query": "https://esm.sh/@tanstack/react-query@5.59.0?external=react,react-dom",
-        "@tanstack/react-table": "https://esm.sh/@tanstack/react-table@8.20.5?external=react,react-dom",
-        "zustand": "https://esm.sh/zustand@5.0.0?external=react,react-dom",
-        "jotai": "https://esm.sh/jotai@2.10.1?external=react,react-dom",
-        "swr": "https://esm.sh/swr@2.2.5?external=react,react-dom",
-        "zod": "https://esm.sh/zod@3.23.8",
-        "react-hook-form": "https://esm.sh/react-hook-form@7.53.0?external=react,react-dom",
-        "@hookform/resolvers": "https://esm.sh/@hookform/resolvers@3.9.0?external=react,react-dom",
-        "@hookform/resolvers/zod": "https://esm.sh/@hookform/resolvers@3.9.0/zod?external=react,react-dom,zod",
-        "sonner": "https://esm.sh/sonner@1.5.0?external=react,react-dom",
-        "react-hot-toast": "https://esm.sh/react-hot-toast@2.4.1?external=react,react-dom",
-        "next-themes": "https://esm.sh/next-themes@0.3.0?external=react,react-dom"
-      }
-    });
+    im.textContent = JSON.stringify(__COM_IMPORT_MAP_PLACEHOLDER__);
     document.head.appendChild(im);
   }
 
-  // 8. Native DOM Mounting & Hydration
-  async function bootApp() {
-    var container = document.getElementById("app") || document.getElementById("root");
-    if (!container) {
-      container = document.createElement("div");
+  // 8. Boot the shared App Router runtime in client-only Zalo mode
+  function bootApp() {
+    if (!document.getElementById("app") && !document.getElementById("root")) {
+      var container = document.createElement("div");
       container.id = "app";
       document.body.appendChild(container);
     }
-    container.style.cssText = "min-height:100vh;width:100%;display:flex;flex-direction:column;box-sizing:border-box;";
-
-    try {
-      // Import React and ReactDOM Client
-      var ReactMod = await import("https://esm.sh/react@18.3.1");
-      var React = ReactMod.default || ReactMod;
-      window.React = React;
-
-      var ReactDOMClient = await import("https://esm.sh/react-dom@18.3.1/client?external=react");
-      var ReactDOM = ReactDOMClient.default || ReactDOMClient;
-      window.ReactDOM = ReactDOM;
-
-      // Module loading cache
-      var moduleCache = new Map();
-      async function loadModule(specifier) {
-        var clean = specifier.trim();
-        if (clean.startsWith("/_bundle/")) clean = clean.slice(9);
-        var normKey = clean.replace(/^\/+/, "").split("?")[0];
-        if (moduleCache.has(normKey)) return moduleCache.get(normKey);
-
-        var targetUrl = serverOrigin + "/_bundle/" + normKey;
-        var mod = await import(targetUrl);
-        moduleCache.set(normKey, mod);
-        return mod;
-      }
-
-      function unwrapHtmlBody(node) {
-        if (!node) return node;
-        if (Array.isArray(node)) {
-          var unwrapped = node.map(unwrapHtmlBody).filter(Boolean);
-          if (unwrapped.length === 0) return null;
-          if (unwrapped.length === 1) return unwrapped[0];
-          return React.createElement(React.Fragment, null, ...unwrapped);
-        }
-        if (React.isValidElement(node)) {
-          var type = node.type;
-          var props = node.props || {};
-          if (type === "html" || (typeof type === "string" && type.toLowerCase() === "html")) {
-            return unwrapHtmlBody(props.children);
-          }
-          if (type === "body" || (typeof type === "string" && type.toLowerCase() === "body")) {
-            return unwrapHtmlBody(props.children);
-          }
-          if (type === "head" || (typeof type === "string" && type.toLowerCase() === "head")) {
-            return null;
-          }
-          return node;
-        }
-        return node;
-      }
-
-      function makeComponent(Comp) {
-        if (!Comp) return () => null;
-        var isAsync = Comp.constructor && (Comp.constructor.name === "AsyncFunction" || Comp[Symbol.toStringTag] === "AsyncFunction");
-        return function DynamicComponentWrapper(props) {
-          var safeProps = props || {};
-          if (isAsync) {
-            var [content, setContent] = React.useState(null);
-            var [err, setErr] = React.useState(null);
-            React.useEffect(() => {
-              var active = true;
-              Promise.resolve(Comp(safeProps)).then(res => {
-                if (active) setContent(unwrapHtmlBody(res));
-              }).catch(e => {
-                if (active) setErr(e);
-              });
-              return () => { active = false; };
-            }, [safeProps.children]);
-            if (err) throw err;
-            return content;
-          }
-          try {
-            var res = Comp(safeProps);
-            if (res instanceof Promise) {
-              var [pContent, setPContent] = React.useState(null);
-              var [pErr, setPErr] = React.useState(null);
-              React.useEffect(() => {
-                var pActive = true;
-                res.then(r => { if (pActive) setPContent(unwrapHtmlBody(r)); }).catch(e => { if (pActive) setPErr(e); });
-                return () => { pActive = false; };
-              }, []);
-              if (pErr) throw pErr;
-              return pContent;
-            }
-            return unwrapHtmlBody(res);
-          } catch(e) {
-            throw e;
-          }
-        };
-      }
-
-      var currentRoot = null;
-      async function renderNativeRoute(pageFile, layoutFiles, params) {
-        window.__NATA_PARAMS__ = params || {};
-        var pageMod = await loadModule(pageFile);
-        var Page = pageMod.default || Object.values(pageMod).find(v => typeof v === "function");
-        if (!Page) throw new Error("No React component found in " + pageFile);
-
-        var RootComponent = makeComponent(Page);
-
-        for (var i = (layoutFiles || []).length - 1; i >= 0; i--) {
-          try {
-            var layoutMod = await loadModule(layoutFiles[i]);
-            var Layout = layoutMod.default || Object.values(layoutMod).find(v => typeof v === "function");
-            if (Layout) {
-              var Child = RootComponent;
-              var WrappedLayout = makeComponent(Layout);
-              RootComponent = (props) => React.createElement(WrappedLayout, { ...(props || {}), children: React.createElement(Child, props || {}) });
-            }
-          } catch(e) {
-            console.warn("Could not wrap layout:", layoutFiles[i], e);
-          }
-        }
-
-        if (!currentRoot) {
-          container.innerHTML = "";
-          currentRoot = ReactDOM.createRoot(container);
-        }
-        currentRoot.render(React.createElement(RootComponent, {}));
-        dismissLoading();
-      }
-
-      // SPA Navigation function for Link & useRouter
-      async function navigateTo(targetPath) {
-        try {
-          var cleanPath = targetPath.split("?")[0] || "/";
-          var res = await fetch(serverOrigin + "/_nata/route_info?path=" + encodeURIComponent(cleanPath));
-          var info = await res.json();
-          if (info && info.found) {
-            await renderNativeRoute(info.page_file, info.layout_files || [], info.params || {});
-            window.scrollTo(0, 0);
-          }
-        } catch(e) {
-          console.error("Navigation error:", e);
-        }
-      }
-      window.__NATA_NAVIGATE__ = navigateTo;
-
-      // Fetch initial route info (defaults to root /)
-      var initialPath = "/";
-      var routeRes = await fetch(serverOrigin + "/_nata/route_info?path=" + encodeURIComponent(initialPath));
-      if (!routeRes.ok) {
-        var errJson = await routeRes.json().catch(function() { return {}; });
-        throw new Error(errJson.error || ("Không tìm thấy route: " + initialPath + " (HTTP " + routeRes.status + ")"));
-      }
-      var initialInfo = await routeRes.json();
-      if (!initialInfo || !initialInfo.found) {
-        throw new Error(initialInfo && initialInfo.error ? initialInfo.error : ("No page found for route: " + initialPath));
-      }
-
-      await renderNativeRoute(initialInfo.page_file, initialInfo.layout_files || [], initialInfo.params || {});
-      console.log("[Com.AI.VN] Zalo Mini App Native DOM Rendered successfully!");
-    } catch(err) {
-      console.error("[Com.AI.VN] Native render error:", err);
-      dismissLoading();
-      var errMsg = (err && err.message) ? err.message : String(err);
-      var errStack = (err && err.stack) ? err.stack : "";
-      container.innerHTML = '<div style="padding:24px;font-family:sans-serif;color:#f87171;background:#0f172a;min-height:100vh;box-sizing:border-box;">' +
-        '<h3 style="margin-top:0;font-size:18px;color:#f87171;">⚠️ Lỗi Khởi Chạy Giao Diện Zalo</h3>' +
-        '<div style="font-size:14px;color:#fca5a5;font-weight:600;line-height:1.6;background:#1e293b;padding:12px;border-radius:8px;border-left:4px solid #ef4444;">' + errMsg + '</div>' +
-        (errStack ? '<pre style="white-space:pre-wrap;word-break:break-all;font-size:11px;background:#020617;padding:12px;border-radius:8px;color:#94a3b8;margin-top:12px;">' + errStack + '</pre>' : '') +
-        '<p style="font-size:12px;color:#64748b;margin-top:16px;">Bấm icon Eruda ở góc dưới màn hình để kiểm tra chi tiết Console và Network log.</p>' +
-      '</div>';
-    }
+    window.__NATA_CONFIG__ = { mode: "zalo", ssr: false, origin: serverOrigin, initial: null };
+    // The overlay loads first so a runtime that cannot load (tunnel/CDN down) is still reported on screen
+    import(serverOrigin + "/_nata/overlay.js").then(function(overlay) {
+      return import(serverOrigin + "/_nata/client.js").catch(function(err) {
+        overlay.reportIssue(err, "runtime");
+      });
+    }).catch(function(err) {
+      console.error("[Com.AI.VN] Could not load the dev overlay:", err);
+    }).then(dismissLoading);
   }
 
   if (document.readyState === "loading") {
@@ -1034,12 +973,16 @@ async fn zmp_js_handler(State(state): State<AppState>) -> impl IntoResponse {
   }
 })();
 "###;
-    let backend_url = std::env::var("COM_BACKEND_URL").unwrap_or_default();
-    let rendered_js = bootstrap_js.replace("__COM_BACKEND_PLACEHOLDER__", &backend_url);
-    (StatusCode::OK, headers, rendered_js).into_response()
+    // Shims must point at the dev server, which the bootstrap only learns at runtime
+    let import_map = ClientTransformer::import_map("__COM_SERVER_ORIGIN__");
+    let import_map_js = serde_json::to_string(&import_map)
+        .unwrap_or_else(|_| "{}".to_string())
+        .replace("\"__COM_SERVER_ORIGIN__", "serverOrigin + \"");
+    bootstrap_js
+        .replace("__COM_BACKEND_PLACEHOLDER__", backend_url)
+        .replace("__COM_IMPORT_MAP_PLACEHOLDER__", &import_map_js)
+        .replace("__COM_TAILWIND_BROWSER__", if tailwind_in_browser { "true" } else { "false" })
 }
-
-
 
 async fn shims_handler(
     Path(path): Path<String>,
@@ -1207,7 +1150,7 @@ export default { cookies, headers, draftMode };
 "##
         }
         "next/link" | "link" => {
-            r##"import React from "https://esm.sh/react@18.3.1";
+            r##"import React from "react";
 export default function Link({ href, children, className, style, onClick, target, rel, replace, ...props }) {
   const handleClick = (e) => {
     if (onClick) onClick(e);
@@ -1230,7 +1173,7 @@ export { Link };
 "##
         }
         "next/image" | "image" => {
-            r##"import React from "https://esm.sh/react@18.3.1";
+            r##"import React from "react";
 export default function Image({ src, alt, width, height, className, style, fill, priority, ...props }) {
   const imgSrc = (src && typeof src === "object") ? (src.src || src.default || "") : src;
   const imgStyle = fill
@@ -1251,7 +1194,13 @@ export { Image };
 "##
         }
         "next/navigation" | "navigation" => {
-            r##"import React from "https://esm.sh/react@18.3.1";
+            r##"import React from "react";
+// The client runtime keeps the App Router location here (virtual in Zalo Mini Apps)
+const nataLocation = () => {
+  if (typeof window === "undefined") return { pathname: "/", search: "" };
+  return window.__NATA_LOCATION__ || window.location;
+};
+
 export const useRouter = () => ({
   push: (url) => {
     if (typeof window !== "undefined" && typeof window.__NATA_NAVIGATE__ === "function") {
@@ -1271,7 +1220,7 @@ export const useRouter = () => ({
   forward: () => { if (typeof window !== "undefined") window.history.forward(); },
   refresh: () => {
     if (typeof window !== "undefined" && typeof window.__NATA_NAVIGATE__ === "function") {
-      window.__NATA_NAVIGATE__(window.location.pathname + window.location.search, { replace: true });
+      window.__NATA_NAVIGATE__(nataLocation().pathname + nataLocation().search, { replace: true });
     } else if (typeof window !== "undefined") {
       window.location.reload();
     }
@@ -1280,9 +1229,9 @@ export const useRouter = () => ({
 });
 
 export const usePathname = () => {
-  const [pathname, setPathname] = React.useState(() => typeof window !== "undefined" ? window.location.pathname : "/");
+  const [pathname, setPathname] = React.useState(() => nataLocation().pathname);
   React.useEffect(() => {
-    const handler = () => setPathname(window.location.pathname);
+    const handler = () => setPathname(nataLocation().pathname);
     window.addEventListener("popstate", handler);
     window.addEventListener("_nata_navigate", handler);
     return () => {
@@ -1294,9 +1243,9 @@ export const usePathname = () => {
 };
 
 export const useSearchParams = () => {
-  const [searchParams, setSearchParams] = React.useState(() => typeof window !== "undefined" ? new URLSearchParams(window.location.search) : new URLSearchParams());
+  const [searchParams, setSearchParams] = React.useState(() => new URLSearchParams(nataLocation().search));
   React.useEffect(() => {
-    const handler = () => setSearchParams(new URLSearchParams(window.location.search));
+    const handler = () => setSearchParams(new URLSearchParams(nataLocation().search));
     window.addEventListener("popstate", handler);
     window.addEventListener("_nata_navigate", handler);
     return () => {
@@ -1347,15 +1296,21 @@ export default { useRouter, usePathname, useSearchParams, useParams, redirect, n
 "##
         }
         "next/router" | "router" => {
-            r##"import React from "https://esm.sh/react@18.3.1";
+            r##"import React from "react";
+// The client runtime keeps the App Router location here (virtual in Zalo Mini Apps)
+const nataLocation = () => {
+  if (typeof window === "undefined") return { pathname: "/", search: "" };
+  return window.__NATA_LOCATION__ || window.location;
+};
+
 export const useRouter = () => {
-  const [pathname, setPathname] = React.useState(() => typeof window !== "undefined" ? window.location.pathname : "/");
-  const [search, setSearch] = React.useState(() => typeof window !== "undefined" ? window.location.search : "");
+  const [pathname, setPathname] = React.useState(() => nataLocation().pathname);
+  const [search, setSearch] = React.useState(() => nataLocation().search);
   const [params, setParams] = React.useState(() => (typeof window !== "undefined" && window.__NATA_PARAMS__) ? window.__NATA_PARAMS__ : {});
   React.useEffect(() => {
     const handler = (e) => {
-      setPathname(window.location.pathname);
-      setSearch(window.location.search);
+      setPathname(nataLocation().pathname);
+      setSearch(nataLocation().search);
       if (e && e.detail && e.detail.params) {
         setParams(e.detail.params);
       } else if (typeof window !== "undefined" && window.__NATA_PARAMS__) {
@@ -1398,7 +1353,7 @@ export default { useRouter };
 "##
         }
         "next/head" | "head" => {
-            r##"import React from "https://esm.sh/react@18.3.1";
+            r##"import React from "react";
 export default function Head({ children }) {
   return React.createElement(React.Fragment, null, children);
 }
@@ -1598,6 +1553,19 @@ export default {
     (StatusCode::OK, headers, js_code).into_response()
 }
 
+/// ES module served in place of a file that failed to compile: it hands the error to the dev overlay
+/// ("Build Error", shown on web and inside Zalo alike) and then fails the import.
+fn build_error_module(err: &crate::swc_compiler::CompileError) -> String {
+    let payload = serde_json::to_string(err).unwrap_or_else(|_| "{}".to_string());
+    format!(
+        "const __nataBuildError = {payload};\n\
+         if (typeof window !== \"undefined\" && typeof window.__NATA_BUILD_ERROR__ === \"function\") window.__NATA_BUILD_ERROR__(__nataBuildError);\n\
+         const __nataErr = new SyntaxError(__nataBuildError.message);\n\
+         __nataErr.__nataBuildError = __nataBuildError;\n\
+         throw __nataErr;\n"
+    )
+}
+
 async fn bundle_handler(
     State(state): State<AppState>,
     Path(path): Path<String>,
@@ -1608,29 +1576,46 @@ async fn bundle_handler(
     match crate::resolver::PathResolver::resolve_file_with_config(&state.root_dir, clean_path, &tsconfig) {
         Some(resolved) => match tokio::fs::read_to_string(&resolved.absolute_path).await {
             Ok(content) => {
+                let mut js_headers = HeaderMap::new();
+                js_headers.insert(header::CONTENT_TYPE, "application/javascript; charset=utf-8".parse().unwrap());
+
+                let cache = crate::compile_cache::CompileCache::for_root(&state.root_dir);
+                let cache_key = crate::compile_cache::CompileCache::key(
+                    &resolved.relative_path,
+                    &content,
+                    &crate::compile_cache::tsconfig_fingerprint(&state.root_dir),
+                );
+                if let Some(compiled_js) = cache.as_ref().and_then(|c| c.get(&cache_key)) {
+                    return (StatusCode::OK, js_headers, compiled_js).into_response();
+                }
+
                 let transformed = crate::resolver::PathResolver::transform_source_with_config(
                     &content,
                     &resolved.relative_path,
                     &tsconfig,
                 );
-                
+
                 // Compile TypeScript / TSX directly via SWC Native Rust engine
                 match crate::swc_compiler::SwcCompiler::compile(&transformed, &resolved.relative_path) {
                     Ok(compiled_js) => {
-                        let mut headers = HeaderMap::new();
-                        headers.insert(
-                            header::CONTENT_TYPE,
-                            "application/javascript; charset=utf-8".parse().unwrap(),
-                        );
-                        (StatusCode::OK, headers, compiled_js).into_response()
+                        let compiled_js = crate::resolver::ImportResolver::soften_remote_named_imports(&compiled_js);
+                        if let Some(cache) = &cache {
+                            cache.put(&cache_key, &compiled_js);
+                        }
+                        (StatusCode::OK, js_headers, compiled_js).into_response()
                     }
-                    Err(err) => {
-                        eprintln!("SWC Compilation Error in {}: {}", resolved.relative_path, err);
-                        (
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            format!("SWC Compilation Error in {}: {}", resolved.relative_path, err),
-                        )
-                            .into_response()
+                    Err(mut err) => {
+                        // Resolver rewrites keep line numbers, so show the frame from the file the user wrote
+                        if let (Some(line), Some(col)) = (err.line, err.column) {
+                            if content.lines().count() == transformed.lines().count() {
+                                err.frame = crate::term::code_frame(&content, line, col, 2);
+                            }
+                        }
+                        crate::term::error(&err.location(), Some(&err.message), Some(&err.frame));
+                        let mut headers = HeaderMap::new();
+                        headers.insert(header::CONTENT_TYPE, "application/javascript; charset=utf-8".parse().unwrap());
+                        headers.insert(header::CACHE_CONTROL, "no-store".parse().unwrap());
+                        (StatusCode::OK, headers, build_error_module(&err)).into_response()
                     }
                 }
             }
@@ -1638,6 +1623,26 @@ async fn bundle_handler(
         },
         None => (StatusCode::NOT_FOUND, format!("Module not found: {}", clean_path)).into_response(),
     }
+}
+
+/// The nearest loading.tsx of a route, server-rendered on its own (loading UIs are plain synchronous
+/// components); empty when the route has none or it cannot render
+async fn loading_placeholder(root: &std::path::Path, segments: &[crate::router::types::SegmentFiles], path: &str) -> String {
+    let Some(loading_file) = segments.iter().rev().find_map(|s| s.loading.clone()) else {
+        return String::new();
+    };
+    let request = SsrRequest {
+        path: path.to_string(),
+        page_file: loading_file,
+        layout_files: Vec::new(),
+        segments_files: Vec::new(),
+        global_error_file: None,
+        params: serde_json::json!({}),
+        search_params: serde_json::json!({}),
+        cookies: None,
+        headers: None,
+    };
+    SsrEngine::render(root, request).await.html
 }
 
 async fn app_router_fallback_handler(
@@ -1710,25 +1715,16 @@ async fn app_router_fallback_handler(
                 .await
                 .unwrap_or_default();
 
-            let body_b64 = if !body_bytes.is_empty() {
-                Some(base64::Engine::encode(
-                    &base64::engine::general_purpose::STANDARD,
-                    &body_bytes,
-                ))
-            } else {
-                None
-            };
-
             let handler_req = crate::route_handler::RouteHandlerRequest {
                 path: path.to_string(),
                 url: full_url,
                 method,
                 file_path: route.page_file.clone(),
-                params: params.clone(),
+                params: route.params_json(&params),
                 search_params: query_map,
                 headers: headers_map,
                 cookies: raw_cookie_str,
-                body_base64: body_b64,
+                body: body_bytes.to_vec(),
             };
 
             let output = crate::route_handler::RouteHandlerEngine::execute(&state.root_dir, handler_req).await;
@@ -1764,19 +1760,12 @@ async fn app_router_fallback_handler(
                 }
             }
 
-            let resp_body_bytes = if !output.body_base64.is_empty() {
-                base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &output.body_base64)
-                    .unwrap_or_default()
-            } else {
-                Vec::new()
-            };
-
             return resp_builder
-                .body(axum::body::Body::from(resp_body_bytes))
+                .body(axum::body::Body::from(output.body))
                 .unwrap_or_else(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Response building failed").into_response());
         }
 
-        let custom_css = crate::css_compiler::CssCompiler::find_and_load_custom_css(&state.root_dir);
+        let stylesheet_tags = crate::css_compiler::stylesheet::project_stylesheet(&state.root_dir).await.head_tags();
 
         // Build SSR request context
         let mut query_map = std::collections::HashMap::new();
@@ -1809,27 +1798,46 @@ async fn app_router_fallback_handler(
             layout_files: route.layout_files.clone(),
             segments_files: route.segments_files.clone(),
             global_error_file: route.global_error_file.clone(),
-            params: serde_json::to_value(&params).unwrap_or_else(|_| serde_json::json!({})),
+            params: route.params_json(&params),
             search_params: serde_json::to_value(&query_map).unwrap_or_else(|_| serde_json::json!({})),
             cookies: raw_cookie_str,
             headers: Some(serde_json::to_value(&headers_map).unwrap_or_else(|_| serde_json::json!({}))),
         };
 
-        let ssr_output = SsrEngine::render(&state.root_dir, ssr_req).await;
+        // Zalo Mini Apps are client-only on device, so the browser preview skips SSR as well
+        let ssr_output = if state.target == "zalo" {
+            SsrOutput::client_only(&ssr_req)
+        } else {
+            SsrEngine::render(&state.root_dir, ssr_req).await
+        };
 
         // Check if SSR returned a redirect
         if let Some(redirect_to) = ssr_output.redirect_url {
             return axum::response::Redirect::temporary(&redirect_to).into_response();
         }
 
+        // Page rendered on the client: show the route's loading.tsx (rendered here) until it mounts
+        let loading_html = if ssr_output.html.is_empty() {
+            loading_placeholder(&state.root_dir, &route.segments_files, &path).await
+        } else {
+            String::new()
+        };
+
         let page_title = ssr_output.title.as_deref().unwrap_or("Com.AI.VN Application");
         let head_tags = ssr_output.head_tags.as_deref().unwrap_or("");
-        let html = ClientTransformer::render_ssr_html_shell(
-            page_title,
+        let initial_route = ClientTransformer::route_info_json(
             &route.page_file,
             &route.layout_files,
-            &custom_css,
+            &route.segments_files,
+            route.global_error_file.as_ref(),
+            &route.params_json(&params),
+        );
+        let html = ClientTransformer::render_ssr_html_shell(
+            page_title,
+            &initial_route,
+            &stylesheet_tags,
             &ssr_output.html,
+            &loading_html,
             &ssr_output.initial_state,
             &state.target,
             head_tags,
@@ -1890,12 +1898,8 @@ async fn app_router_fallback_handler(
     });
 
     if let Some(not_found_file) = not_found_opt {
-        let custom_css = crate::css_compiler::CssCompiler::find_and_load_custom_css(&state.root_dir);
-        let root_layout = router_guard.routes.first().and_then(|r| r.layout_files.first().cloned());
-        let layout_files = match root_layout {
-            Some(l) => vec![l],
-            None => vec![],
-        };
+        let stylesheet_tags = crate::css_compiler::stylesheet::project_stylesheet(&state.root_dir).await.head_tags();
+        let layout_files = root_layout_files(&router_guard);
         let ssr_req = SsrRequest {
             path: path.to_string(),
             page_file: not_found_file.clone(),
@@ -1907,15 +1911,20 @@ async fn app_router_fallback_handler(
             cookies: None,
             headers: None,
         };
-        let ssr_output = SsrEngine::render(&state.root_dir, ssr_req).await;
+        let ssr_output = if state.target == "zalo" {
+            SsrOutput::client_only(&ssr_req)
+        } else {
+            SsrEngine::render(&state.root_dir, ssr_req).await
+        };
         let page_title = ssr_output.title.as_deref().unwrap_or("404: This page could not be found");
         let head_tags = ssr_output.head_tags.as_deref().unwrap_or("");
+        let initial_route = ClientTransformer::route_info_json(&not_found_file, &layout_files, &[], None, &serde_json::json!({}));
         let html = ClientTransformer::render_ssr_html_shell(
             page_title,
-            &not_found_file,
-            &layout_files,
-            &custom_css,
+            &initial_route,
+            &stylesheet_tags,
             &ssr_output.html,
+            "",
             &ssr_output.initial_state,
             &state.target,
             head_tags,
@@ -1926,4 +1935,65 @@ async fn app_router_fallback_handler(
     }
 
     (StatusCode::NOT_FOUND, "Route not found in App Router").into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_zmp_bootstrap_boots_shared_runtime_client_only() {
+        let js = zmp_bootstrap_js("https://backend.example", false);
+        assert!(js.contains(r#"var configuredBackend = "https://backend.example";"#));
+        assert!(js.contains(r#"import(serverOrigin + "/_nata/client.js")"#));
+        assert!(js.contains(r#"mode: "zalo", ssr: false"#));
+        assert!(js.contains(r#""next/navigation":serverOrigin + "/_nata/shims/next/navigation""#));
+        assert!(!js.contains("__COM_IMPORT_MAP_PLACEHOLDER__"));
+        assert!(!js.contains("__COM_SERVER_ORIGIN__"));
+        assert!(!js.contains("hydrateRoot"));
+        assert!(js.contains("if (false && !document.getElementById(\"_zmp_tailwind\"))"));
+    }
+
+    #[test]
+    fn test_zmp_bootstrap_loads_overlay_before_runtime() {
+        let js = zmp_bootstrap_js("", false);
+        let overlay_at = js.find(r#"import(serverOrigin + "/_nata/overlay.js")"#).expect("overlay import");
+        let client_at = js.find(r#"import(serverOrigin + "/_nata/client.js")"#).expect("client import");
+        assert!(overlay_at < client_at);
+    }
+
+    #[test]
+    fn test_build_error_module_reports_to_overlay() {
+        let err = crate::swc_compiler::SwcCompiler::compile("export const b = ;\n", "app/page.tsx").unwrap_err();
+        let js = build_error_module(&err);
+        assert!(js.contains("window.__NATA_BUILD_ERROR__(__nataBuildError)"));
+        assert!(js.contains(r#""file":"app/page.tsx""#));
+        assert!(js.contains(r#""line":1"#));
+        assert!(js.contains("throw __nataErr;"));
+    }
+
+    #[test]
+    fn test_only_page_and_api_requests_are_logged() {
+        assert!(is_loggable_request("/"));
+        assert!(is_loggable_request("/about"));
+        assert!(is_loggable_request("/api/health"));
+        assert!(!is_loggable_request("/_bundle/app/page.tsx"));
+        assert!(!is_loggable_request("/_nata/rpc"));
+        assert!(!is_loggable_request("/_hmr"));
+        assert!(!is_loggable_request("/favicon.ico"));
+        assert!(!is_loggable_request("/assets/app.js"));
+        assert!(!is_loggable_request("/react@18.3.1/es2022/react.mjs"));
+    }
+
+    #[test]
+    fn test_client_runtime_supports_zalo_memory_router() {
+        let js = crate::client::CLIENT_RUNTIME_JS;
+        assert!(js.contains("window.__NATA_CONFIG__"));
+        assert!(js.contains("window.__NATA_LOCATION__"));
+        assert!(js.contains("/_nata/hmr_version"));
+        assert!(js.contains(r#"from "./overlay.js""#));
+        assert!(!js.contains("showInlineError"));
+        assert!(!js.contains("{entry_str}"));
+        assert!(!js.contains("{{"));
+    }
 }

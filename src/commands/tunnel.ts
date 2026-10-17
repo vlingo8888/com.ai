@@ -1,5 +1,7 @@
 import { existsSync } from "fs";
 import { join } from "path";
+import { homedir } from "os";
+import { exeName } from "../core/binaries";
 import { logger, colors } from "../core/logger";
 import qrcode from "qrcode-terminal";
 
@@ -87,24 +89,25 @@ export async function start123cTunnel(options: TunnelOptions = {}): Promise<{
 }
 
 export async function locateOrBuildTunnelBinary(): Promise<string> {
-  const home = process.env.HOME || "";
+  const home = homedir();
+  const bin = exeName("tunnel-rs");
   const candidates = [
-    join(__dirname, "../tunnel-rs"),
-    join(__dirname, "../../tunnel-rs"),
-    join(__dirname, "../bin/tunnel-rs"),
-    join(__dirname, "../../bin/tunnel-rs"),
-    join(process.cwd(), "bin/tunnel-rs"),
-    join(process.cwd(), "tunnel-rs"),
-    join(home, "Documents/GitHub/NATA/backend/tunnel-rs/target/release/tunnel-rs"),
-    join(home, "Documents/GitHub/NATA/backend/tunnel-rs/target/debug/tunnel-rs"),
-    join(__dirname, "../../../NATA/backend/tunnel-rs/target/release/tunnel-rs"),
-    join(__dirname, "../../../NATA/backend/tunnel-rs/target/debug/tunnel-rs"),
-    join(process.cwd(), "tunnel-rs/target/release/tunnel-rs"),
-    join(process.cwd(), "tunnel-rs/target/debug/tunnel-rs"),
-    join(process.cwd(), "backend/tunnel-rs/target/release/tunnel-rs"),
-    join(process.cwd(), "backend/tunnel-rs/target/debug/tunnel-rs"),
-    "/usr/local/bin/tunnel-rs",
-    "tunnel-rs",
+    join(__dirname, `../${bin}`),
+    join(__dirname, `../../${bin}`),
+    join(__dirname, `../bin/${bin}`),
+    join(__dirname, `../../bin/${bin}`),
+    join(process.cwd(), `bin/${bin}`),
+    join(process.cwd(), `${bin}`),
+    join(home, `Documents/GitHub/NATA/backend/tunnel-rs/target/release/${bin}`),
+    join(home, `Documents/GitHub/NATA/backend/tunnel-rs/target/debug/${bin}`),
+    join(__dirname, `../../../NATA/backend/tunnel-rs/target/release/${bin}`),
+    join(__dirname, `../../../NATA/backend/tunnel-rs/target/debug/${bin}`),
+    join(process.cwd(), `tunnel-rs/target/release/${bin}`),
+    join(process.cwd(), `tunnel-rs/target/debug/${bin}`),
+    join(process.cwd(), `backend/tunnel-rs/target/release/${bin}`),
+    join(process.cwd(), `backend/tunnel-rs/target/debug/${bin}`),
+    `/usr/local/bin/${bin}`,
+    bin,
   ];
 
   for (const cand of candidates) {
@@ -118,13 +121,13 @@ export async function locateOrBuildTunnelBinary(): Promise<string> {
   if (existsSync(tunnelRsSrcDir)) {
     const spinner = logger.spinner("Compiling high-performance tunnel-rs engine (first-time build)...");
     try {
-      const buildProc = Bun.spawn(["cargo", "build", "--release"], {
+      const buildProc = Bun.spawn([Bun.which(exeName("cargo")) || "cargo", "build", "--release"], {
         cwd: tunnelRsSrcDir,
         stdout: "ignore",
         stderr: "ignore",
       });
       await buildProc.exited;
-      const releaseBin = join(tunnelRsSrcDir, "target/release/tunnel-rs");
+      const releaseBin = join(tunnelRsSrcDir, `target/release/${exeName("tunnel-rs")}`);
       if (existsSync(releaseBin)) {
         spinner.stop(true, "tunnel-rs engine compiled successfully");
         return releaseBin;

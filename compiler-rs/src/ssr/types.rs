@@ -91,3 +91,13 @@ impl Default for SsrOutput {
         }
     }
 }
+
+impl SsrOutput {
+    /// Empty client-side-rendering output that still carries the route params to the client
+    pub fn client_only(request: &SsrRequest) -> Self {
+        Self {
+            initial_state: serde_json::json!({ "params": request.params, "searchParams": request.search_params }),
+            ..Self::default()
+        }
+    }
+}

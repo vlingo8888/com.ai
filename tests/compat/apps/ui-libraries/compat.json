@@ -1,0 +1,9 @@
+{
+  "checks": [
+    { "name": "page with Radix + lucide renders without errors", "path": "/", "status": 200, "ssr": ["UI libraries"], "contains": ["Open dialog"], "noIssues": true, "noExternalHosts": true },
+    { "name": "library touching document at import time still server-renders (no fake DOM on the server)", "path": "/", "ssr": ["Show toast", "Open dialog"] },
+    { "name": "sonner toast shows", "path": "/", "click": "button.toast-trigger", "expectText": "Saved with sonner" },
+    { "name": "TanStack Query (export * from another package) works", "path": "/", "contains": ["Query resolved: 42"] },
+    { "name": "Radix Dialog opens (deep dependency tree resolved)", "path": "/", "click": "button.trigger", "expectText": "Radix focus scope, dismissable layer and portal are working." }
+  ]
+}

@@ -91,6 +91,12 @@ function printHelp() {
 
     ${colors.darkGray}# 8. Check CLI and engine versions${colors.reset}
     ${colors.cyan}$ com --version${colors.reset}
+
+    ${colors.darkGray}# 9. Save local project changes back to Cloud View${colors.reset}
+    ${colors.cyan}$ com save${colors.reset}
+
+    ${colors.darkGray}# 10. Publish View to Production & activate live endpoint${colors.reset}
+    ${colors.cyan}$ com publish${colors.reset}
 `);
 }
 

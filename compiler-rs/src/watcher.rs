@@ -35,29 +35,31 @@ impl ProjectWatcher {
             let mut watcher: RecommendedWatcher = match RecommendedWatcher::new(tx, notify::Config::default()) {
                 Ok(w) => w,
                 Err(e) => {
-                    eprintln!("  \x1b[31m✖ [HMR Watcher Error]\x1b[0m Failed to initialize file watcher: {}", e);
+                    crate::term::error("Failed to start the file watcher (hot reload disabled)", Some(&e.to_string()), None);
                     return;
                 }
             };
 
             // 1. Watch root directory recursively
             if let Err(e) = watcher.watch(&canon_root, RecursiveMode::Recursive) {
-                eprintln!("  \x1b[31m✖ [HMR Watcher Error]\x1b[0m Could not watch root directory {:?}: {}", canon_root, e);
+                crate::term::error(&format!("Could not watch {}", canon_root.display()), Some(&e.to_string()), None);
             }
 
             // 2. Discover and watch symlinks in node_modules (e.g. bun link, npm link)
             let symlinks = Self::discover_node_modules_symlinks(&canon_root);
             for symlink_target in &symlinks {
                 if let Err(e) = watcher.watch(symlink_target, RecursiveMode::Recursive) {
-                    eprintln!("  \x1b[33m▲ [HMR Watcher Warning]\x1b[0m Could not watch symlink target {:?}: {}", symlink_target, e);
+                    crate::term::warn(&format!("Could not watch linked package {}: {}", symlink_target.display(), e));
                 } else {
-                    println!("  \x1b[32m✔ [HMR Watcher]\x1b[0m Watching linked package: \x1b[36m{}\x1b[0m", symlink_target.display());
+                    crate::term::event(&format!("Watching linked package {}", symlink_target.display()));
                 }
             }
 
             // 3. Debounced Event Loop
             let mut last_event_time = Instant::now() - Duration::from_secs(1);
             let mut pending_files: HashSet<PathBuf> = HashSet::new();
+            // When the current batch of changes started, for the ` ✓ Compiled … in Xms` line
+            let mut first_change: Option<Instant> = None;
 
             loop {
                 // Poll from sync channel non-blockingly with tokio sleep
@@ -67,6 +69,7 @@ impl ProjectWatcher {
                             for path in event.paths {
                                 if !Self::should_ignore_path(&path, &canon_root) {
                                     pending_files.insert(path);
+                                    first_change.get_or_insert_with(Instant::now);
                                 }
                             }
                         }
@@ -81,6 +84,18 @@ impl ProjectWatcher {
                         .as_millis();
 
                     let files_to_notify: Vec<PathBuf> = pending_files.drain().collect();
+                    let changed_at = first_change.take().unwrap_or_else(Instant::now);
+
+                    // Server code runs in the persistent Bun worker, whose module cache cannot be
+                    // invalidated per file: restart it so the next render/action sees the new code
+                    let touches_server_code = files_to_notify.iter().any(|p| {
+                        let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                        let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+                        name.starts_with(".env") || matches!(ext.as_str(), "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs" | "json")
+                    });
+                    if touches_server_code {
+                        crate::worker_pool::restart(&canon_root).await;
+                    }
 
                     let mut should_rescan_router = false;
                     for path in &files_to_notify {
@@ -125,15 +140,9 @@ impl ProjectWatcher {
                             let _ = hmr_tx.send(json_str);
 
                             if is_css {
-                                println!(
-                                    "  \x1b[1;35m⚡ [HMR:CSS]\x1b[0m \x1b[1;36m{}\x1b[0m (hot updated)",
-                                    rel_path
-                                );
-                            } else {
-                                println!(
-                                    "  \x1b[1;32m⚡ [HMR:RELOAD]\x1b[0m \x1b[1;36m{}\x1b[0m (notified client)",
-                                    rel_path
-                                );
+                                crate::term::success(&format!("Updated styles {}", rel_path));
+                            } else if matches!(ext.as_str(), "ts" | "tsx" | "js" | "jsx" | "mjs" | "mdx") {
+                                crate::term::success(&format!("Compiled {} in {}", rel_path, crate::term::format_ms(changed_at.elapsed().as_secs_f64() * 1000.0)));
                             }
                         }
                     }

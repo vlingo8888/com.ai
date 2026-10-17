@@ -1,0 +1,21 @@
+{
+  "//": "Checked by `bun scripts/bench.ts --budget` (CI). `limits` fail the run: current values plus headroom for slower CI machines, tighten them as things improve. `targets` are the ROADMAP.md budgets (informational, marked ✓/○).",
+  "limits": {
+    "readyMs": 1500,
+    "firstPageMs": 3000,
+    "ssrMedianMs": 10,
+    "ssrP90Ms": 25,
+    "apiMedianMs": 10,
+    "rssPeakMb": 160,
+    "rssIdleMb": 100,
+    "clientJsKb": 900
+  },
+  "targets": {
+    "readyMs": 300,
+    "firstPageMs": 500,
+    "ssrMedianMs": 10,
+    "apiMedianMs": 10,
+    "rssIdleMb": 80,
+    "clientJsKb": 70
+  }
+}

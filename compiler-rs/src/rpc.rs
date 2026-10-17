@@ -1,6 +1,5 @@
 use serde::{Deserialize, Serialize};
 use std::path::Path;
-use tokio::process::Command;
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct RpcPayload {
@@ -53,6 +52,13 @@ impl RpcExecutor {
     /// Ensures that the project has the canonical NATA runtime files (.nata/core.ts, node_modules/core, etc.)
     pub fn ensure_runtime_env<P: AsRef<Path>>(project_dir: P) {
         let root = project_dir.as_ref();
+        // Called on every render/action/route request: write the files once per project per process
+        static PREPARED: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<std::path::PathBuf>>> =
+            std::sync::OnceLock::new();
+        let prepared = PREPARED.get_or_init(Default::default);
+        if !prepared.lock().map(|mut set| set.insert(root.to_path_buf())).unwrap_or(true) {
+            return;
+        }
         let nata_dir = root.join(".nata");
         let _ = std::fs::create_dir_all(&nata_dir);
         let _ = std::fs::create_dir_all(root.join("data"));
@@ -162,8 +168,10 @@ class LoggingConnection implements DatabaseConnection {
       const logStore = (globalThis as any).__NATA_QUERY_LOGS__ || ((globalThis as any).__NATA_QUERY_LOGS__ = []);
       logStore.push(queryLog);
 
-      console.error(`\x1b[31m✖ [SQL Error]\x1b[0m \x1b[1m${sqlStr}\x1b[0m\x1b[90m${paramStr} (${duration}ms)\x1b[0m`);
-      console.error(`\x1b[31m  ↳ Error:\x1b[0m ${err?.message || err}`);
+      if (process.env.COM_DEV_QUERY_LOG !== "1") {
+        console.error(`\x1b[31m✖ [SQL Error]\x1b[0m \x1b[1m${sqlStr}\x1b[0m\x1b[90m${paramStr} (${duration}ms)\x1b[0m`);
+        console.error(`\x1b[31m  ↳ Error:\x1b[0m ${err?.message || err}`);
+      }
       if (err?.code === "ECONNREFUSED" || err?.name === "AggregateError" || (err?.message && String(err.message).includes("ECONNREFUSED"))) {
         console.error(`\x1b[33m  💡 [Tip]\x1b[0m Server PostgreSQL offline. Chạy 'com dev' để chuyển sang PGlite hoặc comment DATABASE_URL trong .env.\x1b[0m`);
       }
@@ -241,10 +249,14 @@ function createDbInstance(): Kysely<any> {
     }
 
     const { PGlite } = require("@electric-sql/pglite");
-    const pgliteInstance = new PGlite(dbPath);
+    // Created on the first query: loading PGlite's WASM costs tens of MB, and many requests never query
+    let pgliteInstance: any = null;
+    const getPglite = () => (pgliteInstance ??= new PGlite(dbPath));
 
     let schemaInitPromise: Promise<void> | null = null;
+    const ensureSchema = () => (schemaInitPromise ??= initSchemaIfNeeded());
     async function initSchemaIfNeeded() {
+      const pgliteInstance = getPglite();
       const candidatePaths = [
         process.env.COM_SCHEMA_PATH,
         path.join(process.cwd(), "schema.sql"),
@@ -279,15 +291,11 @@ function createDbInstance(): Kysely<any> {
         } catch (_) {}
       }
     }
-    schemaInitPromise = initSchemaIfNeeded();
-
     class PGLiteConnection implements DatabaseConnection {
       async executeQuery<R>(compiledQuery: CompiledQuery): Promise<KyselyQueryResult<R>> {
-        if (schemaInitPromise) {
-          await schemaInitPromise;
-        }
+        await ensureSchema();
         const { sql: sqlStr, parameters } = compiledQuery;
-        const res: any = await pgliteInstance.query(sqlStr, parameters as unknown[]);
+        const res: any = await getPglite().query(sqlStr, parameters as unknown[]);
         const rows = (Array.isArray(res?.rows) ? res.rows : (Array.isArray(res) ? res : [])) as R[];
         return {
           rows,
@@ -299,12 +307,43 @@ function createDbInstance(): Kysely<any> {
       }
     }
 
+    // PGlite is a single connection. Requests run concurrently in the dev worker, so hand it out like a
+    // pool of size 1: a transaction holds it until commit/rollback and other requests wait their turn.
+    // Re-entrant per request (`__NATA_REQUEST__`, set by the worker): a query from the request already
+    // holding the connection (e.g. `db` used inside its own transaction) never waits on itself.
+    let connectionQueue: Promise<void> = Promise.resolve();
+    let holder: unknown = undefined;
+    let depth = 0;
+    let releaseHolder: (() => void) | null = null;
+
     class PGLiteDriver implements Driver {
-      async init(): Promise<void> {
-        if (schemaInitPromise) await schemaInitPromise;
+      async init(): Promise<void> {}
+      async acquireConnection(): Promise<DatabaseConnection> {
+        const owner = (globalThis as any).__NATA_REQUEST__;
+        // Outside the worker there is no owner and no concurrency: behave like an unlocked connection
+        if (depth > 0 && holder === owner) {
+          depth++;
+          return new PGLiteConnection();
+        }
+        let release!: () => void;
+        const turn = new Promise<void>((resolve) => (release = resolve));
+        const previous = connectionQueue;
+        connectionQueue = previous.then(() => turn);
+        await previous;
+        holder = owner;
+        depth = 1;
+        releaseHolder = release;
+        return new PGLiteConnection();
       }
-      async acquireConnection(): Promise<DatabaseConnection> { return new PGLiteConnection(); }
-      async releaseConnection(): Promise<void> {}
+      async releaseConnection(): Promise<void> {
+        depth = Math.max(0, depth - 1);
+        if (depth === 0 && releaseHolder) {
+          const release = releaseHolder;
+          releaseHolder = null;
+          holder = undefined;
+          release();
+        }
+      }
       async beginTransaction(connection: DatabaseConnection): Promise<void> {
         await connection.executeQuery({ sql: "BEGIN", parameters: [], query: {} as any });
       }
@@ -1204,13 +1243,15 @@ export namespace MetadataRoute {
 
         let nm_next_nav = r#"const React = require('react');
 
+// The request URL during SSR (set per request by the SSR runtime; there is no `window` on the server)
+const requestLocation = () => globalThis.__NATA_LOCATION__ || { pathname: '/', search: '' };
+
 exports.usePathname = function() {
-  return typeof globalThis.window !== 'undefined' ? globalThis.window.location.pathname : '/';
+  return requestLocation().pathname;
 };
 
 exports.useSearchParams = function() {
-  const search = typeof globalThis.window !== 'undefined' ? globalThis.window.location.search : '';
-  return new URLSearchParams(search);
+  return new URLSearchParams(requestLocation().search);
 };
 
 exports.useParams = function() {
@@ -1253,6 +1294,61 @@ exports.default = {
 };
 "#;
         let _ = std::fs::write(nm_next.join("navigation.js"), nm_next_nav);
+
+        // Server-renderable counterparts of the browser shims in `/_nata/shims/*`, so SSR markup matches hydration
+        let nm_next_link = r#"const React = require('react');
+
+function Link({ href, children, replace, scroll, prefetch, shallow, passHref, legacyBehavior, ...props }) {
+  const url = typeof href === 'string' ? href : (href && href.pathname) || '#';
+  return React.createElement('a', { href: url, ...props }, children);
+}
+
+module.exports = Link;
+module.exports.default = Link;
+"#;
+        let _ = std::fs::write(nm_next.join("link.js"), nm_next_link);
+
+        let nm_next_image = r#"const React = require('react');
+
+function Image({ src, alt, width, height, fill, priority, quality, placeholder, blurDataURL, loader, unoptimized, style, ...props }) {
+  const url = typeof src === 'string' ? src : (src && src.src) || '';
+  const fillStyle = fill ? { position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'cover' } : {};
+  return React.createElement('img', { src: url, alt: alt || '', width, height, loading: priority ? 'eager' : 'lazy', style: { ...fillStyle, ...(style || {}) }, ...props });
+}
+
+module.exports = Image;
+module.exports.default = Image;
+"#;
+        let _ = std::fs::write(nm_next.join("image.js"), nm_next_image);
+
+        let nm_next_head = r#"function Head() {
+  return null;
+}
+
+module.exports = Head;
+module.exports.default = Head;
+"#;
+        let _ = std::fs::write(nm_next.join("head.js"), nm_next_head);
+
+        let nm_next_router = r#"exports.useRouter = function() {
+  const loc = globalThis.__NATA_LOCATION__ || { pathname: '/', search: '' };
+  const noop = function() {};
+  return {
+    push: noop,
+    replace: noop,
+    back: noop,
+    forward: noop,
+    reload: noop,
+    prefetch: function() { return Promise.resolve(); },
+    pathname: loc.pathname || '/',
+    asPath: (loc.pathname || '/') + (loc.search || ''),
+    query: { ...(globalThis.__NATA_PARAMS__ || {}) },
+    events: { on: noop, off: noop, emit: noop }
+  };
+};
+exports.default = { useRouter: exports.useRouter };
+"#;
+        let _ = std::fs::write(nm_next.join("router.js"), nm_next_router);
 
         let nm_next_font_google = nm_next.join("font").join("google");
         let _ = std::fs::create_dir_all(&nm_next_font_google);
@@ -1403,328 +1499,124 @@ exports.default = {
         let args_json = payload.args.unwrap_or(serde_json::json!([]));
         let action = payload.action.unwrap_or_else(|| "default".to_string());
         let clean = payload.module.trim_start_matches("./").trim_start_matches("@/").trim_start_matches("~/").trim_start_matches('/');
-        let incoming_cookies = serde_json::to_string(&payload.cookies.unwrap_or_default()).unwrap_or_else(|_| "\"\"".to_string());
 
-        // In-memory invocation script for Bun runner with strict output delimiters
-        let runner_script = format!(
-            r#"
-import * as mod from "{ts_path}";
-
-const RPC_DELIM_START = "__NATA_RPC_OUT_START__";
-const RPC_DELIM_END = "__NATA_RPC_OUT_END__";
-
-async function run() {{
-  const rawArgs = {args_json};
-  const args = Array.isArray(rawArgs) ? rawArgs : (rawArgs !== null && rawArgs !== undefined ? [rawArgs] : []);
-  const actionName = "{action}";
-  const incomingCookiesStr = {incoming_cookies};
-
-  const cookieMap = new Map();
-  if (typeof incomingCookiesStr === "string" && incomingCookiesStr.trim()) {{
-    for (const pair of incomingCookiesStr.split(";")) {{
-      const idx = pair.indexOf("=");
-      if (idx !== -1) {{
-        const k = decodeURIComponent(pair.slice(0, idx).trim());
-        const v = decodeURIComponent(pair.slice(idx + 1).trim());
-        if (k) cookieMap.set(k, v);
-      }}
-    }}
-  }}
-  globalThis.__NATA_COOKIES__ = cookieMap;
-  globalThis.__NATA_SET_COOKIES__ = [];
-  globalThis.__NATA_QUERY_LOGS__ = [];
-
-  // Auto-run module lifecycle (e.g. lifecycle.ts with onInstalled(db))
-  try {{
-    const _fs = await import("fs");
-    const _path = await import("path");
-    const _modFile = "{ts_path}";
-    const _modDir = _path.dirname(_modFile);
-    const _modName = "{clean_mod}";
-    const _candidates = [
-      _path.join(_modDir, "lifecycle.ts"),
-      _path.join(_modDir, "..", "lifecycle.ts"),
-      _path.join(process.cwd(), "modules", _modName, "lifecycle.ts"),
-      _path.join(process.cwd(), "plugins", _modName, "lifecycle.ts")
-    ];
-    for (const _lcPath of _candidates) {{
-      if (_fs.existsSync(_lcPath)) {{
-        try {{
-          const _lcMod = await import(_lcPath);
-          const _lc = _lcMod?.lifecycle || _lcMod?.default || _lcMod;
-          if (_lc && typeof _lc.onInstalled === "function") {{
-            const {{ db }} = await import("core");
-            await _lc.onInstalled(db);
-          }}
-        }} catch (_lcErr) {{
-          console.warn("[Lifecycle Warning]", _lcErr);
-        }}
-        break;
-      }}
-    }}
-  }} catch (_) {{}}
-
-  let target = (actionName === "default") ? (mod.default || mod) : mod[actionName];
-  if (!target && mod.default && typeof mod.default === "object" && mod.default[actionName]) {{
-    target = mod.default[actionName];
-  }}
-  if (!target && typeof mod === "function") {{
-    target = mod;
-  }}
-  if (!target && typeof mod.default === "function") {{
-    target = mod.default;
-  }}
-  if (!target) {{
-    throw new Error("Action '" + actionName + "' not found in module '{clean}'");
-  }}
-
-  let res;
-  if (typeof target === "function") {{
-    if (target.prototype && target.prototype.constructor === target && typeof target.prototype.execute === "function") {{
-      const instance = new target();
-      res = await instance.execute(...args);
-    }} else {{
-      res = await target(...args);
-    }}
-  }} else if (target && typeof target.execute === "function") {{
-    res = await target.execute(...args);
-  }} else {{
-    res = target;
-  }}
-
-  // Unwrap Response instances (e.g. from core.json() or new Response())
-  if (res instanceof Response) {{
-    const contentType = res.headers.get("content-type") || "";
-    if (contentType.includes("application/json")) {{
-      try {{
-        res = await res.json();
-      }} catch {{
-        res = await res.text();
-      }}
-    }} else {{
-      const text = await res.text();
-      try {{
-        res = JSON.parse(text);
-      }} catch {{
-        res = text;
-      }}
-    }}
-  }}
-
-  const setCookies = Array.isArray(globalThis.__NATA_SET_COOKIES__) ? globalThis.__NATA_SET_COOKIES__ : [];
-  const queries = Array.isArray(globalThis.__NATA_QUERY_LOGS__) ? globalThis.__NATA_QUERY_LOGS__ : [];
-  const outPayload = {{
-    __nata_rpc_data__: res ?? null,
-    __nata_set_cookies__: setCookies,
-    __nata_queries__: queries
-  }};
-
-  process.stdout.write(RPC_DELIM_START + JSON.stringify(outPayload) + RPC_DELIM_END + "\n", () => {{
-    process.exit(0);
-  }});
-  setTimeout(() => process.exit(0), 10);
-}}
-
-run().catch(err => {{
-  const queries = Array.isArray(globalThis.__NATA_QUERY_LOGS__) ? globalThis.__NATA_QUERY_LOGS__ : [];
-  const errPayload = {{
-    error: err?.message || String(err),
-    stack: err?.stack || undefined,
-    __nata_queries__: queries
-  }};
-  process.stdout.write(RPC_DELIM_START + JSON.stringify(errPayload) + RPC_DELIM_END + "\n", () => {{
-    process.exit(1);
-  }});
-  setTimeout(() => process.exit(1), 10);
-}});
-"#,
-            ts_path = clean_path(&ts_path),
-            args_json = args_json,
-            action = action,
-            incoming_cookies = incoming_cookies,
-            clean = clean,
-            clean_mod = clean.trim_start_matches("modules/").trim_start_matches("plugins/")
-        );
+        let input = serde_json::json!({
+            "tsPath": clean_path(&ts_path),
+            "action": action,
+            "args": args_json,
+            "cookiesStr": payload.cookies.unwrap_or_default(),
+            "clean": clean,
+            "cleanMod": clean.trim_start_matches("modules/").trim_start_matches("plugins/"),
+        });
 
         let start_time = std::time::Instant::now();
 
-        let bun_bin = find_bun_bin();
-        let mut cmd = Command::new(&bun_bin);
-        cmd.arg("-e").arg(&runner_script).current_dir(root);
-
-        // Inject full PATH including ~/.bun/bin, /opt/homebrew/bin, /usr/local/bin
-        if let Ok(curr_path) = std::env::var("PATH") {
-            let mut paths = vec![];
-            if let Some(userprofile) = std::env::var_os("USERPROFILE") {
-                paths.push(std::path::PathBuf::from(userprofile).join(".bun/bin").to_string_lossy().to_string());
-            }
-            if let Some(home) = std::env::var_os("HOME") {
-                paths.push(std::path::PathBuf::from(home).join(".bun/bin").to_string_lossy().to_string());
-            }
-            #[cfg(unix)]
-            {
-                paths.push("/opt/homebrew/bin".to_string());
-                paths.push("/usr/local/bin".to_string());
-            }
-            paths.push(curr_path);
-            let sep = if cfg!(windows) { ";" } else { ":" };
-            cmd.env("PATH", paths.join(sep));
-        }
-
-        // Inject project .env, .env.development, .env.local variables into child process
-        for env_file in &[".env", ".env.development", ".env.local"] {
-            let p = root.join(env_file);
-            if p.exists() {
-                if let Ok(content) = std::fs::read_to_string(&p) {
-                    for line in content.lines() {
-                        let trimmed = line.trim();
-                        if trimmed.is_empty() || trimmed.starts_with('#') || !trimmed.contains('=') {
-                            continue;
-                        }
-                        if let Some((key, val)) = trimmed.split_once('=') {
-                            let k = key.trim();
-                            let v = val.trim().trim_matches('"').trim_matches('\'');
-                            if !k.is_empty() {
-                                cmd.env(k, v);
-                            }
-                        }
-                    }
+        // Persistent Bun worker; a one-off process (same runtime, printing between delimiters) otherwise
+        let (parsed, user_stdout, stdout, stderr, success) =
+            match crate::worker_pool::call(root, "rpc", input.clone(), Vec::new()).await {
+                Ok(reply) => {
+                    let parsed = match reply.error() {
+                        Some(err) => serde_json::json!({ "error": err }),
+                        None => reply.output().clone(),
+                    };
+                    let success = reply.code() == 0 && reply.error().is_none();
+                    (parsed, reply.stdout().to_string(), reply.stdout().to_string(), reply.stderr().to_string(), success)
                 }
-            }
-        }
-
-        // Execute via Bun (native TS + env loading) or fallback to Node
-        let output = match cmd.output().await {
-            Ok(out) => out,
-            Err(_) => {
-                Command::new("node")
-                    .arg("--input-type=module")
-                    .arg("-e")
-                    .arg(&runner_script)
-                    .current_dir(root)
-                    .output()
-                    .await
-                    .map_err(|e| format!("Neither bun nor node runtime could be spawned: {}", e))?
-            }
-        };
-
-        let elapsed = start_time.elapsed();
-        let elapsed_str = if elapsed.as_millis() > 0 {
-            format!("{}ms", elapsed.as_millis())
-        } else {
-            format!("{:.1}ms", elapsed.as_secs_f64() * 1000.0)
-        };
-        let display_module = format_module_path(clean);
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
-
-        // Separate user console logs from RPC response
-        let (user_stdout, json_str) = match (
-            stdout.find("__NATA_RPC_OUT_START__"),
-            stdout.find("__NATA_RPC_OUT_END__"),
-        ) {
-            (Some(start), Some(end)) => {
-                let logs_before = &stdout[..start];
-                let json = &stdout[start + "__NATA_RPC_OUT_START__".len()..end];
-                let logs_after = &stdout[end + "__NATA_RPC_OUT_END__".len()..];
-                (format!("{}{}", logs_before, logs_after), json)
-            }
-            _ => ("".to_string(), stdout.trim()),
-        };
-
-        let has_logs = !user_stdout.trim().is_empty();
-        let has_stderr = !stderr.trim().is_empty();
-        let is_success = output.status.success();
-
-        if is_success {
-            if has_logs || has_stderr {
-                println!(
-                    "  \x1b[1;35m⚡\x1b[0m \x1b[1;37m{}\x1b[0m \x1b[90m›\x1b[0m \x1b[1;36m{}\x1b[0m \x1b[90m({})\x1b[0m",
-                    display_module, action, elapsed_str
-                );
-                for line in user_stdout.lines() {
-                    let trimmed = line.trim_end();
-                    if !trimmed.is_empty() {
-                        println!("  \x1b[90m│\x1b[0m  {}", trimmed);
-                    }
+                Err(crate::worker_pool::WorkerError::Failed(e)) => {
+                    (serde_json::json!({ "error": e }), String::new(), String::new(), String::new(), false)
                 }
-                for line in stderr.lines() {
-                    let trimmed = line.trim_end();
-                    if !trimmed.is_empty() {
-                        eprintln!("  \x1b[90m│\x1b[0m  \x1b[33m▲ {}\x1b[0m", trimmed);
-                    }
+                Err(crate::worker_pool::WorkerError::Unavailable(_)) => {
+                    let runner_script = format!(
+                        r#"import {{ runRpc }} from {runtime};
+const {{ payload, code }} = await runRpc({input});
+process.stdout.write("__NATA_RPC_OUT_START__" + JSON.stringify(payload) + "__NATA_RPC_OUT_END__\n", () => process.exit(code));
+// Open database handles would otherwise keep the process alive
+setTimeout(() => process.exit(code), 10);
+"#,
+                        runtime = serde_json::to_string(&clean_path(root.join(".nata/rpc_runtime.ts"))).unwrap_or_default(),
+                        input = input,
+                    );
+                    let output = crate::worker_pool::spawn_once(root, &runner_script).await.map_err(|msg| {
+                        // Spawn failures never reach the per-call RPC log block, so report them here
+                        crate::term::error("Server Action runtime failed to start", Some(&msg), None);
+                        msg
+                    })?;
+                    let stdout = output.stdout;
+                    // Separate user console logs from the delimited RPC response
+                    let (user_stdout, json_str) = match (stdout.find("__NATA_RPC_OUT_START__"), stdout.find("__NATA_RPC_OUT_END__")) {
+                        (Some(start), Some(end)) => (
+                            format!("{}{}", &stdout[..start], &stdout[end + "__NATA_RPC_OUT_END__".len()..]),
+                            stdout[start + "__NATA_RPC_OUT_START__".len()..end].to_string(),
+                        ),
+                        _ => (String::new(), stdout.trim().to_string()),
+                    };
+                    let parsed = serde_json::from_str(&json_str).unwrap_or(serde_json::Value::String(json_str));
+                    (parsed, user_stdout, stdout, output.stderr, output.success)
                 }
-            } else {
-                println!(
-                    "  \x1b[1;35m⚡\x1b[0m \x1b[1;37m{}\x1b[0m \x1b[90m›\x1b[0m \x1b[1;36m{}\x1b[0m \x1b[1;32m✔\x1b[0m \x1b[90m({})\x1b[0m",
-                    display_module, action, elapsed_str
-                );
-            }
-        } else {
-            println!(
-                "  \x1b[1;31m✖\x1b[0m \x1b[1;37m{}\x1b[0m \x1b[90m›\x1b[0m \x1b[1;31m{}\x1b[0m \x1b[90m({})\x1b[0m",
-                display_module, action, elapsed_str
-            );
-            if has_logs {
-                for line in user_stdout.lines() {
-                    let trimmed = line.trim_end();
-                    if !trimmed.is_empty() {
-                        println!("  \x1b[90m│\x1b[0m  {}", trimmed);
-                    }
-                }
-            }
-            if has_stderr {
-                for line in stderr.lines() {
-                    let trimmed = line.trim_end();
-                    if !trimmed.is_empty() {
-                        eprintln!("  \x1b[90m│\x1b[0m  \x1b[33m▲ {}\x1b[0m", trimmed);
-                    }
-                }
-            }
-        }
-
-        if !output.status.success() {
-            let parsed_err: Result<serde_json::Value, _> = serde_json::from_str(json_str);
-            let err_msg = if let Ok(val) = parsed_err {
-                if let Some(msg) = val.get("error").and_then(|m| m.as_str()) {
-                    msg.to_string()
-                } else if !stderr.trim().is_empty() {
-                    stderr.trim().to_string()
-                } else {
-                    "Unknown execution error".to_string()
-                }
-            } else if !stderr.trim().is_empty() {
-                stderr.trim().to_string()
-            } else if !stdout.trim().is_empty() {
-                stdout.trim().to_string()
-            } else {
-                "Unknown execution failure in Bun".to_string()
             };
 
-            eprintln!("  \x1b[90m│\x1b[0m  \x1b[1;31mError:\x1b[0m {}", err_msg);
-            return Err(format!("{}", err_msg));
+        let elapsed = start_time.elapsed();
+        let display_module = format_module_path(clean);
+        // Query logs are attached to both success and error payloads.
+        let queries: Vec<serde_json::Value> = parsed
+            .get("__nata_queries__")
+            .and_then(|v| v.as_array().cloned())
+            .unwrap_or_default();
+        let log_cfg = crate::dev_log::LogConfig::from_env();
+        let duration_ms = elapsed.as_secs_f64() * 1000.0;
+
+        if !success {
+            let err_msg = match parsed.get("error").and_then(|m| m.as_str()) {
+                Some(msg) => msg.to_string(),
+                None if !stderr.trim().is_empty() => stderr.trim().to_string(),
+                None if !stdout.trim().is_empty() => stdout.trim().to_string(),
+                None => "Unknown execution failure in Bun".to_string(),
+            };
+            print!(
+                "{}",
+                crate::dev_log::render_rpc(
+                    &crate::dev_log::RpcLogEntry {
+                        module: &display_module,
+                        action: &action,
+                        duration_ms,
+                        args: &args_json,
+                        queries: &queries,
+                        stdout: &user_stdout,
+                        stderr: &stderr,
+                        outcome: crate::dev_log::RpcOutcome::Err(&err_msg),
+                    },
+                    &log_cfg,
+                )
+            );
+            return Err(err_msg);
         }
 
-        let parsed: serde_json::Value = serde_json::from_str(json_str)
-            .unwrap_or_else(|_| serde_json::Value::String(json_str.to_string()));
-
-        let (data, set_cookies, queries) = if let Some(obj) = parsed.as_object() {
-            if obj.contains_key("__nata_rpc_data__") {
-                let d = obj.get("__nata_rpc_data__").cloned().unwrap_or(serde_json::Value::Null);
-                let sc: Vec<SetCookieInfo> = obj.get("__nata_set_cookies__")
-                    .and_then(|v| serde_json::from_value(v.clone()).ok())
-                    .unwrap_or_default();
-                let q: Vec<serde_json::Value> = obj.get("__nata_queries__")
-                    .and_then(|v| serde_json::from_value(v.clone()).ok())
-                    .unwrap_or_default();
-                (d, sc, q)
-            } else {
-                (parsed, vec![], vec![])
-            }
-        } else {
-            (parsed, vec![], vec![])
+        let (data, set_cookies) = match parsed.as_object() {
+            Some(obj) if obj.contains_key("__nata_rpc_data__") => (
+                obj.get("__nata_rpc_data__").cloned().unwrap_or(serde_json::Value::Null),
+                obj.get("__nata_set_cookies__")
+                    .and_then(|v| serde_json::from_value::<Vec<SetCookieInfo>>(v.clone()).ok())
+                    .unwrap_or_default(),
+            ),
+            _ => (parsed.clone(), vec![]),
         };
+
+        print!(
+            "{}",
+            crate::dev_log::render_rpc(
+                &crate::dev_log::RpcLogEntry {
+                    module: &display_module,
+                    action: &action,
+                    duration_ms,
+                    args: &args_json,
+                    queries: &queries,
+                    stdout: &user_stdout,
+                    stderr: &stderr,
+                    outcome: crate::dev_log::RpcOutcome::Ok(&data),
+                },
+                &log_cfg,
+            )
+        );
 
         Ok(RpcExecutionOutput { data, set_cookies, queries })
     }

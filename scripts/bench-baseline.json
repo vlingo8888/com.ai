@@ -1,0 +1,9 @@
+{
+  "readyMs": 84,
+  "firstPageMs": 557,
+  "ssrMedianMs": 0.52,
+  "ssrP90Ms": 1.29,
+  "clientJsKb": 705,
+  "rssPeakMb": 79,
+  "rssIdleMb": 74
+}

@@ -1,0 +1,12 @@
+{
+  "checks": [
+    { "name": "async page shows its data", "path": "/", "status": 200, "contains": ["Hello from an async component", "Streaming with Suspense"], "noIssues": true },
+    { "name": "client-rendered page ships its loading.tsx in the HTML, no framework loader", "path": "/", "ssr": ["Loading posts..."], "notInHtml": ["Mounting App Router", "Instant native execution"] },
+    { "name": "navigating to a slow async page shows loading.tsx, then the page", "path": "/", "navigate": { "click": "a[href='/slow']", "expectLoading": "Loading posts...", "expectText": "Slow data arrived", "expectPath": "/slow" } },
+    { "name": "async page is server-rendered", "path": "/", "ssr": ["Hello from an async component"], "knownGap": "async Server Components are client-rendered until streaming SSR + RSC (ROADMAP P1.5)" },
+    { "name": "Next 15 async params + generateMetadata", "path": "/posts/2", "contains": ["Streaming with Suspense"], "title": "Post 2 | Async Data" },
+    { "name": "error.tsx catches a render error", "path": "/error-demo", "contains": ["Something went wrong", "Boom from a client component"] },
+    { "name": "unknown route uses not-found.tsx", "path": "/missing-page", "status": 404, "contains": ["Custom not found page"] },
+    { "name": "notFound() inside a page", "path": "/posts/999", "contains": ["Custom not found page"] }
+  ]
+}

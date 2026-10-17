@@ -89,3 +89,7 @@ ehthumbs.db
 !.vscode/extensions.json
 /my-test-demo
 test.db.rwal
+
+# Assembled per-platform npm packages
+dist-npm/
+binaries/

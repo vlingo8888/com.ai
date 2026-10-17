@@ -1,0 +1,9 @@
+{
+  "name": "compat-server-actions",
+  "private": true,
+  "description": "Server Actions: \"use server\" module, <form action>, useActionState, direct calls from client components",
+  "dependencies": {
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  }
+}

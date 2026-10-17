@@ -26,6 +26,9 @@ clap = { version = "4.5", features = ["derive"] }
 futures-util = "0.3"
 walkdir = "2.5"
 lightningcss = "1.0.0-alpha.72"
+mimalloc = { version = "0.1", default-features = false }
+blake3 = "1"
+redb = "2"
 notify = "6.1"
 swc_core = { version = "79.0.0", features = [
     "common",

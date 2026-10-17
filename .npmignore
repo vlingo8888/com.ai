@@ -1,0 +1,38 @@
+# Compiler build artifacts & dependencies
+compiler-rs/target/
+**/target/
+target/
+*.rlib
+*.d
+*.a
+*.o
+
+# Tests & Demos
+tests/
+my-test-demo/
+*.test.ts
+*.test.tsx
+*.spec.ts
+*.spec.tsx
+
+# Local Databases & Logs
+*.db
+*.sqlite
+*.rwal
+*.wal
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# AI Agent metadata & rules
+.agent/
+.agents/
+.antigravityrules
+AGENTS.md
+BUGS.md
+TODO.md
+
+# OS files
+.DS_Store
+Thumbs.db

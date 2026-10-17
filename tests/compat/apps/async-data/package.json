@@ -1,0 +1,9 @@
+{
+  "name": "compat-async-data",
+  "private": true,
+  "description": "async Server Components, loading.tsx, error.tsx, not-found.tsx, Next 15 async params",
+  "dependencies": {
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  }
+}

@@ -346,15 +346,17 @@ fn test_norm_044_deep_parent() {
 }
 
 #[test]
-fn test_cdn_045_react_pinned() {
-    assert_eq!(ImportResolver::resolve_npm_cdn("react"), "https://esm.sh/react@18.3.1");
-    assert_eq!(ImportResolver::resolve_npm_cdn("react-dom"), "https://esm.sh/react-dom@18.3.1?external=react");
+fn test_deps_045_packages_resolve_to_local_prebundles() {
+    assert_eq!(ImportResolver::resolve_npm_package("react"), "/_nata/deps/react");
+    assert_eq!(ImportResolver::resolve_npm_package("react-dom/client"), "/_nata/deps/react-dom/client");
+    assert_eq!(ImportResolver::resolve_npm_package("@hookform/resolvers/zod"), "/_nata/deps/@hookform/resolvers/zod");
 }
 
 #[test]
-fn test_cdn_046_popular_libs() {
-    assert_eq!(ImportResolver::resolve_npm_cdn("lucide-react"), "https://esm.sh/lucide-react@0.460.0?external=react,react-dom");
-    assert_eq!(ImportResolver::resolve_npm_cdn("framer-motion"), "https://esm.sh/framer-motion@11.11.17?external=react,react-dom");
+fn test_deps_046_framework_shims_stay_shims() {
+    assert_eq!(ImportResolver::resolve_npm_package("core"), "/_nata/shims/core");
+    assert_eq!(ImportResolver::resolve_npm_package("next/navigation"), "/_nata/shims/next/navigation");
+    assert_eq!(ImportResolver::resolve_npm_package("next-intl/server"), "/_nata/shims/next-intl/server");
 }
 
 // =========================================================================
@@ -391,10 +393,13 @@ fn test_trans_049_relative_import_rewrite() {
 }
 
 #[test]
-fn test_trans_050_css_import_commented() {
-    let code = r#"import "./globals.css";"#;
+fn test_trans_050_css_imports_become_css_modules() {
+    let code = "import \"./globals.css\";\nimport styles from \"../components/card.module.css\";\nimport \"@/styles/theme.css\";\n";
     let transformed = ImportResolver::transform_source(code, "app/layout.tsx");
-    assert!(transformed.contains("/* css import */"));
+    assert!(transformed.contains(r#"import "/_nata/css/app/globals.css""#));
+    assert!(transformed.contains(r#"import styles from "/_nata/css/components/card.module.css""#));
+    // Default tsconfig maps `@/` to `src/`, same as JS imports
+    assert!(transformed.contains(r#"import "/_nata/css/src/styles/theme.css""#));
 }
 
 #[test]
@@ -449,7 +454,7 @@ export function useAuth() {
     assert!(transformed.contains("export const loginFn = new Proxy"));
     assert!(transformed.contains("export const register = new Proxy"));
     assert!(!transformed.contains("AuthUser = new Proxy"));
-    assert!(transformed.contains(r#"from "https://esm.sh/react"#));
+    assert!(transformed.contains(r#"from "/_nata/deps/react""#));
     assert!(transformed.contains(r#"from "/_bundle/features/auth/utils""#));
 
     // Verify it compiles cleanly with SWC
@@ -556,3 +561,51 @@ export default async function Layout() {
 
 
 
+// =========================================================================
+// SUITE: MISSING REMOTE EXPORTS DEGRADE TO console.error
+// =========================================================================
+
+#[test]
+fn test_soften_remote_named_imports_rewrites_to_namespace() {
+    let js = "import { Loader2, SchoolPlus as School } from \"https://esm.sh/lucide-react@0.460.0?external=react,react-dom\";\nexport default function P() { return School; }\n";
+    let out = ImportResolver::soften_remote_named_imports(js);
+    assert!(out.contains("import * as __nata_ns0 from \"https://esm.sh/lucide-react@0.460.0?external=react,react-dom\";"));
+    assert!(out.contains("Loader2 = __nata_pick(__nata_ns0, \"Loader2\""));
+    assert!(out.contains("School = __nata_pick(__nata_ns0, \"SchoolPlus\""));
+    assert!(out.contains("function __nata_pick("));
+    assert!(out.contains("console.error"));
+    assert!(!out.contains("import { Loader2"));
+}
+
+#[test]
+fn test_soften_remote_named_imports_handles_default_and_named() {
+    let js = "import React, { useState } from \"https://esm.sh/react@18.3.1\";\n";
+    let out = ImportResolver::soften_remote_named_imports(js);
+    assert!(out.contains("React = __nata_pick(__nata_ns0, \"default\""));
+    assert!(out.contains("useState = __nata_pick(__nata_ns0, \"useState\""));
+}
+
+#[test]
+fn test_soften_remote_named_imports_leaves_local_and_namespace_imports() {
+    let js = "import { Button } from \"/_bundle/components/ui/button\";\nimport * as Icons from \"https://esm.sh/lucide-react@0.460.0\";\nimport \"https://esm.sh/side-effect\";\n";
+    let out = ImportResolver::soften_remote_named_imports(js);
+    assert_eq!(out, js);
+}
+
+#[test]
+fn test_soften_remote_named_imports_output_compiles() {
+    let js = "import { jsx as _jsx } from \"https://esm.sh/react@18.3.1/jsx-runtime\";\nimport { SchoolPlus } from \"https://esm.sh/lucide-react@0.460.0\";\nexport default function P() { return _jsx(SchoolPlus, {}); }\n";
+    let out = ImportResolver::soften_remote_named_imports(js);
+    assert!(crate::swc_compiler::SwcCompiler::compile(&out, "check.js").is_ok());
+}
+
+#[test]
+fn test_soften_named_imports_from_local_dependency_bundles() {
+    let js = "import { Loader2, ClipboardAlert } from \"/_nata/deps/lucide-react\";\nexport default function P() { return ClipboardAlert; }\n";
+    let out = ImportResolver::soften_remote_named_imports(js);
+    assert!(out.contains("import * as __nata_ns0 from \"/_nata/deps/lucide-react\";"));
+    assert!(out.contains("ClipboardAlert = __nata_pick(__nata_ns0, \"ClipboardAlert\""));
+    // Project modules keep strict ESM imports (circular imports need live bindings)
+    let local = "import { Button } from \"/_bundle/components/ui/button\";\n";
+    assert_eq!(ImportResolver::soften_remote_named_imports(local), local);
+}

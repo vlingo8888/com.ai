@@ -17,38 +17,23 @@ impl RouteHandlerEngine {
 
         match RouteHandlerWorker::execute(root, &request).await {
             Ok(output) => {
-                let status = output.status;
-                if status < 400 {
-                    println!(
-                        "  \x1b[1;32m⚡ [API]\x1b[0m \x1b[1m{}\x1b[0m \x1b[1;36m{}\x1b[0m -> \x1b[1;32m{} {}\x1b[0m in \x1b[1;33m{:.2}ms\x1b[0m",
-                        method, path, status, output.status_text, output.duration_ms
-                    );
-                } else if status < 500 {
-                    println!(
-                        "  \x1b[1;33m▲ [API]\x1b[0m \x1b[1m{}\x1b[0m \x1b[1;36m{}\x1b[0m -> \x1b[1;33m{} {}\x1b[0m in \x1b[1;33m{:.2}ms\x1b[0m",
-                        method, path, status, output.status_text, output.duration_ms
-                    );
-                } else {
-                    println!(
-                        "  \x1b[1;31m✖ [API Error]\x1b[0m \x1b[1m{}\x1b[0m \x1b[1;36m{}\x1b[0m -> \x1b[1;31m{} {}\x1b[0m ({}ms): {}",
-                        method, path, status, output.status_text, output.duration_ms, output.error.as_deref().unwrap_or("Unknown error")
+                // The request line itself is printed by the dev server's request log middleware
+                if output.status >= 500 {
+                    crate::term::error(
+                        &format!("{} {} failed with {} {}", method, path, output.status, output.status_text),
+                        output.error.as_deref(),
+                        None,
                     );
                 }
                 output
             }
             Err(err) => {
-                println!(
-                    "  \x1b[1;31m✖ [API Execution Error]\x1b[0m \x1b[1m{}\x1b[0m \x1b[1;36m{}\x1b[0m: {}",
-                    method, path, err
-                );
+                crate::term::error(&format!("Route handler {} {} could not run", method, path), Some(&err), None);
                 RouteHandlerResponse {
                     status: 500,
                     status_text: "Internal Server Error".to_string(),
-                    headers: std::collections::HashMap::new(),
-                    cookies: Vec::new(),
-                    body_base64: String::new(),
-                    duration_ms: 0.0,
                     error: Some(err),
+                    ..Default::default()
                 }
             }
         }

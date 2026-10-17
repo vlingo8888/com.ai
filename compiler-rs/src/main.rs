@@ -3,6 +3,10 @@ use compiler_rs::server::DevServer;
 use std::path::PathBuf;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
+// mimalloc: lower fragmentation and RSS for a long-running dev/prod server than the system allocator
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 #[derive(Parser, Debug)]
 #[command(name = "com-compiler")]
 #[command(about = "High-performance App Router & Server Actions compiler & dev server in Rust")]
@@ -35,8 +39,21 @@ enum Commands {
     },
 }
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// `com dev` serves one developer: two runtime threads are plenty and every extra thread costs stack and
+/// buffers. Production serving (`com start`) will size the runtime from the CPU count.
+fn runtime_threads() -> usize {
+    std::env::var("COM_THREADS").ok().and_then(|v| v.parse().ok()).filter(|n: &usize| *n > 0).unwrap_or(2)
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(runtime_threads())
+        .enable_all()
+        .build()?
+        .block_on(run())
+}
+
+async fn run() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -49,10 +66,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     match cli.command {
         Commands::Dev { dir, port, target } => {
+            compiler_rs::term::mark_start();
             if std::env::var("COM_MANAGED").is_err() {
-                println!("\n   \x1b[1m▲ com.ai.vn\x1b[0m \x1b[90m(Rust Engine)\x1b[0m");
-                println!("   \x1b[90m-\x1b[0m Target:   {}", target);
-                println!();
+                println!("\n   \x1b[1m▲ com.ai.vn\x1b[0m \x1b[90m(Rust engine)\x1b[0m");
+                println!("   - Target:       {}", target);
             }
 
             DevServer::run(dir, port, target).await?;

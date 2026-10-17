@@ -96,8 +96,10 @@ class LoggingConnection implements DatabaseConnection {
       const logStore = (globalThis as any).__NATA_QUERY_LOGS__ || ((globalThis as any).__NATA_QUERY_LOGS__ = []);
       logStore.push(queryLog);
 
-      console.error(\`\\x1b[31m✖ [SQL Error]\\x1b[0m \\x1b[1m\${sqlStr}\\x1b[0m\\x1b[90m\${paramStr} (\${duration}ms)\\x1b[0m\`);
-      console.error(\`\\x1b[31m  ↳ Error:\\x1b[0m \${err?.message || err}\`);
+      if (process.env.COM_DEV_QUERY_LOG !== "1") {
+        console.error(\`\\x1b[31m✖ [SQL Error]\\x1b[0m \\x1b[1m\${sqlStr}\\x1b[0m\\x1b[90m\${paramStr} (\${duration}ms)\\x1b[0m\`);
+        console.error(\`\\x1b[31m  ↳ Error:\\x1b[0m \${err?.message || err}\`);
+      }
       throw err;
     }
   }

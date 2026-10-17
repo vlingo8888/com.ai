@@ -113,6 +113,7 @@ impl RouteScanner {
                 kind,
                 score,
                 segments,
+                compiled_regex: Default::default(),
             });
         }
 

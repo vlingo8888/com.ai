@@ -1,6 +1,5 @@
 use super::types::{MetadataFileKind, MetadataFileRequest, MetadataFileResponse};
 use std::path::Path;
-use tokio::process::Command;
 
 const META_DELIM_START: &str = "__NATA_META_OUT_START__";
 const META_DELIM_END: &str = "__NATA_META_OUT_END__";
@@ -59,32 +58,12 @@ await runMetadataHandler({{
             base_url = base_url_json,
         );
 
-        let bun_bin = crate::rpc::find_bun_bin();
-        let mut cmd = Command::new(&bun_bin);
-        cmd.arg("-e").arg(&runner_script);
-        cmd.current_dir(root);
-
-        if let Ok(curr_path) = std::env::var("PATH") {
-            let mut paths = vec![];
-            if let Some(userprofile) = std::env::var_os("USERPROFILE") {
-                paths.push(std::path::PathBuf::from(userprofile).join(".bun/bin").to_string_lossy().to_string());
-            }
-            if let Some(home) = std::env::var_os("HOME") {
-                paths.push(std::path::PathBuf::from(home).join(".bun/bin").to_string_lossy().to_string());
-            }
-            #[cfg(unix)]
-            {
-                paths.push("/opt/homebrew/bin".to_string());
-                paths.push("/usr/local/bin".to_string());
-            }
-            paths.push(curr_path);
-            let sep = if cfg!(windows) { ";" } else { ":" };
-            cmd.env("PATH", paths.join(sep));
-        }
-
-        let output = cmd.output().await.map_err(|e| format!("Failed to spawn metadata runner: {}", e))?;
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
+        // Persistent worker (or a one-off process when it is unavailable)
+        let output = crate::worker_pool::run(root, &runner_script)
+            .await
+            .map_err(|e| format!("Failed to spawn metadata runner: {}", e))?;
+        let stdout = output.stdout;
+        let stderr = output.stderr;
 
         if let (Some(start), Some(end)) = (stdout.find(META_DELIM_START), stdout.find(META_DELIM_END)) {
             let json_slice = &stdout[start + META_DELIM_START.len()..end];
@@ -94,7 +73,7 @@ await runMetadataHandler({{
             }
         }
 
-        if !output.status.success() {
+        if !output.success {
             return Err(format!("Metadata runner failed: {}\nStderr: {}", stdout, stderr));
         }
 

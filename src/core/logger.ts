@@ -100,7 +100,12 @@ export const logger = {
   },
 
   warn(msg: string) {
-    console.log(` ${colors.yellow}▲${colors.reset} ${msg}`);
+    console.log(` ${colors.yellow}⚠${colors.reset} ${msg}`);
+  },
+
+  /** Next.js-style dim progress line: ` ○ Compiling /about ...` */
+  event(msg: string) {
+    console.log(` ${colors.dim}○${colors.reset} ${msg}`);
   },
 
   error(msg: string, detail?: string) {

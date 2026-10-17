@@ -1,0 +1,9 @@
+{
+  "name": "compat-routing",
+  "private": true,
+  "description": "dynamic, catch-all and grouped routes, generateMetadata, template.tsx, route handlers",
+  "dependencies": {
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  }
+}

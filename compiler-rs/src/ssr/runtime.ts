@@ -27,63 +27,9 @@ interface SsrInput {
   urlPath: string;
 }
 
-// 1. Browser & DOM Environment Mocking for Server Context
-if (typeof globalThis.window === "undefined") {
-  (globalThis as any).window = {
-    location: {
-      pathname: "/",
-      search: "",
-      hash: "",
-      origin: "http://localhost:3000",
-      href: "http://localhost:3000/",
-    },
-    addEventListener: () => {},
-    removeEventListener: () => {},
-    dispatchEvent: () => true,
-    matchMedia: () => ({
-      matches: false,
-      addListener: () => {},
-      removeListener: () => {},
-      addEventListener: () => {},
-      removeEventListener: () => {},
-      dispatchEvent: () => true,
-    }),
-    requestAnimationFrame: (cb: any) => setTimeout(cb, 0),
-    cancelAnimationFrame: (id: any) => clearTimeout(id),
-  };
-}
-
-if (typeof globalThis.document === "undefined") {
-  (globalThis as any).document = {
-    createElement: () => ({ setAttribute: () => {}, appendChild: () => {}, style: {} }),
-    head: { appendChild: () => {} },
-    body: { appendChild: () => {} },
-    cookie: "",
-    addEventListener: () => {},
-    removeEventListener: () => {},
-  };
-}
-
-if (typeof globalThis.navigator === "undefined") {
-  (globalThis as any).navigator = {
-    userAgent: "Mozilla/5.0 (Server-Side-Rendering; NATA Engine)",
-    clipboard: { writeText: async () => {} },
-  };
-}
-
-if (typeof globalThis.localStorage === "undefined") {
-  const memoryStore = new Map<string, string>();
-  (globalThis as any).localStorage = {
-    getItem: (k: string) => memoryStore.get(k) ?? null,
-    setItem: (k: string, v: string) => memoryStore.set(k, String(v)),
-    removeItem: (k: string) => memoryStore.delete(k),
-    clear: () => memoryStore.clear(),
-  };
-}
-
-if (typeof globalThis.sessionStorage === "undefined") {
-  (globalThis as any).sessionStorage = (globalThis as any).localStorage;
-}
+// 1. No browser globals on the server, exactly like Next.js: libraries detect the server with
+// `typeof window/document === "undefined"`, and a partial fake `document` made them call DOM APIs that
+// do not exist. The request URL for next/navigation hooks lives in `__NATA_LOCATION__` instead.
 
 export async function runSsr(input: SsrInput) {
   const startTime = performance.now();
@@ -106,8 +52,14 @@ export async function runSsr(input: SsrInput) {
     (globalThis as any).__NATA_COOKIES__ = cookieMap;
     (globalThis as any).__NATA_SET_COOKIES__ = [];
 
-    (globalThis as any).window.location.pathname = input.urlPath;
-    (globalThis as any).window.location.href = `http://localhost:3000${input.urlPath}`;
+    // Mirror the request URL so next/navigation hooks render the same values as in the browser
+    const searchEntries = Object.entries(input.searchParams || {}).map(([k, v]) => [k, String(v ?? "")]);
+    const search = searchEntries.length ? "?" + new URLSearchParams(searchEntries).toString() : "";
+    (globalThis as any).__NATA_LOCATION__ = {
+      pathname: input.urlPath,
+      search,
+      href: `http://localhost:3000${input.urlPath}${search}`,
+    };
 
     // 3. Load React & ReactDOMServer
     let React: any = (globalThis as any).React;
@@ -130,15 +82,19 @@ export async function runSsr(input: SsrInput) {
           React = r.default || r;
           ReactDOMServer = rd.default || rd;
         } catch {
-          // Fallback mock React if offline
+          // Offline: the stubs below still resolve metadata; markup is left to the client
         }
       }
     }
 
+    // Without a real React (zero-install project, offline) modules are still evaluated with a stub so
+    // metadata reaches the HTML head, but no markup is rendered: the client mounts the page instead.
+    let reactUnavailable: string | null = null;
     if (!React || typeof React.createElement !== "function") {
       if (React && React.default && typeof React.default.createElement === "function") {
         React = React.default;
       } else {
+        reactUnavailable = "React could not be loaded for SSR, falling back to client rendering";
         React = {
           createElement: (type: any, props: any, ...children: any[]) => ({ type, props: { ...props, children } }),
           Fragment: "Fragment",
@@ -152,9 +108,10 @@ export async function runSsr(input: SsrInput) {
       if (ReactDOMServer && ReactDOMServer.default && typeof ReactDOMServer.default.renderToString === "function") {
         ReactDOMServer = ReactDOMServer.default;
       } else {
+        reactUnavailable = reactUnavailable || "react-dom/server could not be loaded for SSR, falling back to client rendering";
         ReactDOMServer = {
-          renderToString: () => "<div>App</div>",
-          renderToStaticMarkup: () => "<div>App</div>",
+          renderToString: () => "",
+          renderToStaticMarkup: () => "",
         };
       }
     }
@@ -472,10 +429,17 @@ export async function runSsr(input: SsrInput) {
       return node;
     };
 
+    // `async` pages/layouts/templates are Server Components: rendering them needs streaming SSR + RSC
+    // (ROADMAP P1.5). renderToString cannot await them (React 18 renders the nearest Suspense fallback with
+    // an error, React 19 aborts), so such routes are rendered on the client instead, without a
+    // half-rendered page that fails to hydrate.
+    let asyncComponent: string | null = null;
+
     // Helper to evaluate and make a React element out of async/sync components
     const makeElement = (Comp: any, props: any, children?: any) => {
       try {
         if (typeof Comp !== "function") return null;
+        if (Comp.constructor?.name === "AsyncFunction") asyncComponent ??= Comp.name || "anonymous";
         const WrappedComp = (p: any) => {
           try {
             const res = Comp(p);
@@ -685,6 +649,25 @@ export async function runSsr(input: SsrInput) {
     }
 
     // 6. Render to HTML String
+    if (asyncComponent) {
+      // Client-rendered, but the metadata resolved above still goes into the server HTML <head>
+      const output = {
+        html: "",
+        initial_state: { params: input.params, searchParams: input.searchParams },
+        title: resolvedTitle || null,
+        metadata: mergedMeta || null,
+        head_tags: headHtml || null,
+        set_cookies: (globalThis as any).__NATA_SET_COOKIES__ || [],
+        status_code: 200,
+        redirect_url: null,
+        render_time_ms: performance.now() - startTime,
+        mode: "ClientOnly",
+        error: `NATA_ASYNC_SERVER_COMPONENT: ${asyncComponent} is an async Server Component`,
+      };
+      console.log(SSR_DELIM_START + JSON.stringify(output) + SSR_DELIM_END);
+      return output;
+    }
+
     let renderedHtml = "";
     try {
       if (currentTree) {
@@ -748,8 +731,8 @@ export async function runSsr(input: SsrInput) {
       status_code: notFoundEncountered ? 404 : 200,
       redirect_url: null,
       render_time_ms: performance.now() - startTime,
-      mode: "Full",
-      error: null,
+      mode: reactUnavailable ? "ClientOnly" : "Full",
+      error: reactUnavailable,
     };
 
     console.log(SSR_DELIM_START + JSON.stringify(output) + SSR_DELIM_END);
@@ -762,7 +745,8 @@ export async function runSsr(input: SsrInput) {
       metadata: null,
       head_tags: null,
       set_cookies: (globalThis as any).__NATA_SET_COOKIES__ || [],
-      status_code: 500,
+      // The client still renders the page from the CSR shell, so this is not a failed response
+      status_code: 200,
       redirect_url: redirectUrl,
       render_time_ms: performance.now() - startTime,
       mode: "ClientOnly",

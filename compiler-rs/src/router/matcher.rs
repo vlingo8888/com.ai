@@ -1,4 +1,3 @@
-use regex::Regex;
 use std::collections::HashMap;
 
 use super::types::{RouteEntry, RouteMatch, RouteSegment, SegmentType};
@@ -183,7 +182,7 @@ impl RouteMatcher {
         let (clean_path, query) = Self::normalize_url(path_or_url);
 
         for route in routes {
-            if let Ok(re) = Regex::new(&route.regex) {
+            if let Some(re) = route.compiled_regex() {
                 if let Some(caps) = re.captures(&clean_path) {
                     let mut params = HashMap::new();
                     for (i, name) in route.param_names.iter().enumerate() {

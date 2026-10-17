@@ -48,7 +48,7 @@ impl AppRouter {
         let (clean_path, _) = RouteMatcher::normalize_url(path);
 
         for route in &self.routes {
-            if let Ok(re) = regex::Regex::new(&route.regex) {
+            if let Some(re) = route.compiled_regex() {
                 if let Some(caps) = re.captures(&clean_path) {
                     let mut params = HashMap::new();
                     for (i, name) in route.param_names.iter().enumerate() {

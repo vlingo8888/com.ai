@@ -2,7 +2,7 @@ use swc_core::common::{
     comments::NoopComments,
     errors::Handler,
     sync::Lrc,
-    FileName, Globals, Mark, SourceMap, GLOBALS,
+    FileName, Globals, Mark, SourceMap, Spanned, GLOBALS,
 };
 use swc_core::ecma::{
     ast::Pass,
@@ -16,17 +16,47 @@ use swc_core::ecma::{
     visit::VisitMutWith,
 };
 
+/// A syntax error with its location, ready to be shown as a Next.js-style build error
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct CompileError {
+    pub file: String,
+    pub message: String,
+    /// 1-based line/column of the first error, when the parser reported a span
+    pub line: Option<usize>,
+    pub column: Option<usize>,
+    /// Code frame around the error (see `term::code_frame`), empty when no location is known
+    pub frame: String,
+}
+
+impl CompileError {
+    fn plain(file: &str, message: String) -> Self {
+        Self { file: file.to_string(), message, line: None, column: None, frame: String::new() }
+    }
+
+    /// `./app/page.tsx:5:3`, the location header Next.js prints above build errors
+    pub fn location(&self) -> String {
+        match (self.line, self.column) {
+            (Some(l), Some(c)) => format!("./{}:{}:{}", self.file, l, c),
+            _ => format!("./{}", self.file),
+        }
+    }
+}
+
+impl std::fmt::Display for CompileError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.location(), self.message)
+    }
+}
+
 /// High-performance SWC Native Compiler Engine
 pub struct SwcCompiler;
 
 impl SwcCompiler {
     /// Compiles TypeScript / TSX source code into browser-executable JavaScript
-    pub fn compile(source_code: &str, file_name: &str) -> Result<String, String> {
+    pub fn compile(source_code: &str, file_name: &str) -> Result<String, CompileError> {
         let cm: Lrc<SourceMap> = Default::default();
-        let handler = Handler::with_emitter_writer(
-            Box::new(std::io::stderr()),
-            Some(cm.clone()),
-        );
+        // Diagnostics are reported through `CompileError`, so SWC's own rustc-style output is discarded
+        let handler = Handler::with_emitter_writer(Box::new(std::io::sink()), Some(cm.clone()));
 
         let fm = cm.new_source_file(
             FileName::Custom(file_name.to_string()).into(),
@@ -59,8 +89,18 @@ impl SwcCompiler {
         let mut program = match parser.parse_program() {
             Ok(p) => p,
             Err(err) => {
+                let pos = cm.lookup_char_pos(err.span().lo);
+                let message = err.kind().msg().to_string();
                 err.into_diagnostic(&handler).emit();
-                return Err(format!("SWC Parse Error in {}: failed to parse syntax", file_name));
+                let line = pos.line;
+                let column = pos.col_display + 1;
+                return Err(CompileError {
+                    file: file_name.to_string(),
+                    message,
+                    line: Some(line),
+                    column: Some(column),
+                    frame: crate::term::code_frame(source_code, line, column, 2),
+                });
             }
         };
 
@@ -107,11 +147,11 @@ impl SwcCompiler {
                 };
 
                 if let Err(e) = emitter.emit_program(&program) {
-                    return Err(format!("SWC Codegen Error: {:?}", e));
+                    return Err(CompileError::plain(file_name, format!("SWC Codegen Error: {:?}", e)));
                 }
             }
 
-            String::from_utf8(buf).map_err(|e| format!("UTF-8 conversion error: {:?}", e))
+            String::from_utf8(buf).map_err(|e| CompileError::plain(file_name, format!("UTF-8 conversion error: {:?}", e)))
         })
     }
 }

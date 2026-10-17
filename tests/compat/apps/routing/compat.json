@@ -1,0 +1,10 @@
+{
+  "checks": [
+    { "name": "dynamic segment + generateMetadata", "path": "/blog/hello-world", "status": 200, "ssr": ["Post slug: hello-world"], "title": "Blog: hello-world · Routing", "noIssues": true },
+    { "name": "catch-all segment", "path": "/docs/getting/started/install", "status": 200, "ssr": ["Docs path: getting / started / install"] },
+    { "name": "route group + template.tsx", "path": "/pricing", "status": 200, "ssr": ["Pricing plans"], "title": "Pricing · Routing", "selector": "[data-template=marketing]" },
+    { "name": "Link across dynamic routes", "path": "/blog/hello-world", "navigate": { "click": "a[href='/pricing']", "expectText": "Pricing plans", "expectPath": "/pricing" } },
+    { "name": "route handler GET with query", "path": "/api/hello?name=com", "api": { "status": 200, "json": { "message": "hello com" } } },
+    { "name": "route handler POST with JSON body", "path": "/api/hello", "api": { "method": "POST", "body": { "a": 1 }, "status": 201, "json": { "received": { "a": 1 } } } }
+  ]
+}

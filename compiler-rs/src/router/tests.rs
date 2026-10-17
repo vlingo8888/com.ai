@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use super::{
@@ -27,6 +28,7 @@ fn create_test_route(segments: &[&str], is_api: bool) -> RouteEntry {
         kind: if is_api { RouteKind::Api } else { RouteKind::Page },
         score,
         segments: parsed_segments,
+        compiled_regex: Default::default(),
     }
 }
 
@@ -870,3 +872,24 @@ fn test_special_files_238_route_groups_isolation() {
     let _ = std::fs::remove_dir_all(&temp_dir);
 }
 
+
+#[test]
+fn test_params_json_matches_next_shapes() {
+    let docs = create_test_route(&["docs", "[...parts]"], false);
+    let mut params = HashMap::new();
+    params.insert("parts".to_string(), "getting/started%20now/install".to_string());
+    assert_eq!(docs.params_json(&params), serde_json::json!({ "parts": ["getting", "started now", "install"] }));
+
+    let post = create_test_route(&["blog", "[slug]"], false);
+    let mut params = HashMap::new();
+    params.insert("slug".to_string(), "xin-ch%C3%A0o".to_string());
+    assert_eq!(post.params_json(&params), serde_json::json!({ "slug": "xin-chào" }));
+}
+
+#[test]
+fn test_route_regex_is_compiled_once() {
+    let route = create_test_route(&["blog", "[slug]"], false);
+    let first = route.compiled_regex().unwrap() as *const regex::Regex;
+    let second = route.compiled_regex().unwrap() as *const regex::Regex;
+    assert_eq!(first, second);
+}

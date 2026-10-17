@@ -1,6 +1,5 @@
 use super::types::{SsrOutput, SsrRequest};
 use std::path::Path;
-use tokio::process::Command;
 
 const SSR_DELIM_START: &str = "__NATA_SSR_OUT_START__";
 const SSR_DELIM_END: &str = "__NATA_SSR_OUT_END__";
@@ -39,7 +38,6 @@ impl SsrWorker {
                 })
             })
             .collect();
-        let layout_paths_json = serde_json::to_string(&layout_paths_vec).unwrap_or_else(|_| "[]".to_string());
 
         let segments_files_clean: Vec<serde_json::Value> = request
             .segments_files
@@ -61,146 +59,96 @@ impl SsrWorker {
                 })
             })
             .collect();
-        let segments_files_json = serde_json::to_string(&segments_files_clean).unwrap_or_else(|_| "[]".to_string());
-        let global_error_json = match &request.global_error_file {
-            Some(p) => serde_json::to_string(&crate::rpc::clean_path(if p.is_absolute() { p.clone() } else { root.join(p) })).unwrap_or_else(|_| "null".to_string()),
-            None => "null".to_string(),
+        let global_error_path = request
+            .global_error_file
+            .as_ref()
+            .map(|p| crate::rpc::clean_path(if p.is_absolute() { p.clone() } else { root.join(p) }));
+        let input = serde_json::json!({
+            "pagePath": page_path,
+            "layoutPaths": layout_paths_vec,
+            "segmentsFiles": segments_files_clean,
+            "globalErrorPath": global_error_path,
+            "params": request.params,
+            "searchParams": request.search_params,
+            "cookiesStr": request.cookies.clone().unwrap_or_default(),
+            "headers": request.headers.clone().unwrap_or_else(|| serde_json::json!({})),
+            "urlPath": request.path,
+        });
+        let failed = |error: String| SsrOutput {
+            render_time_ms: start_instant.elapsed().as_secs_f64() * 1000.0,
+            error: Some(error),
+            ..SsrOutput::client_only(request)
         };
 
-        let params_json = serde_json::to_string(&request.params).unwrap_or_else(|_| "{}".to_string());
-        let search_params_json = serde_json::to_string(&request.search_params).unwrap_or_else(|_| "{}".to_string());
-        let cookies_str_json = serde_json::to_string(&request.cookies.clone().unwrap_or_default()).unwrap_or_else(|_| "\"\"".to_string());
-        let headers_json = serde_json::to_string(&request.headers.clone().unwrap_or_else(|| serde_json::json!({}))).unwrap_or_else(|_| "{}".to_string());
-        let url_path_json = serde_json::to_string(&request.path).unwrap_or_else(|_| "\"/\"".to_string());
-
-        // 3. Construct in-memory invocation script
-        let runner_script = format!(
-            r#"
-import {{ runSsr }} from "{runtime_path}";
-
-await runSsr({{
-  pagePath: "{page_path}",
-  layoutPaths: {layout_paths},
-  segmentsFiles: {segments_files},
-  globalErrorPath: {global_error},
-  params: {params},
-  searchParams: {search_params},
-  cookiesStr: {cookies_str},
-  headers: {headers},
-  urlPath: {url_path}
-}});
-"#,
-            runtime_path = crate::rpc::clean_path(root.join(".nata/ssr_runtime.ts")),
-            page_path = page_path,
-            layout_paths = layout_paths_json,
-            segments_files = segments_files_json,
-            global_error = global_error_json,
-            params = params_json,
-            search_params = search_params_json,
-            cookies_str = cookies_str_json,
-            headers = headers_json,
-            url_path = url_path_json
-        );
-
-        // Write ssr_runtime.ts into .nata/
-        let ssr_runtime_content = include_str!("runtime.ts");
-        let nata_dir = root.join(".nata");
-        let _ = std::fs::create_dir_all(&nata_dir);
-        let _ = std::fs::write(nata_dir.join("ssr_runtime.ts"), ssr_runtime_content);
-
-        // 4. Execute via Bun or Node runner
-        let bun_bin = crate::rpc::find_bun_bin();
-        let mut cmd = Command::new(&bun_bin);
-        cmd.arg("-e").arg(&runner_script);
-        cmd.current_dir(root);
-
-        // Inject full PATH including ~/.bun/bin, /opt/homebrew/bin, /usr/local/bin
-        if let Ok(curr_path) = std::env::var("PATH") {
-            let mut paths = vec![];
-            if let Some(userprofile) = std::env::var_os("USERPROFILE") {
-                paths.push(std::path::PathBuf::from(userprofile).join(".bun/bin").to_string_lossy().to_string());
-            }
-            if let Some(home) = std::env::var_os("HOME") {
-                paths.push(std::path::PathBuf::from(home).join(".bun/bin").to_string_lossy().to_string());
-            }
-            #[cfg(unix)]
-            {
-                paths.push("/opt/homebrew/bin".to_string());
-                paths.push("/usr/local/bin".to_string());
-            }
-            paths.push(curr_path);
-            let sep = if cfg!(windows) { ";" } else { ":" };
-            cmd.env("PATH", paths.join(sep));
-        }
-
-        // Inject project .env variables
-        for env_file in &[".env", ".env.development", ".env.local"] {
-            let p = root.join(env_file);
-            if p.exists() {
-                if let Ok(content) = std::fs::read_to_string(&p) {
-                    for line in content.lines() {
-                        let trimmed = line.trim();
-                        if trimmed.is_empty() || trimmed.starts_with('#') || !trimmed.contains('=') {
-                            continue;
-                        }
-                        if let Some((k, v)) = trimmed.split_once('=') {
-                            let clean_val = v.trim().trim_matches('"').trim_matches('\'');
-                            cmd.env(k.trim(), clean_val);
-                        }
-                    }
+        // 3. Render in the persistent Bun worker
+        match crate::worker_pool::call(root, "ssr", input.clone(), Vec::new()).await {
+            Ok(reply) => {
+                print_logs(reply.stdout(), reply.stderr());
+                if let Some(err) = reply.error() {
+                    return Ok(failed(err.to_string()));
                 }
-            }
-        }
-
-        cmd.env("NODE_ENV", "development");
-
-        let output = match cmd.output().await {
-            Ok(o) => o,
-            Err(e) => {
-                return Ok(SsrOutput {
-                    html: String::new(),
-                    initial_state: serde_json::json!({ "params": request.params, "searchParams": request.search_params }),
-                    title: None,
-                    metadata: None,
-                    head_tags: None,
-                    set_cookies: Vec::new(),
-                    status_code: 200,
-                    redirect_url: None,
-                    render_time_ms: start_instant.elapsed().as_secs_f64() * 1000.0,
-                    mode: super::types::SsrMode::ClientOnly,
-                    error: Some(format!("SSR runner process execution failed: {}", e)),
+                return Ok(match serde_json::from_value::<SsrOutput>(reply.output().clone()) {
+                    Ok(mut output) => {
+                        output.render_time_ms = start_instant.elapsed().as_secs_f64() * 1000.0;
+                        output
+                    }
+                    Err(e) => failed(format!("Invalid SSR output: {e}")),
                 });
             }
+            Err(crate::worker_pool::WorkerError::Failed(e)) => return Ok(failed(e)),
+            Err(crate::worker_pool::WorkerError::Unavailable(_)) => {}
+        }
+
+        // 4. Fallback: one-off process printing the result between delimiters
+        let runner_script = format!(
+            "import {{ runSsr }} from {runtime};\nawait runSsr({input});\n",
+            runtime = serde_json::to_string(&crate::rpc::clean_path(root.join(".nata/ssr_runtime.ts"))).unwrap_or_default(),
+            input = input,
+        );
+        let output = match crate::worker_pool::spawn_once(root, &runner_script).await {
+            Ok(o) => o,
+            Err(e) => return Ok(failed(format!("SSR runner process execution failed: {}", e))),
         };
 
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = output.stdout;
+        let stderr = output.stderr;
+        print_server_logs(&stdout, SSR_DELIM_START, SSR_DELIM_END);
 
-        // 5. Parse delimiter output
         if let Some(start_idx) = stdout.find(SSR_DELIM_START) {
             let rest = &stdout[start_idx + SSR_DELIM_START.len()..];
             if let Some(end_idx) = rest.find(SSR_DELIM_END) {
-                let json_str = &rest[..end_idx];
-                if let Ok(mut parsed_output) = serde_json::from_str::<SsrOutput>(json_str) {
+                if let Ok(mut parsed_output) = serde_json::from_str::<SsrOutput>(&rest[..end_idx]) {
                     parsed_output.render_time_ms = start_instant.elapsed().as_secs_f64() * 1000.0;
                     return Ok(parsed_output);
                 }
             }
         }
 
-        // Fallback if parsing failed
-        Ok(SsrOutput {
-            html: String::new(),
-            initial_state: serde_json::json!({ "params": request.params, "searchParams": request.search_params }),
-            title: None,
-            metadata: None,
-            head_tags: None,
-            set_cookies: Vec::new(),
-            status_code: 200,
-            redirect_url: None,
-            render_time_ms: start_instant.elapsed().as_secs_f64() * 1000.0,
-            mode: super::types::SsrMode::ClientOnly,
-            error: Some(if !stderr.is_empty() { stderr.to_string() } else { "SSR delimiter not found".to_string() }),
-        })
+        Ok(failed(if !stderr.is_empty() { stderr } else { "SSR delimiter not found".to_string() }))
+    }
+}
+
+/// Prints what server code logged while handling a request, like `console.log` in Next.js server code
+pub(crate) fn print_logs(stdout: &str, stderr: &str) {
+    let out = stdout.trim_end();
+    if !out.trim().is_empty() {
+        println!("{out}");
+    }
+    let err = stderr.trim_end();
+    if !err.trim().is_empty() {
+        eprintln!("{err}");
+    }
+}
+
+/// Prints what server code logged during the render (everything but the delimited result), like the
+/// terminal output of `console.log` in a Next.js server component
+pub(crate) fn print_server_logs(stdout: &str, start: &str, end: &str) {
+    let logs = match (stdout.find(start), stdout.find(end)) {
+        (Some(s), Some(e)) if e > s => format!("{}{}", &stdout[..s], &stdout[e + end.len()..]),
+        _ => stdout.to_string(),
+    };
+    let logs = logs.trim_end();
+    if !logs.trim().is_empty() {
+        println!("{logs}");
     }
 }

@@ -1,0 +1,9 @@
+{
+  "checks": [
+    { "name": "home renders on the server", "path": "/", "status": 200, "ssr": ["Get started by editing"], "title": "Create Next App", "noIssues": true, "noExternalHosts": true },
+    { "name": "Tailwind is compiled on the server", "path": "/", "computedStyle": { "selector": "a[href='/about']", "property": "background-color", "equals": "rgb(0, 0, 0)" } },
+    { "name": "next/image renders an img", "path": "/", "selector": "img[alt='Next.js logo']" },
+    { "name": "Link navigates client-side", "path": "/", "navigate": { "click": "a[href='/about']", "expectText": "About page", "expectPath": "/about" } },
+    { "name": "nested page metadata", "path": "/about", "status": 200, "ssr": ["About page"], "title": "About" }
+  ]
+}

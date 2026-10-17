@@ -16,9 +16,27 @@ interface RouteHandlerInput {
   headers: Record<string, string>;
   cookiesStr: string;
   bodyBase64?: string | null;
+  /** Raw request body (persistent worker); takes precedence over `bodyBase64` */
+  bodyBytes?: Uint8Array | null;
 }
 
+interface RouteHandlerResult {
+  /** Response metadata, same shape the engine deserializes into `RouteHandlerResponse` (minus the body) */
+  output: Record<string, unknown>;
+  body: Uint8Array;
+}
+
+const encoder = new TextEncoder();
+
+/** One-off process entry point: prints the result with a base64 body between delimiters */
 export async function runRouteHandler(input: RouteHandlerInput) {
+  const { output, body } = await handleRoute(input);
+  const payload = { ...output, body_base64: Buffer.from(body).toString("base64") };
+  process.stdout.write(ROUTE_DELIM_START + JSON.stringify(payload) + ROUTE_DELIM_END + "\n");
+}
+
+/** Runs the route handler and returns the response body as raw bytes (persistent worker entry point) */
+export async function handleRoute(input: RouteHandlerInput): Promise<RouteHandlerResult> {
   const startTime = performance.now();
 
   try {
@@ -75,12 +93,10 @@ export async function runRouteHandler(input: RouteHandlerInput) {
           status_text: "No Content",
           headers: resHeaders,
           cookies: [],
-          body_base64: "",
           duration_ms: duration,
           error: null,
         };
-        process.stdout.write(ROUTE_DELIM_START + JSON.stringify(output) + ROUTE_DELIM_END + "\n");
-        return;
+        return { output, body: new Uint8Array() };
       }
 
       const allowHeader = availableMethods.join(", ");
@@ -93,18 +109,17 @@ export async function runRouteHandler(input: RouteHandlerInput) {
           "Content-Type": "text/plain; charset=utf-8",
         },
         cookies: [],
-        body_base64: Buffer.from(`Method ${requestedMethod} Not Allowed`).toString("base64"),
         duration_ms: duration,
         error: `Method ${requestedMethod} Not Allowed`,
       };
-      process.stdout.write(ROUTE_DELIM_START + JSON.stringify(output) + ROUTE_DELIM_END + "\n");
-      return;
+      return { output, body: encoder.encode(`Method ${requestedMethod} Not Allowed`) };
     }
 
     // 5. Construct NextRequest
-    let reqBody: Buffer | undefined = undefined;
-    if (requestedMethod !== "GET" && requestedMethod !== "HEAD" && input.bodyBase64) {
-      reqBody = Buffer.from(input.bodyBase64, "base64");
+    let reqBody: Uint8Array | undefined = undefined;
+    if (requestedMethod !== "GET" && requestedMethod !== "HEAD") {
+      if (input.bodyBytes && input.bodyBytes.length) reqBody = input.bodyBytes;
+      else if (input.bodyBase64) reqBody = Buffer.from(input.bodyBase64, "base64");
     }
 
     const requestHeaders = new Headers();
@@ -136,7 +151,7 @@ export async function runRouteHandler(input: RouteHandlerInput) {
     let status = 200;
     let statusText = "OK";
     const responseHeaders: Record<string, string> = {};
-    let bodyBase64 = "";
+    let body: Uint8Array = new Uint8Array();
 
     if (responseResult instanceof Response) {
       status = responseResult.status;
@@ -146,18 +161,16 @@ export async function runRouteHandler(input: RouteHandlerInput) {
         responseHeaders[key] = val;
       });
 
-      const arrayBuf = await responseResult.arrayBuffer();
-      bodyBase64 = Buffer.from(arrayBuf).toString("base64");
+      body = new Uint8Array(await responseResult.arrayBuffer());
     } else if (responseResult === null || responseResult === undefined) {
       status = 204;
       statusText = "No Content";
-      bodyBase64 = "";
     } else if (typeof responseResult === "object" || typeof responseResult === "string" || typeof responseResult === "number" || typeof responseResult === "boolean") {
       // Auto-fallback for handlers returning direct data without wrapping in Response
       status = 200;
       statusText = "OK";
       responseHeaders["content-type"] = "application/json; charset=utf-8";
-      bodyBase64 = Buffer.from(JSON.stringify(responseResult)).toString("base64");
+      body = encoder.encode(JSON.stringify(responseResult));
     }
 
     // 9. Collect cookies from NextResponse.cookies and global state
@@ -193,12 +206,11 @@ export async function runRouteHandler(input: RouteHandlerInput) {
       status_text: statusText,
       headers: responseHeaders,
       cookies: setCookiesList,
-      body_base64: bodyBase64,
       duration_ms: duration,
       error: null,
     };
 
-    process.stdout.write(ROUTE_DELIM_START + JSON.stringify(output) + ROUTE_DELIM_END + "\n");
+    return { output, body };
   } catch (err: any) {
     const duration = Number((performance.now() - startTime).toFixed(2));
     const errMsg = err?.message || String(err);
@@ -210,11 +222,10 @@ export async function runRouteHandler(input: RouteHandlerInput) {
       status_text: "Internal Server Error",
       headers: { "Content-Type": "application/json; charset=utf-8" },
       cookies: [],
-      body_base64: Buffer.from(JSON.stringify({ error: errMsg, stack: errStack })).toString("base64"),
       duration_ms: duration,
       error: errMsg,
     };
 
-    process.stdout.write(ROUTE_DELIM_START + JSON.stringify(output) + ROUTE_DELIM_END + "\n");
+    return { output, body: encoder.encode(JSON.stringify({ error: errMsg, stack: errStack })) };
   }
 }

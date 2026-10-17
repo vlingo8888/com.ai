@@ -25,6 +25,10 @@
 
 ---
 
+## 0. 🧭 Roadmap
+
+The full plan to reach Next.js App Router parity with native, optimized tooling lives in **[ROADMAP.md](./ROADMAP.md)** (phases P0–P5, technology choices, performance budgets). The sections below are the older feature checklist.
+
 ## 1. 📁 App Router & Special Files (Priority: P0)
 
 Next.js provides convention-based file names within route folders to handle UI states declaratively:
@@ -134,6 +138,12 @@ Next.js allows running code before a request is completed:
 
 ## 8. 📱 Zalo Mini App Engine Enhancements (Priority: P1)
 
+- [x] **Client-only App Router runtime for Zalo**:
+  - `/assets/app.js` boots the shared `/_nata/client.js` runtime (same as web) in client-only mode: loading/error/not-found/template/global-error, metadata, params/searchParams.
+  - Memory router: virtual pathname kept in `history.state`, so the Zalo URL never changes and the Zalo header Back button works; `usePathname`/`useSearchParams`/`useRouter` read the virtual location.
+  - HMR over WebSocket with polling fallback (`/_nata/hmr_version`) for tunnels that drop WebSocket upgrades.
+  - `--target zalo` skips SSR in the browser preview to match the device.
+- [ ] **Zero-install SSR**: SSR only renders markup when `react`/`react-dom` (and other page deps) resolve from `node_modules`; otherwise it serves metadata + CSR. Needs a Bun resolver for CDN packages.
 - [ ] **Zalo SDK Zero-Config Bridge**:
   - Auto-polyfill `zmp-sdk` APIs in browser simulator with mocked user authentication, phone number request, and location.
 - [ ] **ZMP Automated Packager**:

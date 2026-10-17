@@ -111,6 +111,60 @@ pub struct RouteEntry {
     pub score: i32,
     /// List of parsed route segments
     pub segments: Vec<RouteSegment>,
+    /// `regex` compiled on first use: matching runs on every request
+    #[serde(skip)]
+    pub compiled_regex: std::sync::OnceLock<Option<regex::Regex>>,
+}
+
+impl RouteEntry {
+    pub fn compiled_regex(&self) -> Option<&regex::Regex> {
+        self.compiled_regex.get_or_init(|| regex::Regex::new(&self.regex).ok()).as_ref()
+    }
+
+    /// Route params as Next.js passes them to pages and route handlers: percent-decoded strings, and
+    /// arrays for catch-all segments (`[...slug]`, `[[...slug]]`)
+    pub fn params_json(&self, params: &HashMap<String, String>) -> serde_json::Value {
+        let catch_all: Vec<&str> = self
+            .segments
+            .iter()
+            .filter_map(|s| match &s.segment_type {
+                SegmentType::CatchAll(name) | SegmentType::OptionalCatchAll(name) => Some(name.as_str()),
+                _ => None,
+            })
+            .collect();
+        let mut out = serde_json::Map::new();
+        for (name, raw) in params {
+            let value = if catch_all.contains(&name.as_str()) {
+                serde_json::Value::Array(
+                    raw.split('/').filter(|p| !p.is_empty()).map(|p| serde_json::Value::String(percent_decode(p))).collect(),
+                )
+            } else {
+                serde_json::Value::String(percent_decode(raw))
+            };
+            out.insert(name.clone(), value);
+        }
+        serde_json::Value::Object(out)
+    }
+}
+
+/// `%E1%BA%A1` -> `ạ`; malformed escapes are kept as written
+pub fn percent_decode(input: &str) -> String {
+    let hex = |b: u8| (b as char).to_digit(16).map(|d| d as u8);
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let (Some(hi), Some(lo)) = (hex(bytes[i + 1]), hex(bytes[i + 2])) {
+                out.push(hi * 16 + lo);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8(out).unwrap_or_else(|_| input.to_string())
 }
 
 /// Result of matching a request URL path against the App Router table

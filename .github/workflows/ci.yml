@@ -1,0 +1,59 @@
+name: CI
+
+# Unit tests for the Rust engine and the CLI, then the Next.js compatibility suite and the performance
+# budget check (ROADMAP.md: P0.4 and G6) against a release build of the engine.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: compiler-rs
+      - name: Install CLI dependencies
+        run: bun install
+      - name: Engine unit tests
+        working-directory: compiler-rs
+        run: cargo test
+      - name: CLI tests
+        run: bun test
+
+  compat:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: compiler-rs
+      - uses: browser-actions/setup-chrome@v1
+        id: chrome
+      - name: Install CLI dependencies
+        run: bun install
+      - name: Build engine
+        working-directory: compiler-rs
+        run: cargo build --release
+      - name: Next.js compatibility suite
+        env:
+          CHROME_PATH: ${{ steps.chrome.outputs.chrome-path }}
+        run: bun tests/compat/run.ts --json compat-results.json
+      - name: Performance budget
+        env:
+          CHROME_PATH: ${{ steps.chrome.outputs.chrome-path }}
+        run: bun scripts/bench.ts --budget --json bench-results.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: compat-and-bench
+          path: |
+            compat-results.json
+            bench-results.json

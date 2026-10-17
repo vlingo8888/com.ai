@@ -179,8 +179,22 @@ export default function Broken() {
 
     let result = SwcCompiler::compile(broken_code, "broken.tsx");
     assert!(result.is_err());
-    let err_msg = result.unwrap_err();
-    assert!(err_msg.contains("SWC Parse Error") || err_msg.contains("broken.tsx"));
+    let err = result.unwrap_err();
+    assert_eq!(err.file, "broken.tsx");
+    assert!(err.line.is_some());
+    assert!(err.to_string().starts_with("./broken.tsx:"));
+}
+
+#[test]
+fn test_swc_syntax_error_has_location_and_code_frame() {
+    let broken_code = "export const a = 1;\nexport const b = ;\nexport const c = 3;\n";
+    let err = SwcCompiler::compile(broken_code, "app/page.tsx").unwrap_err();
+    assert_eq!(err.line, Some(2));
+    assert_eq!(err.column, Some(18));
+    assert_eq!(err.location(), "./app/page.tsx:2:18");
+    assert!(!err.message.is_empty());
+    assert!(err.frame.contains("> 2 | export const b = ;"));
+    assert!(err.frame.contains("^"));
 }
 
 #[test]

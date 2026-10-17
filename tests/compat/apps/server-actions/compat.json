@@ -1,0 +1,7 @@
+{
+  "checks": [
+    { "name": "page with a client form renders", "path": "/", "status": 200, "ssr": ["Todos"], "contains": ["Read the docs"] },
+    { "name": "<form action> + useActionState round-trips to the server", "path": "/", "click": "button[type=submit]", "expectText": "Ship it (added on the server)", "knownGap": "\"use server\" files are not split out yet: the action is bundled and runs in the browser (ROADMAP P1.7)" },
+    { "name": "client component calls a Server Action directly", "path": "/", "click": "#greet", "expectText": "Hello, Zalo (ran on the server)", "knownGap": "\"use server\" files are not split out yet: the action is bundled and runs in the browser (ROADMAP P1.7)" }
+  ]
+}

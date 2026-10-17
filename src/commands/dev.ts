@@ -3,6 +3,8 @@ import { join, resolve } from "path";
 import { createConnection, createServer } from "net";
 import { logger, colors } from "../core/logger";
 import { startTunnelBackground, printTunnelQrCode } from "./tunnel";
+import { exeName, resolvePrebuiltCompiler, compilerPackageName } from "../core/binaries";
+import packageJson from "../../package.json";
 
 export async function findAvailablePort(startPort: number): Promise<number> {
   let port = startPort;
@@ -197,7 +199,7 @@ async function promptSwitchToPglite(target: string): Promise<boolean> {
     output: process.stdout,
   });
 
-  console.log(`\n  ${colors.yellow}▲${colors.reset} ${colors.bold}PostgreSQL (${target}) is offline / unreachable.${colors.reset}`);
+  console.log(`\n ${colors.yellow}⚠${colors.reset} ${colors.bold}PostgreSQL (${target}) is offline / unreachable.${colors.reset}`);
   console.log(`    ${colors.dim}Không thể kết nối đến server PostgreSQL tại địa chỉ này.${colors.reset}\n`);
 
   return new Promise((resolve) => {
@@ -234,6 +236,54 @@ function commentOutDatabaseUrlInEnv(envFilePath: string) {
 }
 
 import { getLocalNetworkIp, generateZaloDeepLink, printZaloDevQrCode, resolveOrPromptAppId, setupAdbReverse, ensureHrConfigFile } from "../zalominiapp/dev";
+
+/** Dependencies declared in package.json that are not present in node_modules */
+export function missingDependencies(projectDir: string): string[] {
+  const pkgPath = join(projectDir, "package.json");
+  if (!existsSync(pkgPath)) return [];
+  try {
+    const pkg = JSON.parse(readFileSync(pkgPath, "utf-8"));
+    const names = Object.keys({ ...pkg.dependencies, ...pkg.devDependencies });
+    return names.filter((name) => !existsSync(join(projectDir, "node_modules", name, "package.json")));
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Client and server modules are both served from node_modules (no CDN), so install what is missing
+ * before the engine starts. Bun's global cache keeps this fast and usually offline-capable.
+ */
+async function ensureDependenciesInstalled(projectDir: string) {
+  const missing = missingDependencies(projectDir);
+  if (missing.length === 0) return;
+  const spinner = logger.spinner(`Installing ${missing.length} missing ${missing.length === 1 ? "dependency" : "dependencies"} (bun install)...`);
+  const proc = Bun.spawn([process.execPath, "install"], { cwd: projectDir, stdout: "ignore", stderr: "pipe" });
+  const stderr = await new Response(proc.stderr).text();
+  if ((await proc.exited) === 0) {
+    spinner.stop(true, "Dependencies installed");
+  } else {
+    spinner.stop(false, "bun install failed; missing packages will be loaded from esm.sh");
+    const detail = stderr.trim().split("\n").slice(-5).join("\n");
+    if (detail) console.log(`   ${colors.dim}${detail}${colors.reset}`);
+  }
+}
+
+function listEnvFiles(projectDir: string): string[] {
+  return [".env.local", ".env.development", ".env"].filter((f) => existsSync(join(projectDir, f)));
+}
+
+/** Next.js-style startup banner: `▲ com.ai.vn 1.0.2` followed by aligned `- Label:  value` rows. */
+function printDevBanner(rows: Array<[string, string | null | undefined]>) {
+  const visible = rows.filter(([, value]) => value);
+  const width = Math.max(...visible.map(([label]) => label.length)) + 1;
+  console.log();
+  console.log(`   ${colors.bold}▲ com.ai.vn ${packageJson.version}${colors.reset}`);
+  for (const [label, value] of visible) {
+    console.log(`   - ${`${label}:`.padEnd(width)} ${value}`);
+  }
+  console.log();
+}
 
 export async function devCommand(options: DevOptions = {}) {
   const projectDir = resolve(process.cwd(), options.dir || ".");
@@ -286,7 +336,10 @@ export async function devCommand(options: DevOptions = {}) {
 
   // Locate the standalone Rust compiler binary
   const exeExt = process.platform === "win32" ? ".exe" : "";
+  const prebuiltCompiler = resolvePrebuiltCompiler();
   const rustBinCandidates = [
+    ...(process.env.COM_COMPILER_PATH ? [process.env.COM_COMPILER_PATH] : []),
+    ...(prebuiltCompiler ? [prebuiltCompiler] : []),
     join(__dirname, `../compiler-rs/target/release/com-compiler${exeExt}`),
     join(__dirname, `../../compiler-rs/target/release/com-compiler${exeExt}`),
     join(process.cwd(), `compiler-rs/target/release/com-compiler${exeExt}`),
@@ -316,13 +369,22 @@ export async function devCommand(options: DevOptions = {}) {
     const buildSpinner = logger.spinner("Compiling Rust App Router Engine (first-time build)...");
     const compilerDir = join(__dirname, "../compiler-rs");
     try {
-      const cargoCmd = process.platform === "win32" ? "cargo.exe" : "cargo";
+      const cargoCmd = Bun.which(exeName("cargo")) || Bun.which("cargo");
+      if (!cargoCmd) {
+        throw new Error(
+          `No prebuilt engine for ${process.platform}-${process.arch} (${compilerPackageName()}) and Rust toolchain not found. ` +
+            "Reinstall with optional dependencies enabled, install Rust from https://rustup.rs, or set COM_COMPILER_PATH."
+        );
+      }
       const buildProc = Bun.spawn([cargoCmd, "build", "--release"], {
         cwd: compilerDir,
         stdout: "ignore",
-        stderr: "ignore",
+        stderr: "pipe",
       });
-      await buildProc.exited;
+      const buildErr = await new Response(buildProc.stderr).text();
+      if ((await buildProc.exited) !== 0) {
+        throw new Error(`cargo build failed:\n${buildErr.trim().split("\n").slice(-20).join("\n")}`);
+      }
       const builtPath = join(compilerDir, `target/release/com-compiler${exeExt}`);
       if (existsSync(builtPath)) {
         rustBinPath = builtPath;
@@ -336,6 +398,8 @@ export async function devCommand(options: DevOptions = {}) {
       process.exit(1);
     }
   }
+
+  await ensureDependenciesInstalled(projectDir);
 
   let dbStatus = await detectDatabaseStatus(projectDir);
 
@@ -433,24 +497,15 @@ export async function devCommand(options: DevOptions = {}) {
 
   const effectiveBackendUrl = backendTunnelUrl || zaloTunnelUrl || networkUrl;
 
-  console.log();
-  console.log(`   ${colors.bold}▲ com.ai.vn${colors.reset}`);
-  console.log(`   ${colors.dim}-${colors.reset} Local:        ${colors.cyan}http://localhost:${port}${colors.reset}`);
-  console.log(`   ${colors.dim}-${colors.reset} Network:      ${colors.cyan}${networkUrl}${colors.reset}`);
-  if (zaloTunnelUrl) {
-    console.log(`   ${colors.dim}-${colors.reset} Zalo Tunnel:  ${colors.green}${zaloTunnelUrl}${colors.reset}`);
-  }
-  if (backendTunnelUrl) {
-    console.log(`   ${colors.dim}-${colors.reset} Backend URL:  ${colors.green}${backendTunnelUrl}${colors.reset}`);
-  }
-  console.log(`   ${colors.dim}-${colors.reset} Target:       ${target === "zalo" ? "Zalo Mini App" : "Web App"}`);
-  if (target === "zalo" && zaloAppId) {
-    console.log(`   ${colors.dim}-${colors.reset} App ID:       ${colors.dim}${zaloAppId}${colors.reset}`);
-  }
-  console.log(`   ${colors.dim}-${colors.reset} Database:     ${dbStatus.label}`);
-  console.log();
-  console.log(` ${colors.green}✓${colors.reset} Ready in ${colors.dim}120ms${colors.reset}`);
-  console.log();
+  printDevBanner([
+    ["Local", `http://localhost:${port}`],
+    ["Network", networkUrl],
+    ["Environments", listEnvFiles(projectDir).join(", ")],
+    ["Target", target === "zalo" ? `Zalo Mini App${zaloAppId ? ` (${zaloAppId})` : ""}` : "Web App"],
+    ["Database", dbStatus.label],
+    ["Zalo Tunnel", zaloTunnelUrl],
+    ["Backend URL", backendTunnelUrl && backendTunnelUrl !== zaloTunnelUrl ? backendTunnelUrl : null],
+  ]);
 
   if (target === "zalo" && zaloAppId) {
     // Zalo opens via 123c tunnel
@@ -466,6 +521,9 @@ export async function devCommand(options: DevOptions = {}) {
     printTunnelQrCode(backendTunnelUrl);
   }
 
+  // The engine prints ` ✓ Ready in …` once it is listening, measured from COM_START_TIME
+  logger.success("Starting...");
+
   // Launch Rust binary directly with interactive IO, target flag and COM_BACKEND_URL
   const proc = Bun.spawn([rustBinPath, "dev", "--dir", projectDir, "--port", String(port), "--target", target], {
     stdout: "inherit",
@@ -474,6 +532,7 @@ export async function devCommand(options: DevOptions = {}) {
     env: {
       ...process.env,
       COM_MANAGED: "1",
+      COM_START_TIME: String(Math.round(performance.timeOrigin)),
       COM_BACKEND_URL: effectiveBackendUrl,
       NEXT_PUBLIC_API_URL: effectiveBackendUrl,
     },

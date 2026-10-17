@@ -82,7 +82,21 @@ impl ImportResolver {
     ) -> String {
         match Self::classify_with_config(specifier, tsconfig) {
             ImportKind::Absolute(url) => url,
-            ImportKind::Css(_) => "data:text/javascript,/* css import */".to_string(),
+            ImportKind::Css(spec) => {
+                // Component CSS (and CSS Modules) become JS modules served by the dev server
+                let clean = spec.split('?').next().unwrap_or(&spec);
+                let rel = if let Some(target) = tsconfig.resolve_primary_alias(clean) {
+                    target.trim_start_matches("./").to_string()
+                } else if clean.starts_with("@/") || clean.starts_with("~/") {
+                    clean[2..].to_string()
+                } else if clean.starts_with("./") || clean.starts_with("../") {
+                    Self::normalize_relative_path(parent_dir, clean)
+                } else {
+                    // A package stylesheet (e.g. "some-lib/styles.css")
+                    return format!("/_nata/css/node_modules/{}", clean);
+                };
+                format!("/_nata/css/{}", rel)
+            }
             ImportKind::ServerAction(path) => {
                 let clean = path
                     .trim_start_matches("@/")
@@ -104,55 +118,18 @@ impl ImportResolver {
                 let normalized = Self::normalize_relative_path(parent_dir, &rel);
                 format!("/_bundle/{}", normalized)
             }
-            ImportKind::NpmPackage(pkg) => Self::resolve_npm_cdn(&pkg),
+            ImportKind::NpmPackage(pkg) => Self::resolve_npm_package(&pkg),
         }
     }
 
-    /// Resolves a third-party npm package name to an ESM CDN URL or inline shim
-    pub fn resolve_npm_cdn(pkg: &str) -> String {
+    /// Resolves a third-party npm package to the dev server: framework shims, or the browser build of
+    /// the installed package at `/_nata/deps/<specifier>` (see `deps.rs`)
+    pub fn resolve_npm_package(pkg: &str) -> String {
         match pkg {
             "core" => "/_nata/shims/core".to_string(),
-            "next/headers" => "/_nata/shims/next/headers".to_string(),
-            "react" => "https://esm.sh/react@18.3.1".to_string(),
-            "react/jsx-runtime" => "https://esm.sh/react@18.3.1/jsx-runtime".to_string(),
-            "react-dom" => "https://esm.sh/react-dom@18.3.1?external=react".to_string(),
-            "react-dom/client" => "https://esm.sh/react-dom@18.3.1/client?external=react".to_string(),
-            "lucide-react" => "https://esm.sh/lucide-react@0.460.0?external=react,react-dom".to_string(),
-            "framer-motion" => "https://esm.sh/framer-motion@11.11.17?external=react,react-dom".to_string(),
-            "clsx" => "https://esm.sh/clsx@2.1.1".to_string(),
-            "tailwind-merge" => "https://esm.sh/tailwind-merge@2.5.4".to_string(),
-            "axios" => "https://esm.sh/axios@1.7.7".to_string(),
-            "date-fns" => "https://esm.sh/date-fns@4.1.0".to_string(),
-            "canvas-confetti" => "https://esm.sh/canvas-confetti@1.9.4".to_string(),
-            "@tanstack/react-query" => "https://esm.sh/@tanstack/react-query@5.59.0?external=react,react-dom".to_string(),
-            "@tanstack/react-table" => "https://esm.sh/@tanstack/react-table@8.20.5?external=react,react-dom".to_string(),
-            "zustand" => "https://esm.sh/zustand@5.0.0?external=react,react-dom".to_string(),
-            "jotai" => "https://esm.sh/jotai@2.10.1?external=react,react-dom".to_string(),
-            "swr" => "https://esm.sh/swr@2.2.5?external=react,react-dom".to_string(),
-            "zod" => "https://esm.sh/zod@3.23.8".to_string(),
-            "react-hook-form" => "https://esm.sh/react-hook-form@7.53.0?external=react,react-dom".to_string(),
-            "@hookform/resolvers" => "https://esm.sh/@hookform/resolvers@3.9.0?external=react,react-dom".to_string(),
-            "@hookform/resolvers/zod" => "https://esm.sh/@hookform/resolvers@3.9.0/zod?external=react,react-dom,zod".to_string(),
-            "sonner" => "https://esm.sh/sonner@1.5.0?external=react,react-dom".to_string(),
-            "react-hot-toast" => "https://esm.sh/react-hot-toast@2.4.1?external=react,react-dom".to_string(),
-            "next-themes" => "https://esm.sh/next-themes@0.3.0?external=react,react-dom".to_string(),
-            "next/link" => "/_nata/shims/next/link".to_string(),
-            "next/image" => "/_nata/shims/next/image".to_string(),
-            "next/navigation" => "/_nata/shims/next/navigation".to_string(),
-            "next/router" => "/_nata/shims/next/router".to_string(),
-            "next/head" => "/_nata/shims/next/head".to_string(),
-            "next/server" => "/_nata/shims/next/server".to_string(),
             "next-intl/server" => "/_nata/shims/next-intl/server".to_string(),
-            "next-intl" => "https://esm.sh/next-intl@4.14.9?external=react,react-dom".to_string(),
-            _ => {
-                if pkg.starts_with("next/") {
-                    format!("/_nata/shims/{}", pkg)
-                } else if pkg.contains('?') {
-                    format!("https://esm.sh/{}&external=react,react-dom", pkg)
-                } else {
-                    format!("https://esm.sh/{}?external=react,react-dom", pkg)
-                }
-            }
+            _ if pkg.starts_with("next/") => format!("/_nata/shims/{}", pkg),
+            _ => format!("/_nata/deps/{}", pkg.split('?').next().unwrap_or(pkg)),
         }
     }
 
@@ -544,12 +521,15 @@ export const {name} = (opts = {{}}) => ({{
         // Step 2: Transform next/font (google and local) into mock font functions
         transformed = Self::transform_next_fonts(&transformed);
 
-        // Step 3: Comment out direct CSS imports
-        let css_import_regex = Regex::new(
-            r#"(?m)^\s*import\s+['"][^'"]+\.css(?:\?[^'"]*)?['"];?"#,
-        )
-        .unwrap();
-        transformed = css_import_regex.replace_all(&transformed, "/* css import */").to_string();
+        // Step 3: side-effect CSS imports (`import "./x.css"`)
+        let css_import_regex = Regex::new(r#"(?m)^(\s*import\s+)['"]([^'"]+\.css(?:\?[^'"]*)?)['"]"#).unwrap();
+        let parent_dir_for_css = Path::new(file_rel_path).parent().unwrap_or(Path::new("")).to_string_lossy().replace('\\', "/");
+        transformed = css_import_regex
+            .replace_all(&transformed, |caps: &regex::Captures| {
+                let resolved = Self::resolve_specifier_with_config(&caps[2], &parent_dir_for_css, tsconfig);
+                format!("{}\"{}\"", &caps[1], resolved)
+            })
+            .to_string();
 
         // Step 4: Match and rewrite static imports and exports: `import ... from "..."` and `export ... from "..."`
         let import_export_regex = Regex::new(
@@ -657,6 +637,71 @@ export const {name} = (opts = {{}}) => ({{
             .to_string();
 
         transformed
+    }
+
+    /// Makes named imports from remote CDN packages tolerant of missing exports.
+    ///
+    /// A static `import { SchoolPlus } from "https://esm.sh/lucide-react@..."` fails the
+    /// whole module graph at link time when the pinned version lacks that export
+    /// (WebKit: "Importing a module script failed"). Namespace imports never fail to link,
+    /// so the import is rewritten to `import * as ns` and each binding is picked from it;
+    /// a missing binding logs `console.error` and becomes a component rendering nothing.
+    ///
+    /// Must run on SWC output, after type-only imports have been elided.
+    pub fn soften_remote_named_imports(js: &str) -> String {
+        let import_regex = Regex::new(
+            r#"(?m)^import\s+([^;'"*]+?)\s+from\s*["'](https?://[^"']+|/_nata/deps/[^"']+)["'];?"#,
+        )
+        .unwrap();
+
+        let mut counter = 0usize;
+        let rewritten = import_regex
+            .replace_all(js, |caps: &regex::Captures| {
+                let full_match = caps.get(0).unwrap().as_str();
+                let clause = caps.get(1).unwrap().as_str();
+                let url = caps.get(2).unwrap().as_str();
+
+                let bindings = Self::parse_import_bindings(clause);
+                if bindings.is_empty() {
+                    return full_match.to_string();
+                }
+
+                let ns = format!("__nata_ns{}", counter);
+                counter += 1;
+                let url_lit = serde_json::to_string(url).unwrap();
+                let picks: Vec<String> = bindings
+                    .iter()
+                    .map(|b| {
+                        format!(
+                            "{} = __nata_pick({}, {}, {})",
+                            b.local_name,
+                            ns,
+                            serde_json::to_string(&b.remote_action).unwrap(),
+                            url_lit
+                        )
+                    })
+                    .collect();
+                format!("import * as {} from {};\nconst {};", ns, url_lit, picks.join(", "))
+            })
+            .to_string();
+
+        if counter == 0 {
+            return rewritten;
+        }
+
+        // Function declarations are hoisted, so the helper is available to every pick above.
+        let helper = r#"function __nata_pick(ns, name, src) {
+  if (name in ns) return ns[name];
+  if (name === "default") return ns;
+  var message = "\"" + name + "\" is not exported by " + src.replace(/^\/_nata\/deps\//, "") + " - rendering nothing in its place.";
+  console.error("[Com.AI.VN] " + message);
+  if (typeof window !== "undefined" && window.__NATA_REPORT_ISSUE__) window.__NATA_REPORT_ISSUE__(new Error(message), "issue");
+  var Missing = function () { return null; };
+  Missing.displayName = "Missing(" + name + ")";
+  return Missing;
+}
+"#;
+        format!("{}{}", helper, rewritten)
     }
 }
 

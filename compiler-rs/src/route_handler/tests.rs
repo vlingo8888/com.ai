@@ -24,18 +24,17 @@ export async function GET(request: any) {
         url: "http://localhost:3000/api/hello".to_string(),
         method: "GET".to_string(),
         file_path: std::path::PathBuf::from("app/api/hello/route.ts"),
-        params: HashMap::new(),
+        params: serde_json::json!({}),
         search_params: HashMap::new(),
         headers: HashMap::new(),
         cookies: None,
-        body_base64: None,
+        body: Vec::new(),
     };
 
     let res = RouteHandlerEngine::execute(root, req).await;
     assert_eq!(res.status, 200);
 
-    let body_bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &res.body_base64)
-        .expect("Failed to decode base64 body");
+    let body_bytes = res.body.clone();
     let body_json: serde_json::Value = serde_json::from_slice(&body_bytes).expect("Failed to parse json");
     assert_eq!(body_json["message"], "Hello from Com.AI.VN API!");
     assert_eq!(body_json["path"], "/api/hello");
@@ -74,23 +73,22 @@ export async function POST(request: any, { params }: any) {
         url: "http://localhost:3000/api/users/u_42".to_string(),
         method: "GET".to_string(),
         file_path: std::path::PathBuf::from("app/api/users/[id]/route.ts"),
-        params: params.clone(),
+        params: serde_json::json!(params),
         search_params: HashMap::new(),
         headers: HashMap::new(),
         cookies: None,
-        body_base64: None,
+        body: Vec::new(),
     };
 
     let get_res = RouteHandlerEngine::execute(root, get_req).await;
     assert_eq!(get_res.status, 200);
 
-    let get_bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &get_res.body_base64).unwrap();
+    let get_bytes = get_res.body.clone();
     let get_json: serde_json::Value = serde_json::from_slice(&get_bytes).unwrap();
     assert_eq!(get_json["userId"], "u_42");
 
     // 2. Test POST with body
     let post_body = serde_json::json!({ "name": "Antigravity", "role": "admin" }).to_string();
-    let post_body_b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, post_body.as_bytes());
 
     let mut post_headers = HashMap::new();
     post_headers.insert("content-type".to_string(), "application/json".to_string());
@@ -100,17 +98,17 @@ export async function POST(request: any, { params }: any) {
         url: "http://localhost:3000/api/users/u_42".to_string(),
         method: "POST".to_string(),
         file_path: std::path::PathBuf::from("app/api/users/[id]/route.ts"),
-        params,
+        params: serde_json::json!(params),
         search_params: HashMap::new(),
         headers: post_headers,
         cookies: None,
-        body_base64: Some(post_body_b64),
+        body: post_body.as_bytes().to_vec(),
     };
 
     let post_res = RouteHandlerEngine::execute(root, post_req).await;
     assert_eq!(post_res.status, 201);
 
-    let post_bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &post_res.body_base64).unwrap();
+    let post_bytes = post_res.body.clone();
     let post_json: serde_json::Value = serde_json::from_slice(&post_bytes).unwrap();
     assert_eq!(post_json["createdId"], "u_42");
     assert_eq!(post_json["data"]["name"], "Antigravity");
@@ -140,11 +138,11 @@ export async function GET() {
         url: "http://localhost:3000/api/items".to_string(),
         method: "DELETE".to_string(),
         file_path: std::path::PathBuf::from("app/api/items/route.ts"),
-        params: HashMap::new(),
+        params: serde_json::json!({}),
         search_params: HashMap::new(),
         headers: HashMap::new(),
         cookies: None,
-        body_base64: None,
+        body: Vec::new(),
     };
 
     let delete_res = RouteHandlerEngine::execute(root, delete_req).await;
@@ -159,11 +157,11 @@ export async function GET() {
         url: "http://localhost:3000/api/items".to_string(),
         method: "OPTIONS".to_string(),
         file_path: std::path::PathBuf::from("app/api/items/route.ts"),
-        params: HashMap::new(),
+        params: serde_json::json!({}),
         search_params: HashMap::new(),
         headers: HashMap::new(),
         cookies: None,
-        body_base64: None,
+        body: Vec::new(),
     };
 
     let options_res = RouteHandlerEngine::execute(root, options_req).await;

@@ -1,5 +1,5 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync } from "fs";
-import { join, resolve, relative } from "path";
+import { basename, join, resolve, relative } from "path";
 import { logger, colors } from "../core/logger";
 import { findDatabaseUrl, introspectAndGenerateSchema } from "./db";
 import { getLocalViewConfig, saveLocalViewConfig } from "../core/config";
@@ -90,7 +90,7 @@ export async function syncCommand(options: SyncOptions = {}): Promise<SyncResult
 
   const projectName =
     localView?.name ||
-    projectDir.split("/").filter(Boolean).pop() ||
+    basename(projectDir) ||
     "com-project";
   const viewId = localView?.viewId;
 

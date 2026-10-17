@@ -12,16 +12,17 @@ pub struct RouteHandlerRequest {
     pub method: String,
     /// Relative or absolute path to the route file, e.g. `app/api/users/[id]/route.ts`
     pub file_path: PathBuf,
-    /// Dynamic parameters extracted by router, e.g. `{"id": "123"}`
-    pub params: HashMap<String, String>,
+    /// Dynamic parameters as Next.js passes them, e.g. `{"id": "123"}`, `{"slug": ["a", "b"]}`
+    pub params: serde_json::Value,
     /// Parsed query string parameters, e.g. `{"role": "admin"}`
     pub search_params: HashMap<String, String>,
     /// Request headers received from client
     pub headers: HashMap<String, String>,
     /// Raw `Cookie` header string
     pub cookies: Option<String>,
-    /// Request body encoded as base64 string, or empty if no body
-    pub body_base64: Option<String>,
+    /// Raw request body (empty when the request has none)
+    #[serde(skip)]
+    pub body: Vec<u8>,
 }
 
 /// A cookie directive to be set on the response
@@ -57,9 +58,12 @@ pub struct RouteHandlerResponse {
     /// Cookies to set via `Set-Cookie` header
     #[serde(default)]
     pub cookies: Vec<RouteCookie>,
-    /// Body content encoded in base64
+    /// Body as base64, only used by the one-off fallback runner's JSON output
     #[serde(default)]
     pub body_base64: String,
+    /// Raw response body
+    #[serde(skip)]
+    pub body: Vec<u8>,
     /// Execution time in milliseconds
     #[serde(default)]
     pub duration_ms: f64,
@@ -75,6 +79,7 @@ impl Default for RouteHandlerResponse {
             headers: HashMap::new(),
             cookies: Vec::new(),
             body_base64: String::new(),
+            body: Vec::new(),
             duration_ms: 0.0,
             error: None,
         }
