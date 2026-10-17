@@ -4,6 +4,10 @@
   "description": "async Server Components, loading.tsx, error.tsx, not-found.tsx, Next 15 async params",
   "dependencies": {
     "react": "^19.0.0",
-    "react-dom": "^19.0.0"
+    "react-dom": "^19.0.0",
+    "react-server-dom-webpack": "^19.0.0"
+  },
+  "devDependencies": {
+    "react-refresh": "^0.19.0"
   }
 }

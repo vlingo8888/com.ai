@@ -1,7 +1,61 @@
 {
   "checks": [
-    { "name": "page with a client form renders", "path": "/", "status": 200, "ssr": ["Todos"], "contains": ["Read the docs"] },
-    { "name": "<form action> + useActionState round-trips to the server", "path": "/", "click": "button[type=submit]", "expectText": "Ship it (added on the server)", "knownGap": "\"use server\" files are not split out yet: the action is bundled and runs in the browser (ROADMAP P1.7)" },
-    { "name": "client component calls a Server Action directly", "path": "/", "click": "#greet", "expectText": "Hello, Zalo (ran on the server)", "knownGap": "\"use server\" files are not split out yet: the action is bundled and runs in the browser (ROADMAP P1.7)" }
+    {
+      "name": "page with a client form renders",
+      "path": "/",
+      "status": 200,
+      "ssr": [
+        "Todos"
+      ],
+      "contains": [
+        "Read the docs"
+      ]
+    },
+    {
+      "name": "<form action> + useActionState round-trips to the server",
+      "path": "/",
+      "click": "button[type=submit]",
+      "expectText": "Ship it (added on the server)"
+    },
+    {
+      "name": "client component calls a Server Action directly",
+      "path": "/",
+      "click": "#greet",
+      "expectText": "Hello, Zalo (ran on the server)"
+    },
+    {
+      "name": "\"use server\" code never reaches the browser",
+      "path": "/_bundle/app/actions.ts",
+      "notInHtml": [
+        "Read the docs",
+        "added on the"
+      ]
+    },
+    {
+      "name": "editing a client component keeps its state (Fast Refresh)",
+      "path": "/",
+      "click": "#greet",
+      "expectText": "Hello, Zalo (ran on the server)",
+      "edit": {
+        "file": "app/todo-form.tsx",
+        "from": ">Greet</button>",
+        "to": ">Greet again</button>",
+        "expectText": "Greet again",
+        "keepText": "Hello, Zalo (ran on the server)"
+      }
+    },
+    {
+      "name": "editing a Server Component refreshes it and keeps client state",
+      "path": "/",
+      "click": "#greet",
+      "expectText": "Hello, Zalo (ran on the server)",
+      "edit": {
+        "file": "app/page.tsx",
+        "from": "<h1>Todos</h1>",
+        "to": "<h1>Todo list</h1>",
+        "expectText": "Todo list",
+        "keepText": "Hello, Zalo (ran on the server)"
+      }
+    }
   ]
 }

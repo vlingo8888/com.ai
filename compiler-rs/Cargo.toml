@@ -40,6 +40,8 @@ swc_core = { version = "79.0.0", features = [
     "ecma_transforms_typescript",
     "ecma_codegen",
 ] }
+oxc_resolver = { version = "=11.23.0", default-features = false }
+matchit = "0.8"
 
 [profile.release]
 opt-level = 3

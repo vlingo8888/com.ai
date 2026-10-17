@@ -11,7 +11,7 @@
 // Defaults to the compat starter app. The project is copied to a temp dir first, so nothing is written
 // into it.
 
-import { existsSync, rmSync, writeFileSync } from "fs";
+import { existsSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { join, resolve } from "path";
 import { Browser, copyToTemp, findEngine, median, percentile, readJson, repoRoot, serverRssMb, sleep, startDev, timeRequests } from "../tests/compat/lib/harness";
 
@@ -49,7 +49,40 @@ const LABELS: Record<string, string> = {
   rssPeakMb: "RAM after load (engine + worker)",
   rssIdleMb: "RAM idle (engine + worker)",
   clientJsKb: "client JS transferred",
+  clientJsGzipKb: "client JS gzip (prod, no devtools)",
+  hmrMs: "HMR client component",
+  hmrServerMs: "HMR server component",
 };
+
+/**
+ * Bytes of every script the page loaded, gzipped (what a production server would send), without the
+ * development tools (error overlay, debugger, Fast Refresh) that production builds leave out
+ */
+async function gzippedScriptsKb(page: import("../tests/compat/lib/harness").Page, base: string) {
+  const urls = await page.evaluate<string[]>(
+    `performance.getEntriesByType("resource").map((r) => r.name).filter((n) => /\\/_nata\\/(deps|shims|router|rsc|client)|\\/_bundle\\//.test(n) && !/\\.css|styles|react-refresh/.test(n))`,
+  );
+  let bytes = 0;
+  for (const url of new Set(urls.concat(base + "/_nata/router.js"))) {
+    const body = new Uint8Array(await (await fetch(url)).arrayBuffer());
+    bytes += Bun.gzipSync(body).length;
+  }
+  return Math.round(bytes / 1024);
+}
+
+/** Edits a file of the running project and returns ms from the write until the page shows `expect` */
+async function timeHmr(page: import("../tests/compat/lib/harness").Page, file: string, from: string, to: string, expect: string) {
+  const source = readFileSync(file, "utf-8");
+  if (!source.includes(from)) return NaN;
+  await page.evaluate(
+    `window.__hmrSeen = null; new MutationObserver(() => { if (!window.__hmrSeen && document.body.innerText.includes(${JSON.stringify(expect)})) window.__hmrSeen = performance.now(); }).observe(document.body, { subtree: true, childList: true, characterData: true });`,
+  );
+  const start = await page.evaluate<number>("performance.now()");
+  writeFileSync(file, source.replace(from, to));
+  for (let i = 0; i < 100 && !(await page.evaluate("window.__hmrSeen")); i++) await sleep(20);
+  const seen = await page.evaluate<number | null>("window.__hmrSeen");
+  return seen ? Math.round(seen - start) : NaN;
+}
 
 const dir = copyToTemp(project, "bench");
 const server = await startDev(dir, { engine });
@@ -74,6 +107,11 @@ try {
     const page = await browser.newPage();
     const report = await page.load(server.url + pagePath, 4000);
     metrics.clientJsKb = Math.round(report.jsBytes / 1024);
+    // Save → screen: a client component (Fast Refresh) and a Server Component (payload refetch)
+    if (pagePath === "/" && existsSync(join(dir, "app/counter.tsx"))) {
+      metrics.hmrMs = await timeHmr(page, join(dir, "app/counter.tsx"), "Count: {count}", "Clicks: {count}", "Clicks: 0");
+      metrics.hmrServerMs = await timeHmr(page, join(dir, "app/page.tsx"), "Save and see your changes instantly.", "Saved, and seen instantly.", "Saved, and seen instantly.");
+    }
     page.close();
   } finally {
     browser.close();
@@ -91,6 +129,23 @@ try {
 } finally {
   await server.stop();
   rmSync(dir, { recursive: true, force: true });
+}
+
+// Client JavaScript as production would ship it: dependencies in their production builds
+{
+  const prodDir = copyToTemp(project, "bench-prod");
+  const prod = await startDev(prodDir, { engine, env: { COM_DEPS_PROD: "1" } });
+  const browser = await Browser.launch();
+  try {
+    const page = await browser.newPage();
+    await page.load(prod.url + pagePath, 4000);
+    metrics.clientJsGzipKb = await gzippedScriptsKb(page, prod.url);
+    page.close();
+  } finally {
+    browser.close();
+    await prod.stop();
+    rmSync(prodDir, { recursive: true, force: true });
+  }
 }
 
 const budget = existsSync(budgetFile) ? readJson<{ limits: Metrics; targets: Metrics }>(budgetFile) : { limits: {}, targets: {} };

@@ -100,6 +100,33 @@ function isEsmModule(file: string): boolean {
 }
 
 /**
+ * Named exports of a CommonJS file read from its source (`exports.x = ...`), following
+ * `module.exports = require("./...")` re-exports: for browser-only packages that cannot be imported on
+ * the server to list their exports (e.g. react-server-dom-webpack/client.browser)
+ */
+function cjsExportNames(file: string, nodeEnv: string, seen = new Set<string>()): string[] {
+  if (seen.has(file)) return [];
+  seen.add(file);
+  let source = "";
+  try {
+    source = readFileSync(file, "utf-8");
+  } catch {
+    return [];
+  }
+  const names = new Set<string>();
+  for (const [, name] of source.matchAll(/\bexports\.([A-Za-z_$][\w$]*)\s*=/g)) names.add(name);
+  const reexports = [...source.matchAll(/module\.exports\s*=\s*require\(\s*["'](\.[^"']+)["']\s*\)/g)].map((m) => m[1]);
+  const preferred = reexports.filter((r) => (nodeEnv === "production" ? !/development/.test(r) : !/production/.test(r)));
+  for (const rel of preferred.length ? preferred : reexports) {
+    try {
+      const target = Bun.resolveSync(rel, file.slice(0, file.lastIndexOf("/")));
+      for (const name of cjsExportNames(target, nodeEnv, seen)) names.add(name);
+    } catch {}
+  }
+  return [...names].filter((n) => n !== "default" && n !== "__esModule");
+}
+
+/**
  * Bundles one package specifier for the browser. Every other bare import stays external, rewritten to
  * `/_nata/deps/<specifier>`, so shared packages such as React are loaded exactly once.
  *
@@ -127,8 +154,9 @@ export async function bundleDependency(input: { spec: string; outFile: string; n
       const mod = await import(Bun.resolveSync(spec, process.cwd()));
       names = Object.keys(mod).filter((n) => n !== "default" && IDENTIFIER.test(n));
     } catch {
-      // Browser-only packages may throw on the server; `export *` in the wrapper still applies
+      // Browser-only packages may throw on the server; read their exports from the source instead
     }
+    if (names.length === 0 && resolved) names = cjsExportNames(resolved, nodeEnv).filter((n) => IDENTIFIER.test(n));
     const literal = JSON.stringify(spec);
     writeFileSync(
       wrapper,
@@ -178,7 +206,9 @@ export async function bundleDependency(input: { spec: string; outFile: string; n
     if (!result.success) {
       throw new Error(result.logs.map((l) => String(l.message || l)).join("\n"));
     }
-    const code = rewriteBareImports(await result.outputs[0].text());
+    let code = rewriteBareImports(await result.outputs[0].text());
+    // Production builds: whitespace goes too, once imports are rewritten (the rewrite needs lines)
+    if (nodeEnv === "production") code = new Bun.Transpiler({ loader: "js", minifyWhitespace: true }).transformSync(code);
     mkdirSync(join(outFile, ".."), { recursive: true });
     writeFileSync(outFile, code);
     return { bytes: code.length, format: esm ? "esm" : "cjs", exports: names.length };

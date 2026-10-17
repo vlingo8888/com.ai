@@ -9,6 +9,8 @@ const ROUTE_DELIM_END = "__NATA_ROUTE_OUT_END__";
 
 interface RouteHandlerInput {
   filePath: string;
+  /** `rsc:` specifier when the engine serves server modules (edits apply without a restart) */
+  moduleSpecifier?: string | null;
   url: string;
   method: string;
   params: Record<string, string>;
@@ -61,7 +63,7 @@ export async function handleRoute(input: RouteHandlerInput): Promise<RouteHandle
     const NextResponse = serverModule?.NextResponse || (globalThis as any).Response;
 
     // 3. Dynamically import the target route handler module
-    const mod = await import(input.filePath);
+    const mod = await import(input.moduleSpecifier || input.filePath);
 
     // List of standard HTTP methods supported by Next.js route handlers
     const httpMethods = ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS", "HEAD"];

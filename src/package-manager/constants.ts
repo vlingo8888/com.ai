@@ -43,8 +43,10 @@ export const BUILT_IN_MODULES = new Set([
 ]);
 
 export const DEFAULT_DEPENDENCIES: Record<string, string> = {
-  "react": "^18.3.1",
-  "react-dom": "^18.3.1",
+  // Exact and identical: the Flight runtime (React Server Components) must match React's version
+  "react": "19.3.0",
+  "react-dom": "19.3.0",
+  "react-server-dom-webpack": "19.3.0",
   "lucide-react": "^0.460.0",
   "clsx": "^2.1.1",
   "tailwind-merge": "^2.5.4",

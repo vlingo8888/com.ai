@@ -130,3 +130,72 @@ async fn request_bodies_round_trip_as_raw_bytes() {
     assert_eq!(reply.body, vec![254, 255, 2, 1, 0]);
     let _ = fs::remove_dir_all(&root);
 }
+
+fn write(root: &std::path::Path, rel: &str, contents: &str) {
+    let path = root.join(rel);
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(path, contents).unwrap();
+}
+
+/// Imports a server module through the worker's layer loader and prints `expr` evaluated on it
+async fn eval_module(root: &std::path::Path, specifier: &str, expr: &str) -> worker_pool::ScriptOutput {
+    let script = format!("const m = await import({}); console.log({expr});", serde_json::to_string(specifier).unwrap());
+    worker_pool::run(root, &script).await.unwrap()
+}
+
+#[tokio::test]
+async fn server_modules_load_through_the_engine_and_update_without_restart() {
+    if !bun_available() {
+        return;
+    }
+    let root = temp_project("layers_hmr");
+    write(&root, "package.json", r#"{"name":"app"}"#);
+    write(&root, "lib/message.ts", "export const message: string = \"one\";");
+    write(&root, "app/page.ts", "import { message } from \"../lib/message\";\nexport const shout = message.toUpperCase();");
+    let page = root.join("app/page.ts");
+    let graph = compiler_rs::module_graph::for_root(&root);
+    let spec = || graph.read().unwrap().specifier(&page, compiler_rs::resolver::Layer::Rsc);
+
+    let first = eval_module(&root, &spec(), "m.shout").await;
+    assert!(first.success, "{}", first.stderr);
+    assert_eq!(first.stdout, "ONE\n");
+    worker_pool::run(&root, "globalThis.__kept = 'still here';").await.unwrap();
+
+    write(&root, "lib/message.ts", "export const message: string = \"two\";");
+    graph.write().unwrap().invalidate(&root.join("lib/message.ts"));
+    assert!(spec().ends_with("?v=1"), "the importer gets a new specifier: {}", spec());
+
+    let started = std::time::Instant::now();
+    let second = eval_module(&root, &spec(), "m.shout + ' ' + globalThis.__kept").await;
+    let elapsed = started.elapsed();
+    assert!(second.success, "{}", second.stderr);
+    // New code, same process (state kept): no restart
+    assert_eq!(second.stdout, "TWO still here\n");
+    println!("reload after edit: {:?}", elapsed);
+    assert!(elapsed < std::time::Duration::from_millis(500), "reload took {:?}", elapsed);
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[tokio::test]
+async fn react_server_layer_resolves_commonjs_with_react_server_conditions() {
+    if !bun_available() {
+        return;
+    }
+    let root = temp_project("layers_cjs");
+    write(&root, "package.json", r#"{"name":"app"}"#);
+    write(&root, "node_modules/fake-react/package.json", r#"{"name":"fake-react","exports":{".":{"react-server":"./server.js","default":"./index.js"}}}"#);
+    write(&root, "node_modules/fake-react/server.js", "'use strict';\nmodule.exports = require('./cjs/server.js');");
+    write(&root, "node_modules/fake-react/cjs/server.js", "exports.kind = 'server'; exports.path = require('node:path').sep;");
+    write(&root, "node_modules/fake-react/index.js", "exports.kind = 'client'; exports.path = '';");
+    write(&root, "app/page.ts", "import { kind, path } from \"fake-react\";\nexport const where = kind + (path ? '' : '?');");
+    let page = root.join("app/page.ts");
+
+    let rsc = eval_module(&root, &format!("rsc:{}", page.display()), "m.where").await;
+    assert!(rsc.success, "{}", rsc.stderr);
+    assert_eq!(rsc.stdout, "server\n");
+    // The SSR layer shares installed packages with Bun's own resolution (default conditions)
+    let ssr = eval_module(&root, &format!("ssr:{}", page.display()), "m.where").await;
+    assert!(ssr.success, "{}", ssr.stderr);
+    assert_eq!(ssr.stdout, "client?\n");
+    let _ = fs::remove_dir_all(&root);
+}

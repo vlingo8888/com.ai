@@ -7,9 +7,10 @@
 //!
 //! Lifecycle:
 //! - started in the background when the dev server boots (`prewarm`), or on the first request;
-//! - restarted when server code changes (`restart`): requests already running finish first, then the
-//!   old process exits and a warm replacement is started (Bun's module cache cannot be invalidated
-//!   per file; P1's module graph removes this restart);
+//! - server code changes do not restart it: modules are loaded through the engine (`Bun.plugin` asks
+//!   for `rsc:` / `ssr:` modules with a `CALL` frame, see `module_server.rs`), and the module graph
+//!   gives changed files new versioned specifiers. `restart` remains for environment/config changes,
+//!   and recycles the process after many invalidations so stale module versions do not pile up;
 //! - stopped after `COM_WORKER_IDLE` seconds without requests (default 600, `0` = never), and started
 //!   again on demand, so an idle `com dev` costs no worker memory.
 //!
@@ -30,11 +31,21 @@ const SSR_RUNTIME: &str = include_str!("../ssr/runtime.ts");
 const ROUTE_RUNTIME: &str = include_str!("../route_handler/runtime.ts");
 const RPC_RUNTIME: &str = include_str!("../rpc_runtime.ts");
 const DEPS_BUNDLER: &str = include_str!("../deps_bundler.ts");
+const METADATA_RUNTIME: &str = include_str!("../ssr/metadata_runtime.ts");
+const RSC_RUNTIME: &str = include_str!("../rsc/rsc_runtime.ts");
+const RSC_SSR: &str = include_str!("../rsc/ssr_runtime.ts");
+const RSC_RENDER: &str = include_str!("../rsc/render.ts");
+pub const RSC_BOUNDARIES: &str = include_str!("../rsc/boundaries.js");
 
 const KIND_REQUEST: u8 = 1;
 const KIND_RESULT: u8 = 2;
+/// Part of a streamed response (worker -> engine), before its `RESULT`
+const KIND_CHUNK: u8 = 3;
 const KIND_READY: u8 = 4;
 const KIND_SHUTDOWN: u8 = 5;
+/// A request from the worker to the engine (load a module), answered with `REPLY`
+const KIND_CALL: u8 = 6;
+const KIND_REPLY: u8 = 7;
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
@@ -97,10 +108,23 @@ impl std::fmt::Display for WorkerError {
     }
 }
 
-type Pending = Mutex<HashMap<u32, oneshot::Sender<Reply>>>;
+/// One event of a streamed command: body chunks (the first may carry response head metadata), then
+/// the final result
+#[derive(Debug)]
+pub enum StreamEvent {
+    Chunk { meta: serde_json::Value, body: Vec<u8> },
+    End(Reply),
+}
+
+enum PendingEntry {
+    Once(oneshot::Sender<Reply>),
+    Stream(tokio::sync::mpsc::UnboundedSender<StreamEvent>),
+}
+
+type Pending = Mutex<HashMap<u32, PendingEntry>>;
 
 struct Handle {
-    stdin: tokio::sync::Mutex<ChildStdin>,
+    stdin: Arc<tokio::sync::Mutex<ChildStdin>>,
     child: tokio::sync::Mutex<Child>,
     pending: Arc<Pending>,
     alive: Arc<AtomicBool>,
@@ -187,6 +211,11 @@ pub fn write_runtime_files(root: &Path) -> std::io::Result<PathBuf> {
         ("route_handler_runtime.ts", ROUTE_RUNTIME),
         ("rpc_runtime.ts", RPC_RUNTIME),
         ("deps_bundler.ts", DEPS_BUNDLER),
+        ("metadata_runtime.ts", METADATA_RUNTIME),
+        ("rsc_runtime.ts", RSC_RUNTIME),
+        ("rsc_ssr.ts", RSC_SSR),
+        ("rsc_render.ts", RSC_RENDER),
+        ("rsc_boundaries.js", RSC_BOUNDARIES),
     ] {
         let path = nata_dir.join(name);
         // Skip identical content so file watchers and Bun's cache see no change
@@ -234,6 +263,8 @@ async fn read_frame(stdout: &mut ChildStdout) -> std::io::Result<(u8, u32, serde
 
 async fn spawn(root: &Path) -> Result<Arc<Handle>, String> {
     let script_path = write_runtime_files(root).map_err(|e| format!("could not write worker: {e}"))?;
+    // A new process has an empty module registry: server modules start again from version 0 state
+    crate::module_graph::for_root(root).write().unwrap_or_else(|e| e.into_inner()).reset_server_layers();
 
     let mut cmd = Command::new(crate::rpc::find_bun_bin());
     // --smol: a more aggressive GC and smaller heap; dev traffic is light, memory matters more
@@ -262,17 +293,45 @@ async fn spawn(root: &Path) -> Result<Arc<Handle>, String> {
 
     let pending: Arc<Pending> = Arc::new(Mutex::new(HashMap::new()));
     let alive = Arc::new(AtomicBool::new(true));
+    let stdin = Arc::new(tokio::sync::Mutex::new(stdin));
     {
         let pending = pending.clone();
         let alive = alive.clone();
+        let stdin = stdin.clone();
+        let root = root.to_path_buf();
         tokio::spawn(async move {
             loop {
                 match read_frame(&mut stdout).await {
                     Ok((KIND_RESULT, id, meta, body)) => {
-                        let sender = pending.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
-                        if let Some(tx) = sender {
-                            let _ = tx.send(Reply { meta, body });
+                        let entry = pending.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
+                        match entry {
+                            Some(PendingEntry::Once(tx)) => {
+                                let _ = tx.send(Reply { meta, body });
+                            }
+                            Some(PendingEntry::Stream(tx)) => {
+                                let _ = tx.send(StreamEvent::End(Reply { meta, body }));
+                            }
+                            None => {}
                         }
+                    }
+                    Ok((KIND_CHUNK, id, meta, body)) => {
+                        let map = pending.lock().unwrap_or_else(|e| e.into_inner());
+                        if let Some(PendingEntry::Stream(tx)) = map.get(&id) {
+                            let _ = tx.send(StreamEvent::Chunk { meta, body });
+                        }
+                    }
+                    Ok((KIND_CALL, id, meta, body)) => {
+                        let stdin = stdin.clone();
+                        let root = root.clone();
+                        tokio::spawn(async move {
+                            let cmd = meta["cmd"].as_str().unwrap_or("").to_string();
+                            let (reply_meta, reply_body) =
+                                crate::module_server::handle_call(&root, &cmd, &meta["input"], body).await;
+                            let frame = encode_frame(KIND_REPLY, id, &reply_meta, &reply_body);
+                            let mut stdin = stdin.lock().await;
+                            let _ = stdin.write_all(&frame).await;
+                            let _ = stdin.flush().await;
+                        });
                     }
                     Ok(_) => {}
                     Err(_) => break,
@@ -287,7 +346,7 @@ async fn spawn(root: &Path) -> Result<Arc<Handle>, String> {
     let concurrency = env_number("COM_WORKER_CONCURRENCY", 32).max(1) as usize;
     ensure_idle_reaper();
     Ok(Arc::new(Handle {
-        stdin: tokio::sync::Mutex::new(stdin),
+        stdin,
         child: tokio::sync::Mutex::new(child),
         pending,
         alive,
@@ -354,22 +413,8 @@ pub async fn call(root: &Path, cmd: &str, input: serde_json::Value, body: Vec<u8
 
     let id = handle.next_id.fetch_add(1, Ordering::SeqCst);
     let (tx, rx) = oneshot::channel();
-    handle.pending.lock().unwrap_or_else(|e| e.into_inner()).insert(id, tx);
-
-    let frame = encode_frame(KIND_REQUEST, id, &serde_json::json!({ "cmd": cmd, "input": input }), &body);
-    {
-        let mut stdin = handle.stdin.lock().await;
-        let written = async {
-            stdin.write_all(&frame).await?;
-            stdin.flush().await
-        }
-        .await;
-        if let Err(e) = written {
-            handle.pending.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
-            handle.alive.store(false, Ordering::SeqCst);
-            return Err(WorkerError::Failed(format!("worker write failed: {e}")));
-        }
-    }
+    handle.pending.lock().unwrap_or_else(|e| e.into_inner()).insert(id, PendingEntry::Once(tx));
+    send_request(&handle, id, cmd, input, &body).await?;
 
     match tokio::time::timeout(REQUEST_TIMEOUT, rx).await {
         Ok(Ok(reply)) => Ok(reply),
@@ -379,6 +424,43 @@ pub async fn call(root: &Path, cmd: &str, input: serde_json::Value, body: Vec<u8
             Err(WorkerError::Failed(format!("request timed out after {}s", REQUEST_TIMEOUT.as_secs())))
         }
     }
+}
+
+async fn send_request(handle: &Arc<Handle>, id: u32, cmd: &str, input: serde_json::Value, body: &[u8]) -> Result<(), WorkerError> {
+    let frame = encode_frame(KIND_REQUEST, id, &serde_json::json!({ "cmd": cmd, "input": input }), body);
+    let mut stdin = handle.stdin.lock().await;
+    let written = async {
+        stdin.write_all(&frame).await?;
+        stdin.flush().await
+    }
+    .await;
+    if let Err(e) = written {
+        handle.pending.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
+        handle.alive.store(false, Ordering::SeqCst);
+        return Err(WorkerError::Failed(format!("worker write failed: {e}")));
+    }
+    Ok(())
+}
+
+/// A streamed worker command: the receiver yields body chunks as the worker produces them, then the
+/// final `Reply`. The worker stays counted as busy (so a restart drains it) until the stream ends.
+pub struct WorkerStream {
+    pub events: tokio::sync::mpsc::UnboundedReceiver<StreamEvent>,
+    _guard: InflightGuard,
+}
+
+/// Runs a command whose output is streamed (`rsc`): see `WorkerStream`
+pub async fn call_stream(root: &Path, cmd: &str, input: serde_json::Value, body: Vec<u8>) -> Result<WorkerStream, WorkerError> {
+    if !enabled() {
+        return Err(WorkerError::Unavailable("disabled by COM_WORKER=0".to_string()));
+    }
+    let guard = acquire(root).await?;
+    let handle = guard.0.clone();
+    let id = handle.next_id.fetch_add(1, Ordering::SeqCst);
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    handle.pending.lock().unwrap_or_else(|e| e.into_inner()).insert(id, PendingEntry::Stream(tx));
+    send_request(&handle, id, cmd, input, &body).await?;
+    Ok(WorkerStream { events: rx, _guard: guard })
 }
 
 /// Restarts the project's worker so changed modules are re-imported; running requests finish first

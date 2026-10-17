@@ -6,6 +6,29 @@ import { startTunnelBackground, printTunnelQrCode } from "./tunnel";
 import { exeName, resolvePrebuiltCompiler, compilerPackageName } from "../core/binaries";
 import packageJson from "../../package.json";
 
+/** The Rust engine binary (`com-compiler`): COM_COMPILER_PATH, the prebuilt package, a local build */
+export function findEngineBinary(): string | null {
+  const exeExt = process.platform === "win32" ? ".exe" : "";
+  const prebuiltCompiler = resolvePrebuiltCompiler();
+  const candidates = [
+    ...(process.env.COM_COMPILER_PATH ? [process.env.COM_COMPILER_PATH] : []),
+    ...(prebuiltCompiler ? [prebuiltCompiler] : []),
+    join(__dirname, `../compiler-rs/target/release/com-compiler${exeExt}`),
+    join(__dirname, `../../compiler-rs/target/release/com-compiler${exeExt}`),
+    join(process.cwd(), `compiler-rs/target/release/com-compiler${exeExt}`),
+    join(__dirname, `../com-compiler${exeExt}`),
+    join(__dirname, `../../com-compiler${exeExt}`),
+    `/usr/local/bin/com-compiler${exeExt}`,
+    `com-compiler${exeExt}`,
+    "com-compiler",
+  ];
+  for (const candidate of candidates) {
+    if (existsSync(candidate)) return candidate;
+  }
+  const which = Bun.which(`com-compiler${exeExt}`) || Bun.which("com-compiler");
+  return which && existsSync(which) ? which : null;
+}
+
 export async function findAvailablePort(startPort: number): Promise<number> {
   let port = startPort;
   while (port < startPort + 50) {
@@ -336,34 +359,7 @@ export async function devCommand(options: DevOptions = {}) {
 
   // Locate the standalone Rust compiler binary
   const exeExt = process.platform === "win32" ? ".exe" : "";
-  const prebuiltCompiler = resolvePrebuiltCompiler();
-  const rustBinCandidates = [
-    ...(process.env.COM_COMPILER_PATH ? [process.env.COM_COMPILER_PATH] : []),
-    ...(prebuiltCompiler ? [prebuiltCompiler] : []),
-    join(__dirname, `../compiler-rs/target/release/com-compiler${exeExt}`),
-    join(__dirname, `../../compiler-rs/target/release/com-compiler${exeExt}`),
-    join(process.cwd(), `compiler-rs/target/release/com-compiler${exeExt}`),
-    join(__dirname, `../com-compiler${exeExt}`),
-    join(__dirname, `../../com-compiler${exeExt}`),
-    `/usr/local/bin/com-compiler${exeExt}`,
-    `com-compiler${exeExt}`,
-    "com-compiler",
-  ];
-
-  let rustBinPath: string | null = null;
-  for (const cand of rustBinCandidates) {
-    if (existsSync(cand)) {
-      rustBinPath = cand;
-      break;
-    }
-  }
-
-  if (!rustBinPath) {
-    const whichPath = Bun.which(`com-compiler${exeExt}`) || Bun.which("com-compiler");
-    if (whichPath && existsSync(whichPath)) {
-      rustBinPath = whichPath;
-    }
-  }
+  let rustBinPath: string | null = findEngineBinary();
 
   if (!rustBinPath) {
     const buildSpinner = logger.spinner("Compiling Rust App Router Engine (first-time build)...");

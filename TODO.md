@@ -21,7 +21,7 @@
 | **Middleware Engine** | `middleware.ts` with matcher & cookie/auth rewrites | 🔴 **Missing** | **Medium (P1)** |
 | **Fonts & Media Optimization** | `next/font/google`, `next/font/local`, dynamic `next/image` resize | 🔴 **Missing** | **Medium (P1)** |
 | **Data Cache & Revalidation** | `revalidatePath()`, `revalidateTag()`, `fetch(..., { next })` | 🔴 **Missing** | **Medium (P1)** |
-| **React Server Components (RSC)** | Streaming HTML, `<Suspense>`, partial prerendering | 🔴 **Missing** | **Long-term (P2)** |
+| **React Server Components (RSC)** | Streaming HTML, `<Suspense>`, Server Actions, client router (see ROADMAP.md P1); partial prerendering | 🟢 **Done (ROADMAP P1)**, PPR in P2 | **P1** |
 
 ---
 
@@ -116,8 +116,8 @@ Next.js allows running code before a request is completed:
 
 ## 6. 🚀 Backend Server Actions & Zero-Install Enhancements (Priority: P1)
 
-- [ ] **Direct `"use server"` Inline Directive Support**:
-  - Enable inline `"use server"` functions inside feature files, automatically translating them to RPC calls.
+- [x] **Direct `"use server"` Inline Directive Support** (ROADMAP P1.7):
+  - File-level and inline `"use server"` compile to Server Actions (`swc_compiler/server_actions.rs`).
 - [ ] **`core` Backend Library Pre-bundling**:
   - Bundle `z` (Zod), `dateFns`, `uuid`, `crypto`, `jwt`, `lodash` into `import { ... } from "core"` so backend use-cases never need `bun install` for common tasks.
 - [ ] **Global Native Module Store (`~/.com/native-cache`)**:

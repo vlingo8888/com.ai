@@ -66,10 +66,16 @@ pub struct DevServer;
 impl DevServer {
     pub async fn run(root_dir: PathBuf, initial_port: u16, target: String) -> Result<(), Box<dyn std::error::Error>> {
         let root_dir = root_dir.canonicalize().unwrap_or(root_dir);
+        if let Some(major) = crate::module_graph::check_react_support(&root_dir) {
+            crate::term::warn(&format!(
+                "React {major} found: Server Components, Server Actions and streaming need React 19, so pages render on the client. Upgrade with: bun add react@19 react-dom@19 react-server-dom-webpack@19"
+            ));
+        }
         // Pre-create .nata runtime and shim files
         RpcExecutor::ensure_runtime_env(&root_dir);
         // Start the Bun worker now so the first render / Server Action does not pay its startup
         crate::worker_pool::prewarm(&crate::rpc::dunce_canonicalize(&root_dir));
+        crate::rsc::prewarm(&root_dir);
 
         if target == "zalo" {
             let _ = crate::zmp::ZmpConfigGenerator::ensure_app_config(&root_dir);
@@ -99,6 +105,19 @@ impl DevServer {
             .route("/_nata/hmr_version", get(hmr_version_handler))
             .route("/_nata/client.js", get(client_runtime_handler))
             .route("/_nata/overlay.js", get(overlay_handler))
+            .route("/_nata/debug.js", get(|| async { javascript_response(crate::client::DEBUG_JS) }))
+            .route(
+                "/_nata/refresh.js",
+                get(|| async {
+                    javascript_response(if crate::module_graph::refresh_enabled() {
+                        crate::client::REFRESH_JS
+                    } else {
+                        "self.$RefreshReg$ = () => {};\nself.$RefreshSig$ = () => (type) => type;\n"
+                    })
+                }),
+            )
+            .route(crate::rsc::ROUTER_URL, get(|| async { javascript_response(crate::rsc::ROUTER_SOURCE) }))
+            .route("/_nata/rsc/boundaries.js", get(|| async { javascript_response(crate::worker_pool::RSC_BOUNDARIES) }))
             .route("/_nata/deps/{*spec}", get(deps_handler))
             .route("/_nata/css/{*path}", get(css_module_handler))
             .route("/favicon.ico", get(favicon_handler))
@@ -955,10 +974,19 @@ fn zmp_bootstrap_js(backend_url: &str, tailwind_in_browser: bool) -> String {
       container.id = "app";
       document.body.appendChild(container);
     }
-    window.__NATA_CONFIG__ = { mode: "zalo", ssr: false, origin: serverOrigin, initial: null };
+    var rsc = __COM_RSC__;
+    window.__NATA_CONFIG__ = { mode: "zalo", ssr: false, rsc: rsc, origin: serverOrigin, initial: null };
+    if (rsc) {
+      // React Server Components router: client references are module URLs on the dev server
+      var modules = self.__nata_modules = new Map();
+      self.__webpack_chunk_load__ = function(id) { return import(serverOrigin + id).then(function(m) { modules.set(id, m); }); };
+      self.__webpack_require__ = function(id) { return modules.get(id); };
+      self.__webpack_require__.u = function(c) { return c; };
+      self.__webpack_get_script_filename__ = function(c) { return serverOrigin + c; };
+    }
     // The overlay loads first so a runtime that cannot load (tunnel/CDN down) is still reported on screen
     import(serverOrigin + "/_nata/overlay.js").then(function(overlay) {
-      return import(serverOrigin + "/_nata/client.js").catch(function(err) {
+      return import(serverOrigin + (rsc ? "/_nata/router.js" : "/_nata/client.js")).catch(function(err) {
         overlay.reportIssue(err, "runtime");
       });
     }).catch(function(err) {
@@ -982,6 +1010,7 @@ fn zmp_bootstrap_js(backend_url: &str, tailwind_in_browser: bool) -> String {
         .replace("__COM_BACKEND_PLACEHOLDER__", backend_url)
         .replace("__COM_IMPORT_MAP_PLACEHOLDER__", &import_map_js)
         .replace("__COM_TAILWIND_BROWSER__", if tailwind_in_browser { "true" } else { "false" })
+        .replace("__COM_RSC__", if crate::module_graph::rsc_enabled() { "true" } else { "false" })
 }
 
 async fn shims_handler(
@@ -1151,23 +1180,51 @@ export default { cookies, headers, draftMode };
         }
         "next/link" | "link" => {
             r##"import React from "react";
-export default function Link({ href, children, className, style, onClick, target, rel, replace, ...props }) {
+
+function hrefString(href) {
+  if (typeof href === "string") return href;
+  if (!href || typeof href !== "object") return "#";
+  const query = href.query && typeof href.query === "object" ? new URLSearchParams(href.query).toString() : "";
+  return (href.pathname || "") + (query ? "?" + query : "") + (href.hash ? (href.hash.startsWith("#") ? href.hash : "#" + href.hash) : "");
+}
+
+const isInternal = (url, target) =>
+  url && !target && !/^(https?:)?\/\//.test(url) && !url.startsWith("mailto:") && !url.startsWith("tel:") && !url.startsWith("#");
+
+// Like Next.js, links prefetch automatically only in production builds (`__NATA_CONFIG__.prefetch`):
+// in development a prefetch would run the whole page on every link in view. `prefetch={true}` and
+// router.prefetch() always work.
+const autoPrefetch = (prefetch) =>
+  prefetch === true || (prefetch !== false && typeof window !== "undefined" && !!(window.__NATA_CONFIG__ || {}).prefetch);
+
+export default function Link({ href, children, onClick, onMouseEnter, target, replace, scroll, prefetch, shallow, passHref, legacyBehavior, locale, ...props }) {
+  const url = hrefString(href);
+  const ref = React.useRef(null);
+  // Prefetch when the link scrolls into view and the browser is idle (the router skips Save-Data/2G)
+  React.useEffect(() => {
+    const router = typeof window !== "undefined" ? window.__NATA_ROUTER__ : null;
+    if (!autoPrefetch(prefetch) || !router || !isInternal(url, target) || typeof IntersectionObserver === "undefined" || !ref.current) return;
+    const observer = new IntersectionObserver((entries) => {
+      if (!entries.some((e) => e.isIntersecting)) return;
+      observer.disconnect();
+      (window.requestIdleCallback || setTimeout)(() => router.prefetch(url));
+    });
+    observer.observe(ref.current);
+    return () => observer.disconnect();
+  }, [url, prefetch, target]);
   const handleClick = (e) => {
     if (onClick) onClick(e);
-    if (!e.defaultPrevented && href && !target && !href.startsWith("http://") && !href.startsWith("https://") && !href.startsWith("mailto:") && !href.startsWith("tel:") && !href.startsWith("#")) {
-      e.preventDefault();
-      if (typeof window !== "undefined" && typeof window.__NATA_NAVIGATE__ === "function") {
-        window.__NATA_NAVIGATE__(href, { replace });
-      } else {
-        if (replace) {
-          window.location.replace(href);
-        } else {
-          window.location.href = href;
-        }
-      }
-    }
+    if (e.defaultPrevented || !isInternal(url, target) || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+    e.preventDefault();
+    if (typeof window.__NATA_NAVIGATE__ === "function") window.__NATA_NAVIGATE__(url, { replace, scroll: scroll !== false });
+    else if (replace) window.location.replace(url);
+    else window.location.href = url;
   };
-  return React.createElement("a", { href: href || "#", className, style, target, rel, onClick: handleClick, ...props }, children);
+  const handleMouseEnter = (e) => {
+    if (onMouseEnter) onMouseEnter(e);
+    if (autoPrefetch(prefetch) && window.__NATA_ROUTER__ && isInternal(url, target)) window.__NATA_ROUTER__.prefetch(url);
+  };
+  return React.createElement("a", { ...props, ref, href: url, target, onClick: handleClick, onMouseEnter: handleMouseEnter }, children);
 }
 export { Link };
 "##
@@ -1195,6 +1252,14 @@ export { Image };
         }
         "next/navigation" | "navigation" => {
             r##"import React from "react";
+import { SelectedLayoutContext } from "/_nata/rsc/boundaries.js";
+
+/** The URL segments below the calling layout (React Server Components router) */
+export const useSelectedLayoutSegments = () => React.useContext(SelectedLayoutContext);
+export const useSelectedLayoutSegment = () => {
+  const segments = useSelectedLayoutSegments();
+  return segments.length ? segments[0] : null;
+};
 // The client runtime keeps the App Router location here (virtual in Zalo Mini Apps)
 const nataLocation = () => {
   if (typeof window === "undefined") return { pathname: "/", search: "" };
@@ -1219,13 +1284,17 @@ export const useRouter = () => ({
   back: () => { if (typeof window !== "undefined") window.history.back(); },
   forward: () => { if (typeof window !== "undefined") window.history.forward(); },
   refresh: () => {
-    if (typeof window !== "undefined" && typeof window.__NATA_NAVIGATE__ === "function") {
+    if (typeof window !== "undefined" && window.__NATA_ROUTER__) {
+      window.__NATA_ROUTER__.refresh();
+    } else if (typeof window !== "undefined" && typeof window.__NATA_NAVIGATE__ === "function") {
       window.__NATA_NAVIGATE__(nataLocation().pathname + nataLocation().search, { replace: true });
     } else if (typeof window !== "undefined") {
       window.location.reload();
     }
   },
-  prefetch: () => {}
+  prefetch: (url) => {
+    if (typeof window !== "undefined" && window.__NATA_ROUTER__) window.__NATA_ROUTER__.prefetch(url);
+  }
 });
 
 export const usePathname = () => {
@@ -1292,7 +1361,7 @@ export const notFound = () => {
   err.digest = "NEXT_NOT_FOUND";
   throw err;
 };
-export default { useRouter, usePathname, useSearchParams, useParams, redirect, notFound };
+export default { useRouter, usePathname, useSearchParams, useParams, redirect, notFound, useSelectedLayoutSegment, useSelectedLayoutSegments };
 "##
         }
         "next/router" | "router" => {
@@ -1578,6 +1647,21 @@ async fn bundle_handler(
             Ok(content) => {
                 let mut js_headers = HeaderMap::new();
                 js_headers.insert(header::CONTENT_TYPE, "application/javascript; charset=utf-8".parse().unwrap());
+                js_headers.insert(header::CACHE_CONTROL, "no-cache".parse().unwrap());
+
+                if crate::module_graph::rsc_enabled() {
+                    return match crate::module_graph::compile(&state.root_dir, &resolved.absolute_path, crate::resolver::Layer::Client, &content) {
+                        Ok(compiled) => {
+                            let js = crate::resolver::ImportResolver::soften_remote_named_imports(&compiled.code);
+                            (StatusCode::OK, js_headers, js).into_response()
+                        }
+                        Err(err) => {
+                            crate::term::error(&err.location(), Some(&err.message), Some(&err.frame));
+                            js_headers.insert(header::CACHE_CONTROL, "no-store".parse().unwrap());
+                            (StatusCode::OK, js_headers, build_error_module(&err)).into_response()
+                        }
+                    };
+                }
 
                 let cache = crate::compile_cache::CompileCache::for_root(&state.root_dir);
                 let cache_key = crate::compile_cache::CompileCache::key(
@@ -1643,6 +1727,52 @@ async fn loading_placeholder(root: &std::path::Path, segments: &[crate::router::
         headers: None,
     };
     SsrEngine::render(root, request).await.html
+}
+
+/// The Zalo Mini App document for the browser preview: the same bootstrap the device runs
+/// (`/assets/app.js`), with the mock Zalo bridge
+fn zalo_preview_document() -> String {
+    format!(
+        "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>Zalo Mini App</title><script>{}</script></head><body><div id=\"app\"></div><script src=\"/assets/app.js\"></script></body></html>",
+        crate::zmp::ZmpMockBridge::get_browser_mock_script()
+    )
+}
+
+/// What a page request asks the React Server Components pipeline for: the document, the Flight
+/// payload (`RSC: 1`, client navigations) or a Server Action (POST)
+async fn rsc_page_request<'a>(
+    req: axum::extract::Request,
+    path: &'a str,
+    query: &'a str,
+    route: Option<&'a crate::router::types::RouteEntry>,
+    params: std::collections::HashMap<String, String>,
+    not_found_segments: Vec<crate::router::types::SegmentFiles>,
+) -> crate::rsc::PageRequest<'a> {
+    let headers = req.headers().clone();
+    let header_str = |name: &str| headers.get(name).and_then(|v| v.to_str().ok()).map(|s| s.to_string());
+    let router_state = header_str("nata-router-state")
+        .map(|v| crate::router::types::percent_decode(&v))
+        .and_then(|v| serde_json::from_str::<Vec<String>>(&v).ok())
+        .unwrap_or_default();
+    let mode = if req.method() == axum::http::Method::POST {
+        let content_type = header_str("content-type").unwrap_or_default();
+        let body = axum::body::to_bytes(req.into_body(), 50 * 1024 * 1024).await.unwrap_or_default().to_vec();
+        crate::rsc::Mode::Action { id: header_str("next-action"), content_type, body }
+    } else if header_str("rsc").as_deref() == Some("1") {
+        crate::rsc::Mode::Flight
+    } else {
+        crate::rsc::Mode::Html
+    };
+    crate::rsc::PageRequest {
+        pathname: path,
+        query,
+        route,
+        params,
+        cookies: header_str("cookie"),
+        router_state,
+        mode,
+        not_found_segments,
+    }
 }
 
 async fn app_router_fallback_handler(
@@ -1766,6 +1896,19 @@ async fn app_router_fallback_handler(
         }
 
         let stylesheet_tags = crate::css_compiler::stylesheet::project_stylesheet(&state.root_dir).await.head_tags();
+
+        if crate::module_graph::rsc_enabled() {
+            // Zalo Mini Apps render on the device: the browser preview gets the Mini App document,
+            // the payload and Server Actions are served to the device like to the web router
+            let wants_document = state.target == "zalo" && req.method() == axum::http::Method::GET && req.headers().get("rsc").is_none();
+            if wants_document {
+                return Html(zalo_preview_document()).into_response();
+            }
+            let route = route.clone();
+            let query = req.uri().query().unwrap_or("").to_string();
+            let page_req = rsc_page_request(req, &path, &query, Some(&route), params, Vec::new()).await;
+            return crate::rsc::handle(&state.root_dir, &state.target, &stylesheet_tags, page_req).await;
+        }
 
         // Build SSR request context
         let mut query_map = std::collections::HashMap::new();
@@ -1892,6 +2035,15 @@ async fn app_router_fallback_handler(
         }
     }
 
+    if crate::module_graph::rsc_enabled() && (state.target != "zalo" || req.headers().get("rsc").is_some()) {
+        let root_segment: Vec<_> = router_guard.routes.iter().find_map(|r| r.segments_files.first().cloned()).into_iter().collect();
+        drop(router_guard);
+        let stylesheet_tags = crate::css_compiler::stylesheet::project_stylesheet(&state.root_dir).await.head_tags();
+        let query = req.uri().query().unwrap_or("").to_string();
+        let page_req = rsc_page_request(req, &path, &query, None, Default::default(), root_segment).await;
+        return crate::rsc::handle(&state.root_dir, &state.target, &stylesheet_tags, page_req).await;
+    }
+
     // Try rendering root not-found.tsx if available
     let not_found_opt = router_guard.routes.iter().find_map(|r| {
         r.segments_files.iter().find_map(|s| s.not_found.clone())
@@ -1945,7 +2097,10 @@ mod tests {
     fn test_zmp_bootstrap_boots_shared_runtime_client_only() {
         let js = zmp_bootstrap_js("https://backend.example", false);
         assert!(js.contains(r#"var configuredBackend = "https://backend.example";"#));
-        assert!(js.contains(r#"import(serverOrigin + "/_nata/client.js")"#));
+        // React Server Components router (on by default), the client-rendered runtime with COM_RSC=0
+        assert!(js.contains(r#"import(serverOrigin + (rsc ? "/_nata/router.js" : "/_nata/client.js"))"#));
+        assert!(js.contains("var rsc = true;"));
+        assert!(js.contains("self.__webpack_chunk_load__ = function(id) { return import(serverOrigin + id)"));
         assert!(js.contains(r#"mode: "zalo", ssr: false"#));
         assert!(js.contains(r#""next/navigation":serverOrigin + "/_nata/shims/next/navigation""#));
         assert!(!js.contains("__COM_IMPORT_MAP_PLACEHOLDER__"));
@@ -1958,7 +2113,7 @@ mod tests {
     fn test_zmp_bootstrap_loads_overlay_before_runtime() {
         let js = zmp_bootstrap_js("", false);
         let overlay_at = js.find(r#"import(serverOrigin + "/_nata/overlay.js")"#).expect("overlay import");
-        let client_at = js.find(r#"import(serverOrigin + "/_nata/client.js")"#).expect("client import");
+        let client_at = js.find(r#"import(serverOrigin + (rsc ? "/_nata/router.js" : "/_nata/client.js"))"#).expect("runtime import");
         assert!(overlay_at < client_at);
     }
 

@@ -1,7 +1,8 @@
 import { existsSync, mkdirSync, copyFileSync, writeFileSync } from "fs";
 import { join, resolve } from "path";
 import { logger, colors } from "../core/logger";
-import { isZaloMiniAppProject } from "./dev";
+import { findEngineBinary, isZaloMiniAppProject } from "./dev";
+import { prerenderPayloads } from "../zalominiapp/prerender";
 
 export interface BuildOptions {
   dir?: string;
@@ -59,6 +60,17 @@ export async function buildCommand(options: BuildOptions = {}) {
         mkdirSync(assetsDir, { recursive: true });
       }
 
+      // 3. Prerendered payloads of static routes (read by the router before asking the backend)
+      const engine = findEngineBinary();
+      let prerendered: Record<string, string> = {};
+      let prerenderFailed: string[] = [];
+      if (engine) {
+        spinner.update("Prerendering static routes...");
+        const result = await prerenderPayloads(projectDir, outputDir, engine);
+        prerendered = result.manifest;
+        prerenderFailed = result.failed;
+      }
+
       const htmlEntry = `<!DOCTYPE html>
 <html lang="vi">
 <head>
@@ -69,6 +81,7 @@ export async function buildCommand(options: BuildOptions = {}) {
 </head>
 <body>
   <div id="root"></div>
+  <script>window.__NATA_PRERENDERED__ = ${JSON.stringify(prerendered)};</script>
   <script src="./assets/app.js"></script>
 </body>
 </html>`;
@@ -81,6 +94,13 @@ export async function buildCommand(options: BuildOptions = {}) {
         { label: "Target", value: "📱 Zalo Mini App (ZMP SPA Bundle)", color: colors.bold + colors.cyan },
         { label: "Output Directory", value: outputDir, color: colors.green },
         { label: "Config File", value: join(outputDir, "app-config.json"), color: colors.sky },
+        {
+          label: "Prerendered",
+          value: engine
+            ? `${Object.keys(prerendered).length} static route(s)${prerenderFailed.length ? `, failed: ${prerenderFailed.join(", ")}` : ""}`
+            : "skipped (engine binary not found)",
+          color: colors.sky,
+        },
         { label: "Deploy Command", value: "zmp deploy (or open in Zalo Mini App Studio)", color: colors.yellow },
       ]);
     } else {

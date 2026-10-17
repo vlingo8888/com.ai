@@ -348,7 +348,7 @@ mod tests {
         );
         assert!(out.contains("@/modules/auth › loginAction ✓"));
         assert!(out.contains("1 query"));
-        assert!(out.contains(r#"→ args [{"password":"‹redacted›","phoneNumber":"0935492113"}]"#));
+        assert!(out.contains(r#"→ args [{"phoneNumber":"0935492113","password":"‹redacted›"}]"#));
         assert!(out.contains(r#"SQL 3.2ms 1 row select "id", "password" from "users" where "phone_number" = $1"#));
         assert!(out.contains(r#"params ["0935492113"]"#));
         assert!(out.contains(r#"[{"id":826,"password":"‹redacted›"}]"#));

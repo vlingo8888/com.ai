@@ -1,0 +1,1 @@
+{ "app": { "title": "Compat Mini App" }, "pages": ["pages/index/index"], "listCSS": ["assets/app.css"], "listSyncJS": ["assets/app.js"] }

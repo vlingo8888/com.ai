@@ -46,7 +46,7 @@ pub fn installed_version(root: &Path, name: &str) -> Option<String> {
 }
 
 /// Bumped whenever the bundler's output changes, so bundles cached by an older engine are rebuilt
-const BUNDLE_FORMAT: &str = "v3";
+const BUNDLE_FORMAT: &str = "v4";
 
 /// Where the bundled module for `spec` at `version` is cached
 pub fn cache_path(root: &Path, spec: &str, version: &str) -> PathBuf {
@@ -121,6 +121,39 @@ pub async fn ensure_installed(root: &Path, name: &str) -> Option<String> {
     }
 }
 
+/// Installs `name@version` unless exactly that version is present (packages that must match another
+/// package's version, like `react-server-dom-webpack` and `react`)
+pub async fn ensure_version(root: &Path, name: &str, version: &str) -> bool {
+    if installed_version(root, name).as_deref() == Some(version) {
+        return true;
+    }
+    let key = format!("{name}@{version}");
+    if failed_installs().lock().map(|f| f.contains(&key)).unwrap_or(false) {
+        return false;
+    }
+    let lock = install_locks().lock().unwrap_or_else(|e| e.into_inner()).entry(key.clone()).or_default().clone();
+    let _guard = lock.lock().await;
+    if installed_version(root, name).as_deref() == Some(version) {
+        return true;
+    }
+    crate::term::event(&format!("Installing {key}..."));
+    let started = std::time::Instant::now();
+    let mut cmd = tokio::process::Command::new(crate::rpc::find_bun_bin());
+    cmd.arg("add").arg(&key).current_dir(root).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::piped());
+    crate::worker_pool::apply_runner_env(&mut cmd, root);
+    let ok = matches!(cmd.output().await, Ok(out) if out.status.success()) && installed_version(root, name).as_deref() == Some(version);
+    if ok {
+        crate::term::success(&format!("Installed {key} in {}", crate::term::format_ms(started.elapsed().as_secs_f64() * 1000.0)));
+        crate::worker_pool::restart(root).await;
+    } else {
+        crate::term::warn(&format!("Could not install {key}"));
+        if let Ok(mut failed) = failed_installs().lock() {
+            failed.insert(key);
+        }
+    }
+    ok
+}
+
 /// Installs build-time packages (e.g. Tailwind) as devDependencies, all in one `bun add -d`.
 /// Attempted at most once per process; returns whether all of them are installed afterwards.
 pub async fn ensure_dev_packages(root: &Path, names: &[&str]) -> bool {
@@ -159,6 +192,19 @@ pub fn content_etag(code: &str) -> String {
     format!("\"{}\"", &blake3::hash(code.as_bytes()).to_hex()[..20])
 }
 
+/// `COM_DEPS_PROD=1` serves the production builds of dependencies (React without its development
+/// checks, minified): what a production build ships. For measuring client JavaScript size only
+/// (`scripts/bench.ts`): the dev server still renders with React's development builds, whose Flight
+/// payload the production client does not read, so pages do not hydrate in this mode. `com build`
+/// (ROADMAP P3) builds both sides for production.
+pub fn deps_node_env() -> &'static str {
+    if matches!(std::env::var("COM_DEPS_PROD").as_deref(), Ok("1") | Ok("true")) {
+        "production"
+    } else {
+        "development"
+    }
+}
+
 pub enum DepResult {
     /// Bundled module source plus an ETag for conditional requests
     Module { code: String, etag: String },
@@ -176,13 +222,15 @@ pub async fn resolve(root: &Path, spec: &str) -> DepResult {
     let Some(version) = ensure_installed(root, &name).await else {
         return DepResult::Fallback(esm_sh_url(spec));
     };
-    let out_file = cache_path(root, spec, &version);
+    let node_env = deps_node_env();
+    // Production builds (smaller, no dev warnings) are cached apart from development ones
+    let out_file = cache_path(root, spec, &if node_env == "production" { format!("{version}-prod") } else { version.clone() });
     if let Ok(code) = std::fs::read_to_string(&out_file) {
         return DepResult::Module { etag: content_etag(&code), code };
     }
 
     let started = std::time::Instant::now();
-    let input = serde_json::json!({ "spec": spec, "outFile": out_file, "nodeEnv": "development" });
+    let input = serde_json::json!({ "spec": spec, "outFile": out_file, "nodeEnv": node_env });
     // A one-off process: bundling happens once per package version, and Bun.build's memory would
     // otherwise stay in the long-lived worker
     let script = format!(
@@ -239,10 +287,10 @@ mod tests {
     #[test]
     fn cache_path_is_versioned_per_subpath() {
         let root = Path::new("/p");
-        assert_eq!(cache_path(root, "react", "19.1.0"), Path::new("/p/.nata/deps/v3/react@19.1.0/index.js"));
+        assert_eq!(cache_path(root, "react", "19.1.0"), Path::new("/p/.nata/deps/v4/react@19.1.0/index.js"));
         assert_eq!(
             cache_path(root, "@hookform/resolvers/zod", "3.9.0"),
-            Path::new("/p/.nata/deps/v3/@hookform__resolvers@3.9.0/zod.js")
+            Path::new("/p/.nata/deps/v4/@hookform__resolvers@3.9.0/zod.js")
         );
     }
 }

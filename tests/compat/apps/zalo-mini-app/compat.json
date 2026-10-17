@@ -1,0 +1,8 @@
+{
+  "target": "zalo",
+  "checks": [
+    { "name": "async Server Component renders on the device from the backend's payload", "path": "/", "contains": ["Rendered by a Server Component on the server"] },
+    { "name": "virtual navigation keeps the layout's state", "path": "/", "prepare": { "click": "#taps", "expectText": "Taps: 1" }, "navigate": { "click": "a[href='/profile']", "expectText": "Profile page", "keepText": "Taps: 1" } },
+    { "name": "Server Action called from the device runs on the server", "path": "/", "prepare": { "click": "a[href='/profile']", "expectText": "Profile page" }, "click": "#who", "expectText": "Action ran on the server" }
+  ]
+}

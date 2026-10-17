@@ -29,6 +29,7 @@ impl RouteHandlerWorker {
 
         let input = serde_json::json!({
             "filePath": handler_file_path,
+            "moduleSpecifier": crate::module_graph::server_module_specifier(root, &handler_file_path),
             "url": request.url,
             "method": request.method,
             "params": request.params,

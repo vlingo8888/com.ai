@@ -8,7 +8,10 @@
     "apiMedianMs": 10,
     "rssPeakMb": 160,
     "rssIdleMb": 100,
-    "clientJsKb": 900
+    "clientJsKb": 900,
+    "clientJsGzipKb": 150,
+    "hmrMs": 300,
+    "hmrServerMs": 600
   },
   "targets": {
     "readyMs": 300,
@@ -16,6 +19,8 @@
     "ssrMedianMs": 10,
     "apiMedianMs": 10,
     "rssIdleMb": 80,
-    "clientJsKb": 70
+    "clientJsKb": 70,
+    "clientJsGzipKb": 100,
+    "hmrMs": 50
   }
 }

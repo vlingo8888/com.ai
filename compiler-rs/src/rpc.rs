@@ -1283,6 +1283,17 @@ exports.notFound = function() {
 };
 
 exports.useServerInsertedHTML = function(cb) {};
+
+// The URL segments below the calling layout (provided by the React Server Components router)
+let boundaries = null;
+try { boundaries = require('../../.nata/rsc_boundaries.js'); } catch {}
+exports.useSelectedLayoutSegments = function() {
+  return boundaries ? React.useContext(boundaries.SelectedLayoutContext) : [];
+};
+exports.useSelectedLayoutSegment = function() {
+  const segments = exports.useSelectedLayoutSegments();
+  return segments.length ? segments[0] : null;
+};
 exports.default = {
   useRouter: exports.useRouter,
   usePathname: exports.usePathname,
@@ -1298,9 +1309,15 @@ exports.default = {
         // Server-renderable counterparts of the browser shims in `/_nata/shims/*`, so SSR markup matches hydration
         let nm_next_link = r#"const React = require('react');
 
-function Link({ href, children, replace, scroll, prefetch, shallow, passHref, legacyBehavior, ...props }) {
-  const url = typeof href === 'string' ? href : (href && href.pathname) || '#';
-  return React.createElement('a', { href: url, ...props }, children);
+function hrefString(href) {
+  if (typeof href === 'string') return href;
+  if (!href || typeof href !== 'object') return '#';
+  const query = href.query && typeof href.query === 'object' ? new URLSearchParams(href.query).toString() : '';
+  return (href.pathname || '') + (query ? '?' + query : '') + (href.hash ? (href.hash.startsWith('#') ? href.hash : '#' + href.hash) : '');
+}
+
+function Link({ href, children, onClick, onMouseEnter, target, replace, scroll, prefetch, shallow, passHref, legacyBehavior, locale, ...props }) {
+  return React.createElement('a', { ...props, href: hrefString(href), target }, children);
 }
 
 module.exports = Link;
@@ -1349,6 +1366,20 @@ module.exports.default = Head;
 exports.default = { useRouter: exports.useRouter };
 "#;
         let _ = std::fs::write(nm_next.join("router.js"), nm_next_router);
+
+        // next/cache: revalidatePath() / revalidateTag() / refresh() in a Server Action make the
+        // response carry the refreshed page (see rsc/render.ts). The data cache itself is P2.
+        let nm_next_cache = r#"const markRevalidated = () => { globalThis.__NATA_REVALIDATED__ = true; };
+exports.revalidatePath = function(path, type) { markRevalidated(); };
+exports.revalidateTag = function(tag, profile) { markRevalidated(); };
+exports.updateTag = function(tag) { markRevalidated(); };
+exports.refresh = function() { markRevalidated(); };
+exports.unstable_cache = function(fn) { return fn; };
+exports.unstable_noStore = function() {};
+exports.cacheLife = function() {};
+exports.cacheTag = function() {};
+"#;
+        let _ = std::fs::write(nm_next.join("cache.js"), nm_next_cache);
 
         let nm_next_font_google = nm_next.join("font").join("google");
         let _ = std::fs::create_dir_all(&nm_next_font_google);
@@ -1502,6 +1533,7 @@ exports.default = {
 
         let input = serde_json::json!({
             "tsPath": clean_path(&ts_path),
+            "moduleSpecifier": crate::module_graph::server_module_specifier(root, &clean_path(&ts_path)),
             "action": action,
             "args": args_json,
             "cookiesStr": payload.cookies.unwrap_or_default(),

@@ -1,15 +1,18 @@
 pub mod fs;
 pub mod imports;
+pub mod oxc;
 pub mod tsconfig;
 pub mod types;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+pub(crate) mod oxc_tests;
 
 pub use fs::FileResolver;
 pub use imports::ImportResolver;
 pub use tsconfig::TsConfig;
-pub use types::{ImportKind, ResolvedFile};
+pub use types::{ImportKind, Layer, ResolvedFile};
 
 use std::path::Path;
 

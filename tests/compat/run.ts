@@ -8,7 +8,7 @@
 // supported yet: its failure is reported as XFAIL and does not fail the run, while an unexpected pass
 // (XPASS) is reported so the gap can be removed from compat.json and ROADMAP.md.
 
-import { readdirSync, rmSync, writeFileSync } from "fs";
+import { readdirSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
 import { Browser, copyToTemp, findEngine, readJson, serverRssMb, sleep, startDev, type DevServer, type Page } from "./lib/harness";
 
@@ -28,10 +28,18 @@ interface Check {
   computedStyle?: { selector: string; property: string; equals: string };
   /** Text that must not appear anywhere in the server HTML */
   notInHtml?: string[];
-  navigate?: { click: string; expectText: string; expectPath?: string; expectLoading?: string };
+  /** Click before `navigate`, e.g. to put state in a layout */
+  prepare?: { click: string; expectText: string };
+  /** `keepText`: still visible after navigating (state of a layout shared by both pages) */
+  navigate?: { click: string; expectText: string; expectPath?: string; expectLoading?: string; keepText?: string };
   click?: string;
   expectText?: string;
   api?: { method?: string; body?: unknown; status: number; json?: unknown };
+  /**
+   * Edit a project file after the steps above (put such checks last: the edit stays): the page must
+   * show `expectText` without reloading, and still show `keepText` (state from before the edit)
+   */
+  edit?: { file: string; from: string; to: string; expectText: string; keepText?: string };
 }
 
 type Outcome = "PASS" | "FAIL" | "XFAIL" | "XPASS";
@@ -118,8 +126,12 @@ async function runCheck(server: DevServer, page: Page, check: Check): Promise<st
     );
     if (value !== equals) return `${selector} ${property} = ${JSON.stringify(value)}, expected ${JSON.stringify(equals)}`;
   }
+  if (check.prepare) {
+    await page.evaluate(`document.querySelector(${JSON.stringify(check.prepare.click)})?.click()`);
+    if (!(await waitForText(page, check.prepare.expectText))) return `after clicking ${check.prepare.click}, text not visible: ${JSON.stringify(check.prepare.expectText)}`;
+  }
   if (check.navigate) {
-    const { click, expectText, expectPath, expectLoading } = check.navigate;
+    const { click, expectText, expectPath, expectLoading, keepText } = check.navigate;
     const marker = await page.evaluate<number>("(window.__compatMarker = Math.random())");
     await page.evaluate(`document.querySelector(${JSON.stringify(click)})?.click()`);
     if (expectLoading && !(await waitForText(page, expectLoading, 1000, 20))) {
@@ -128,10 +140,22 @@ async function runCheck(server: DevServer, page: Page, check: Check): Promise<st
     if (!(await waitForText(page, expectText))) return `after clicking ${click}, text not visible: ${JSON.stringify(expectText)}`;
     if (expectPath && (await page.evaluate<string>("location.pathname")) !== expectPath) return `after clicking ${click}, path is not ${expectPath}`;
     if ((await page.evaluate<number>("window.__compatMarker")) !== marker) return `clicking ${click} reloaded the page instead of navigating client-side`;
+    if (keepText && !(await waitForText(page, keepText, 500))) return `after clicking ${click}, layout state is gone (${JSON.stringify(keepText)})`;
   }
   if (check.click) {
     await page.evaluate(`document.querySelector(${JSON.stringify(check.click)})?.click()`);
     if (check.expectText && !(await waitForText(page, check.expectText))) return `after clicking ${check.click}, text not visible: ${JSON.stringify(check.expectText)}`;
+  }
+  if (check.edit) {
+    const { file, from, to, expectText, keepText } = check.edit;
+    const path = join(server.dir, file);
+    const source = readFileSync(path, "utf-8");
+    if (!source.includes(from)) return `${file} does not contain ${JSON.stringify(from)}`;
+    const marker = await page.evaluate<number>("(window.__compatMarker = Math.random())");
+    writeFileSync(path, source.replace(from, to));
+    if (!(await waitForText(page, expectText))) return `after editing ${file}, text not visible: ${JSON.stringify(expectText)}`;
+    if ((await page.evaluate<number>("window.__compatMarker")) !== marker) return `editing ${file} reloaded the page instead of updating it`;
+    if (keepText && !(await waitForText(page, keepText, 500))) return `editing ${file} lost component state (${JSON.stringify(keepText)} is gone)`;
   }
   return null;
 }
@@ -144,11 +168,12 @@ const browser = await Browser.launch();
 try {
   for (const app of apps) {
     const appDir = join(appsDir, app);
-    const { checks } = readJson<{ checks: Check[] }>(join(appDir, "compat.json"));
+    // `target: "zalo"` runs the app as a Zalo Mini App (client-rendered from the backend's payload)
+    const { checks, target } = readJson<{ checks: Check[]; target?: "web" | "zalo" }>(join(appDir, "compat.json"));
     const dir = copyToTemp(appDir, app);
     let server: DevServer | null = null;
     try {
-      server = await startDev(dir, { engine });
+      server = await startDev(dir, { engine, target });
       console.log(`\n▲ ${app}  (ready in ${server.readyMs}ms)`);
       const page = await browser.newPage();
       for (const check of checks) {

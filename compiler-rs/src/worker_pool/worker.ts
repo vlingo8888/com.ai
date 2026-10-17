@@ -8,10 +8,15 @@
 //
 // Transport: binary frames on stdin/stdout (stdout carries nothing else; stray output goes to stderr).
 //   u32 LE length (of everything after it) | u8 kind | u32 LE id | u32 LE meta length | meta JSON | body
-// Kinds: 1 request (engine -> worker), 2 result, 4 ready, 5 shutdown.
-// Request meta: {"cmd": "ssr" | "route" | "rpc" | "eval", "input": {...}}; body = raw request body.
-// Result meta: {"ok": bool, "output": ..., "code": n, "logs": {"stdout", "stderr"}, "error"?}; body =
-// raw response body (route handlers).
+// Kinds: 1 request (engine -> worker), 2 result, 3 chunk (part of a streamed result, before it),
+// 4 ready, 5 shutdown, 6 call (worker -> engine, e.g. load a module), 7 reply (to a call).
+// Request meta: {"cmd": "ssr" | "rsc" | "action" | "route" | "rpc" | "eval", "input": {...}}; body = raw
+// request body. Result meta: {"ok": bool, "output": ..., "code": n, "logs": {"stdout", "stderr"},
+// "error"?}; body = raw response body (route handlers).
+//
+// Modules: `rsc:/abs/file.tsx?v=2` and `ssr:/abs/file.tsx` specifiers are loaded through the engine
+// (see `module_server.rs`), compiled for the React Server Components layer (`react-server` condition)
+// or the SSR layer. The two layers are separate module instances in this one process.
 
 import { AsyncLocalStorage } from "node:async_hooks";
 import { mkdirSync, unlinkSync, writeFileSync } from "fs";
@@ -20,8 +25,11 @@ import { inspect } from "util";
 
 const KIND_REQUEST = 1;
 const KIND_RESULT = 2;
+const KIND_CHUNK = 3;
 const KIND_READY = 4;
 const KIND_SHUTDOWN = 5;
+const KIND_CALL = 6;
+const KIND_REPLY = 7;
 
 const nataDir = join(process.cwd(), ".nata");
 
@@ -90,13 +98,14 @@ process.exit = ((code?: number) => {
 
 // ---------- request-scoped globals ----------
 
-const REQUEST_GLOBALS = ["__NATA_COOKIES__", "__NATA_SET_COOKIES__", "__NATA_QUERY_LOGS__", "__NATA_PARAMS__", "__NATA_LOCATION__"] as const;
+const REQUEST_GLOBALS = ["__NATA_COOKIES__", "__NATA_SET_COOKIES__", "__NATA_QUERY_LOGS__", "__NATA_PARAMS__", "__NATA_LOCATION__", "__NATA_REVALIDATED__"] as const;
 const freshGlobals = (): Record<string, unknown> => ({
   __NATA_COOKIES__: new Map<string, string>(),
   __NATA_SET_COOKIES__: [],
   __NATA_QUERY_LOGS__: [],
   __NATA_PARAMS__: {},
   __NATA_LOCATION__: { pathname: "/", search: "", href: "http://localhost:3000/" },
+  __NATA_REVALIDATED__: false,
 });
 const processGlobals = freshGlobals();
 
@@ -235,12 +244,109 @@ Bun.plugin({
   },
 });
 
+// ---------- module layers (rsc: / ssr:), loaded through the engine ----------
+
+const engineCalls = new Map<number, (reply: { meta: any; body: Uint8Array }) => void>();
+let nextCallId = 1;
+
+/** Asks the engine (CALL frame) and waits for its REPLY */
+export function callEngine(cmd: string, input: unknown): Promise<{ meta: any; body: Uint8Array }> {
+  const id = nextCallId++;
+  return new Promise((resolve) => {
+    engineCalls.set(id, resolve);
+    sendFrame(KIND_CALL, id, { cmd, input });
+  });
+}
+(globalThis as any).__NATA_CALL_ENGINE__ = callEngine;
+
+function buildError(meta: any): Error {
+  const err: any = new Error(meta?.error?.message ?? meta?.message ?? "module failed to load");
+  if (meta?.error) err.__nataBuildError = meta.error;
+  return err;
+}
+
+// CommonJS files of the react-server layer (React, Flight, most packages): the engine sends the whole
+// `require` graph, resolved with the react-server conditions; evaluated here, one instance per file
+const cjsModules = new Map<string, { exports: any; loaded: boolean }>();
+const cjsSources = new Map<string, any>();
+const esmForRequire = new Map<string, any>();
+
+function rscRequire(file: string): any {
+  const cached = cjsModules.get(file);
+  if (cached) return cached.exports;
+  const entry = cjsSources.get(file);
+  if (!entry) throw new Error(`[rsc] module not loaded: ${file}`);
+  if (entry.json) {
+    const mod = { exports: JSON.parse(entry.code), loaded: true };
+    entry.code = null;
+    cjsModules.set(file, mod);
+    return mod.exports;
+  }
+  const mod = { exports: {} as any, loaded: false };
+  cjsModules.set(file, mod);
+  const dirname = file.slice(0, file.lastIndexOf("/"));
+  const localRequire = (spec: string) => {
+    const target = entry.requires?.[spec];
+    if (!target) return nodeRequire(spec, dirname);
+    if (target.builtin) return nodeRequire(target.builtin, dirname);
+    if (target.file) return rscRequire(target.file);
+    if (target.esm) return esmForRequire.get(target.esm);
+    throw new Error(`Cannot find module '${spec}' from '${file}' (react-server conditions)`);
+  };
+  const fn = new Function("module", "exports", "require", "__filename", "__dirname", entry.code + "\n//# sourceURL=rsc:" + file);
+  // The source text is not needed once compiled (React's development builds are megabytes)
+  entry.code = null;
+  fn(mod, mod.exports, localRequire, file, dirname);
+  mod.loaded = true;
+  return mod.exports;
+}
+
+function nodeRequire(spec: string, dirname: string) {
+  const { createRequire } = require("node:module");
+  return createRequire(dirname + "/")(spec);
+}
+
+function cjsNamespace(exports: any) {
+  const ns: Record<string, unknown> = { default: exports };
+  if (exports && (typeof exports === "object" || typeof exports === "function")) {
+    for (const key of Object.keys(exports)) if (key !== "default") ns[key] = exports[key];
+    if (exports.__esModule && "default" in exports) ns.default = exports.default;
+  }
+  return ns;
+}
+
+for (const layer of ["rsc", "ssr"] as const) {
+  Bun.plugin({
+    name: `nata-${layer}`,
+    setup(build) {
+      build.onResolve({ filter: /.*/, namespace: layer }, (args) => ({ path: args.path, namespace: layer }));
+      build.onLoad({ filter: /.*/, namespace: layer }, async (args) => {
+        const { meta, body } = await callEngine("load_module", { path: args.path, layer });
+        if (meta.kind === "esm") return { contents: decoder.decode(body), loader: "js" };
+        if (meta.kind === "cjs") {
+          for (const [file, entry] of Object.entries<any>(meta.files)) {
+            if (!cjsSources.has(file)) cjsSources.set(file, entry);
+            for (const target of Object.values<any>(entry.requires ?? {})) {
+              if (target.esm && !esmForRequire.has(target.esm)) esmForRequire.set(target.esm, await import(target.esm));
+            }
+          }
+          return { exports: cjsNamespace(rscRequire(meta.entry)), loader: "object" };
+        }
+        throw buildError(meta);
+      });
+    },
+  });
+}
+
 // ---------- commands ----------
 
 interface Handled {
   output?: unknown;
   code?: number;
   body?: Uint8Array;
+  /** Streamed response: `head` goes in the first chunk, then the body chunks, then the result */
+  head?: unknown;
+  stream?: ReadableStream<Uint8Array>;
 }
 
 const DELIMITED = /__NATA_[A-Z]+_OUT_START__[\s\S]*?__NATA_[A-Z]+_OUT_END__\n?/g;
@@ -251,6 +357,14 @@ async function runCommand(cmd: string, input: any, body: Uint8Array): Promise<Ha
     case "ssr": {
       const { runSsr } = await import(join(nataDir, "ssr_runtime.ts"));
       return { output: await runSsr(input) };
+    }
+    case "rsc": {
+      const { renderRoute } = await import(join(nataDir, "rsc_render.ts"));
+      return await renderRoute(input);
+    }
+    case "action": {
+      const { runAction } = await import(join(nataDir, "rsc_render.ts"));
+      return await runAction(input, body);
     }
     case "route": {
       const { handleRoute } = await import(join(nataDir, "route_handler_runtime.ts"));
@@ -338,7 +452,15 @@ async function handleRequest(id: number, meta: any, body: Uint8Array) {
   let result: Record<string, unknown>;
   let responseBody: Uint8Array = new Uint8Array();
   try {
-    const handled = await als.run(store, () => runCommand(meta.cmd, meta.input ?? {}, body));
+    const handled = await als.run(store, async () => {
+      const handled = await runCommand(meta.cmd, meta.input ?? {}, body);
+      if (handled.head !== undefined) {
+        sendFrame(KIND_CHUNK, id, { head: handled.head });
+        if (handled.stream) for await (const chunk of handled.stream as any) sendFrame(KIND_CHUNK, id, {}, chunk);
+        warnRepeatedQueries(store);
+      }
+      return handled;
+    });
     responseBody = handled.body ?? responseBody;
     const code = store.exitCode ?? handled.code ?? 0;
     result = { ok: true, output: handled.output ?? null, code };
@@ -348,6 +470,37 @@ async function handleRequest(id: number, meta: any, body: Uint8Array) {
   }
   result.logs = { stdout: store.stdout.join("").replace(DELIMITED, ""), stderr: store.stderr.join("") };
   sendFrame(KIND_RESULT, id, result, responseBody);
+  scheduleIdleGc();
+}
+
+/**
+ * Dev hint: the same SQL statement run more than 5 times while rendering one page is usually an N+1
+ * query (a query per list item); suggest batching it or wrapping the reader in React.cache()
+ */
+function warnRepeatedQueries(store: Store) {
+  const logs = store.globals.__NATA_QUERY_LOGS__ as Array<{ sql?: string }> | undefined;
+  if (!Array.isArray(logs) || logs.length <= 5) return;
+  const counts = new Map<string, number>();
+  for (const log of logs) if (log && typeof log.sql === "string") counts.set(log.sql, (counts.get(log.sql) ?? 0) + 1);
+  for (const [sql, count] of counts) {
+    if (count > 5) {
+      store.stderr.push(
+        `⚠ The same query ran ${count} times while rendering this page (N+1?). Load the rows in one query, or wrap the data loader in React.cache():\n    ${sql.replace(/\s+/g, " ").slice(0, 200)}\n`,
+      );
+    }
+  }
+}
+
+// A full collection once requests stop for a moment: rendering leaves garbage (Flight and HTML
+// buffers, compiled module sources) that the incremental collector keeps around for a long time
+let idleGcTimer: ReturnType<typeof setTimeout> | null = null;
+function scheduleIdleGc() {
+  if (idleGcTimer) clearTimeout(idleGcTimer);
+  idleGcTimer = setTimeout(() => {
+    idleGcTimer = null;
+    Bun.gc(true);
+  }, 1000);
+  (idleGcTimer as any).unref?.();
 }
 
 // ---------- framing ----------
@@ -404,6 +557,11 @@ while (true) {
 
     if (kind === KIND_SHUTDOWN) realExit(0);
     if (kind === KIND_REQUEST) handleRequest(id, meta, body);
+    if (kind === KIND_REPLY) {
+      const resolve = engineCalls.get(id);
+      engineCalls.delete(id);
+      resolve?.({ meta, body });
+    }
   }
 }
 

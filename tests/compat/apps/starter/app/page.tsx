@@ -1,5 +1,6 @@
 import Image from "next/image";
 import Link from "next/link";
+import { Counter } from "./counter";
 
 export default function Home() {
   return (
@@ -9,6 +10,7 @@ export default function Home() {
         <li>Get started by editing app/page.tsx.</li>
         <li>Save and see your changes instantly.</li>
       </ol>
+      <Counter />
       <Link href="/about" className="rounded-full bg-black px-5 py-3 text-white">
         About this app
       </Link>

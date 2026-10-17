@@ -28,3 +28,32 @@ pub struct ResolvedFile {
     /// File extension without dot (e.g. `tsx`, `ts`, `jsx`, `js`)
     pub extension: String,
 }
+
+/// The module graph layer a file is compiled for: the browser, server-side rendering of client
+/// components, or React Server Components (`react-server` condition)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Layer {
+    Client,
+    Ssr,
+    Rsc,
+}
+
+impl Layer {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Layer::Client => "client",
+            Layer::Ssr => "ssr",
+            Layer::Rsc => "rsc",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "client" => Some(Layer::Client),
+            "ssr" => Some(Layer::Ssr),
+            "rsc" => Some(Layer::Rsc),
+            _ => None,
+        }
+    }
+}

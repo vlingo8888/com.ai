@@ -21,6 +21,7 @@ describe("Metadata & SEO Engine - Static Metadata & Cascade Merging", () => {
     // Copy SSR runtime to .nata/
     const sourceRuntime = readFileSync(join(__dirname, "../compiler-rs/src/ssr/runtime.ts"), "utf-8");
     writeFileSync(join(nataDir, "ssr_runtime.ts"), sourceRuntime);
+    writeFileSync(join(nataDir, "metadata_runtime.ts"), readFileSync(join(__dirname, "../compiler-rs/src/ssr/metadata_runtime.ts"), "utf-8"));
 
     // Root Layout with title template and base metadata
     writeFileSync(
@@ -181,6 +182,7 @@ describe("Metadata & SEO Engine - Dynamic generateMetadata()", () => {
 
     const sourceRuntime = readFileSync(join(__dirname, "../compiler-rs/src/ssr/runtime.ts"), "utf-8");
     writeFileSync(join(nataDir, "ssr_runtime.ts"), sourceRuntime);
+    writeFileSync(join(nataDir, "metadata_runtime.ts"), readFileSync(join(__dirname, "../compiler-rs/src/ssr/metadata_runtime.ts"), "utf-8"));
 
     writeFileSync(
       join(appDir, "layout.tsx"),

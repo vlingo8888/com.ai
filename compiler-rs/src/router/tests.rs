@@ -893,3 +893,39 @@ fn test_route_regex_is_compiled_once() {
     let second = route.compiled_regex().unwrap() as *const regex::Regex;
     assert_eq!(first, second);
 }
+
+#[test]
+fn test_matchit_212_optional_catch_all_with_and_without_segments() {
+    let mut router = AppRouter::new();
+    router.add_route(create_test_route(&["shop", "[[...filters]]"], false));
+    let (route, params) = router.match_route("/shop").unwrap();
+    assert_eq!(route.pattern, "/shop/[[...filters]]");
+    assert!(params.is_empty());
+    let (_, params) = router.match_route("/shop/a/b").unwrap();
+    assert_eq!(params.get("filters").unwrap(), "a/b");
+}
+
+#[test]
+fn test_matchit_213_conflicting_param_names_fall_back_to_regex() {
+    let mut router = AppRouter::new();
+    // Two route groups declaring different names at the same position
+    router.add_route(create_test_route(&["(shop)", "[product]"], false));
+    router.add_route(create_test_route(&["(blog)", "[post]", "comments"], false));
+    let (route, params) = router.match_route("/hello/comments").unwrap();
+    assert_eq!(route.pattern, "/[post]/comments");
+    assert_eq!(params.get("post").unwrap(), "hello");
+    let (route, _) = router.match_route("/hello").unwrap();
+    assert_eq!(route.pattern, "/[product]");
+}
+
+#[test]
+fn test_matchit_214_thousand_routes_match_by_path() {
+    let mut router = AppRouter::new();
+    for i in 0..1000 {
+        router.add_route(create_test_route(&["section", &format!("page-{i}"), "[id]"], false));
+    }
+    let (route, params) = router.match_route("/section/page-777/42").unwrap();
+    assert_eq!(route.pattern, "/section/page-777/[id]");
+    assert_eq!(params.get("id").unwrap(), "42");
+    assert!(router.match_route("/section/page-1000/1").is_none());
+}

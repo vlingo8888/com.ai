@@ -110,6 +110,24 @@ pub fn tsconfig_fingerprint(root: &Path) -> String {
     blake3::hash(&content).to_hex().to_string()
 }
 
+/// Fingerprint of everything module resolution depends on besides the file itself: tsconfig,
+/// `package.json` and the installed packages (lockfile size and mtime, cheap to stat)
+pub fn resolution_fingerprint(root: &Path) -> String {
+    let mut hasher = blake3::Hasher::new();
+    for name in ["tsconfig.json", "jsconfig.json", "package.json"] {
+        hasher.update(&std::fs::read(root.join(name)).unwrap_or_default());
+    }
+    for name in ["bun.lock", "bun.lockb", "package-lock.json", "pnpm-lock.yaml", "yarn.lock"] {
+        if let Ok(meta) = std::fs::metadata(root.join(name)) {
+            let mtime = meta.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_nanos());
+            hasher.update(name.as_bytes());
+            hasher.update(&meta.len().to_le_bytes());
+            hasher.update(&mtime.to_le_bytes());
+        }
+    }
+    hasher.finalize().to_hex().to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

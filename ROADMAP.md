@@ -11,15 +11,15 @@
 
 | Chỉ số | Mục tiêu | Hiện tại | Cách đo |
 |---|---|---|---|
-| `com dev` sẵn sàng | < 300ms | 70–380ms (tuỳ cache `bun install`) | dòng ` ✓ Ready in` |
-| Trang đầu tiên sau khi khởi động (cold) | < 500ms | 520ms (request SSR đầu); 709ms đến khi hydrate xong, 223ms ở lần chạy thứ 2 nhờ cache | `scripts/bench.ts` |
-| TTFB SSR khi đã ấm (dev) | < 10ms | 0.5ms median, 1.2ms p90 (trang không async) | `scripts/bench.ts` |
+| `com dev` sẵn sàng | < 300ms | 50–70ms (sau P1; 70–380ms khi phải `bun install`) | dòng ` ✓ Ready in` |
+| Trang đầu tiên sau khi khởi động (cold) | < 500ms | ~800ms sau P1 (nạp 2 layer React + Flight lần đầu); P0: 520ms | `scripts/bench.ts` |
+| TTFB SSR khi đã ấm (dev) | < 10ms | 1.6ms median, 2.7ms p90 (RSC: Flight + SSR stream; P0 renderToString: 0.5ms) | `scripts/bench.ts` |
 | TTFB SSR production | < 3ms (tĩnh), < 15ms (động) | — | `oha` |
-| HMR: lưu file → thấy trên màn hình | < 50ms | ~100–300ms (re-render cả route) | timestamp watcher → `performance.now()` client |
-| RAM khi rảnh (dev, engine + worker) | < 80MB | 74MB (đo sau khi GC dọn xong; ngay sau loạt request là ~80–105MB); 0MB sau 10 phút rảnh | `scripts/bench.ts` |
+| HMR: lưu file → thấy trên màn hình | < 50ms | 40–70ms component client (Fast Refresh, giữ state); ~105ms Server Component (refetch Flight) | `scripts/bench.ts` (`hmrMs`, `hmrServerMs`) |
+| RAM khi rảnh (dev, engine + worker) | < 80MB | ~91MB sau P1 (engine 20 + worker 73, có Tailwind; pipeline cũ đo cùng cách: 104MB); 0MB sau 10 phút rảnh | `scripts/bench.ts` |
 | RAM production (`com start`) | < 50MB | — | `ps -o rss` |
-| JS client trang hello world | < 70KB gzip | 704KB ở dev (React **bản dev**, chưa nén; mục tiêu này dành cho production, P3) | `scripts/bench.ts` |
-| Binary engine | < 20MB | 8.5MB | `ls -l` |
+| JS client trang hello world | < 70KB gzip | 89KB gzip (deps bản production `COM_DEPS_PROD=1`, không tính overlay/debug/Fast Refresh; react-dom chiếm 64KB); 830KB ở dev chưa nén | `scripts/bench.ts` (`clientJsGzipKb`) |
+| Binary engine | < 20MB | 9.3MB | `ls -l` |
 
 Việc đầu tiên của mỗi giai đoạn là chạy lại bảng này (`bun run bench`) và ghi số vào cột "Hiện tại". Số đo trên MacBook (Apple Silicon), app `tests/compat/apps/starter`, sau khi xong P0.
 
@@ -35,9 +35,9 @@ Việc đầu tiên của mỗi giai đoạn là chạy lại bảng này (`bun 
 | Bundler production | **Rolldown** (Rust, API kiểu Rollup) | Code splitting, tree-shaking, chạy trong process Rust, cùng hệ sinh thái Oxc | `Bun.build` (dễ nhưng phải gọi sang process Bun, kém kiểm soát chunk); esbuild (Go, phải gọi binary ngoài) |
 | Minify JS | **Oxc minifier** hoặc minifier đi kèm Rolldown | Native, nhanh | terser (JS, chậm) |
 | CSS | **Lightning CSS** (đã có trong `Cargo.toml`) + **Tailwind v4 compile ở server** (`@tailwindcss/node` + Oxide, chạy trong worker) | Bỏ hẳn `@tailwindcss/browser` khỏi client (~270KB JS + JIT tốn CPU trên máy yếu/Zalo). Lightning CSS lo minify, nesting, vendor prefix, CSS Modules | Tiếp tục JIT trên browser (nặng, FOUC) |
-| Runtime chạy server code | **Bun** (worker thường trực, đã có) | Khởi động nhanh, ít RAM hơn Node, chạy TS trực tiếp, tương thích npm | Nhúng V8 bằng `deno_core` vào binary Rust (một process, không IPC, nhưng binary +30MB và phải tự lo tương thích npm/Node API). Đánh giá lại ở P5 |
+| Runtime chạy server code | **Bun** (worker thường trực, đã có). Hai layer `react-server` và SSR trong **cùng một process** nhờ namespace của `Bun.plugin` (`rsc:` / `ssr:`), module do engine biên dịch; CommonJS của layer react-server chạy bằng loader nhỏ với đồ thị `require` do engine resolve (spike P1.4) | Khởi động nhanh, ít RAM hơn Node, chạy TS trực tiếp, tương thích npm; một process tiết kiệm ~30–40MB so với hai worker | Hai process (`bun --conditions=react-server`) cho RSC và SSR; nhúng V8 bằng `deno_core` (binary +30MB). Đánh giá lại ở P5 |
 | IPC Rust ↔ Bun | **Frame nhị phân có độ dài qua stdin/stdout của worker** (đã làm ở P0.2) | Nhiều request song song trên một kết nối, body là bytes thô; pipe chạy giống nhau trên macOS/Linux/Windows nên không cần nhánh named pipe | Unix socket (cùng hiệu năng, nhưng phải có thêm named pipe cho Windows); HTTP nội bộ (thêm overhead) |
-| React | **React 19** + `react-server-dom-webpack` với shim `__webpack_require__` | Bản Flight được dùng nhiều nhất, Next cũng dùng; shim cho phép dùng mà không cần webpack | `react-server-dom-esm` (hợp ESM hơn nhưng ít người dùng; spike rồi quyết) |
+| React | **React 19** (khoá đúng 19.3.0 trong template) + `react-server-dom-webpack` cùng version, shim `__webpack_require__` (id client reference = URL module, mỗi module một chunk) | Đã chốt ở P1.4: `react-server-dom-esm` chưa được phát hành (npm chỉ có bản giữ chỗ 0.0.1). Bản webpack chạy tốt trên Bun cả `server.edge` lẫn `client.edge`/`client.browser`, stream được | `react-server-dom-esm` (không có bản dùng được) |
 | Cài gói | **`bun install`** + global cache của Bun (hardlink) | Bun installer thuộc loại nhanh nhất hiện nay; không tự viết package manager | Tự viết store kiểu pnpm (tốn công, ít lợi) |
 | Gói cho browser (dev) | **Pre-bundle từng dependency bằng `Bun.build`** vào `.nata/deps/<pkg>@<ver>/`, phục vụ ở `/_nata/deps/*` (đã làm ở P0.5); chuyển sang Rolldown cùng lúc với bundler production (P3) | Hết phụ thuộc esm.sh lúc chạy, offline được, version khớp server; mỗi gói một file, các import trần khác trỏ về `/_nata/deps/` nên React chỉ có một instance | esm.sh (cũ: chậm, version lệch, cần mạng) |
 | Cache biên dịch | **Cache trên đĩa theo hash nội dung** (`blake3`) trong `.nata/cache/`, lưu bằng `redb` | Khởi động lần 2 gần như tức thì, giống persistent cache của Turbopack | Chỉ cache trong RAM (mất khi restart) |
@@ -96,42 +96,41 @@ Việc đầu tiên của mỗi giai đoạn là chạy lại bảng này (`bun 
 
 ### P1: Module graph thống nhất + React Server Components (lõi tương thích Next)
 
-- [ ] **P1.1 Chuyển resolver sang `oxc_resolver`** (M)
-  - Hỗ trợ condition `react-server` / `browser` / `import` / `default`, field `exports`, tsconfig `paths`.
-  - Giữ test hiện có trong `compiler-rs/src/resolver/tests.rs` và bổ sung case `exports` lồng nhau.
-- [ ] **P1.2 Module graph trong Rust** (M+O)
-  - Mỗi module: id, file, hash, danh sách import, layer (`server` | `client` | `ssr`), directive.
-  - Pass SWC phát hiện `"use client"` / `"use server"` ở đầu file và `"use server"` trong thân hàm.
-  - Graph là nguồn sự thật cho: invalidate HMR, client manifest, server action manifest, code splitting production.
-- [ ] **P1.3 Rust phục vụ module cho Bun** (O)
-  - Bun nạp code server qua `Bun.plugin` (`onResolve`/`onLoad`) hỏi Rust qua IPC, nên client và server dùng **một trình biên dịch duy nhất** (cùng transform, cùng directive).
-  - Khi file đổi, Rust gắn version mới vào specifier của file đó và các importer của nó (`?v=hash`), worker không cần restart. Bỏ cơ chế restart toàn bộ worker của P0.1.
-  - Xong khi: sửa một use-case, request kế tiếp dùng code mới trong < 20ms, state khác của worker vẫn giữ.
-- [ ] **P1.4 Spike chọn bản Flight** (M): `react-server-dom-webpack` + shim, hay `react-server-dom-esm`. Tiêu chí: chạy trên Bun, stream được, bundle client nhỏ. Ghi lại quyết định vào mục 2.
-- [ ] **P1.5 Render pipeline RSC** (M)
-  - Worker có 2 tầng:
-    - **RSC**: Bun chạy với condition `react-server`, render cây `layout`/`template`/`page` ra Flight. Server component chạy thật trên server, gọi `db` trực tiếp.
-    - **SSR**: `react-dom/server` `renderToReadableStream` đọc Flight, stream HTML về Rust, Rust stream tiếp ra client. Flight chunk được nhúng vào HTML qua `<script>`.
-  - `loading.tsx` thành `<Suspense>` với streaming thật; `error.tsx` là error boundary client; `not-found.tsx`, `notFound()`, `redirect()` xử lý trên server (status 404/307 đúng).
-  - Bỏ `makeComponent` và `unwrapHtmlBody` trong `compiler-rs/src/client/runtime.js` (các hack chạy async component trên client).
-- [ ] **P1.6 Client router kiểu Next** (M)
-  - Hydrate bằng `createFromReadableStream`; chuyển trang bằng `fetch(path, { headers: { RSC: "1" } })` + `createFromFetch`.
-  - Router cache theo segment, giữ state của layout dùng chung khi chuyển trang.
-  - `Link` prefetch khi lọt vào viewport (IntersectionObserver); `router.refresh()`, `router.prefetch()`.
-  - Scroll restoration; `useSelectedLayoutSegment(s)`.
-- [ ] **P1.7 Server Actions chuẩn Next** (M)
-  - `"use server"` dạng file và inline; action id = hash(file + export).
-  - `encodeReply` / `decodeReply`; `<form action={fn}>` chạy được cả khi chưa có JS (progressive enhancement).
-  - `useActionState`, `useFormStatus`, `useOptimistic`.
-  - `revalidatePath` / `revalidateTag` / `refresh()` trả Flight mới trong cùng response.
-  - RPC proxy `modules/` hiện có trở thành alias của action, để app cũ không vỡ.
-- [ ] **P1.8 React Fast Refresh** (O)
-  - SWC `react_refresh` transform + `react-refresh/runtime` cho component client: giữ state khi sửa.
-  - Sửa server component thì chỉ refetch Flight của route hiện tại.
-  - Xong khi: lưu file → màn hình cập nhật < 50ms, state input không mất.
-- [ ] **P1.9 Zalo Mini App** (M cho sản phẩm)
-  - Vẫn chạy client-only trên thiết bị. Server component động lấy Flight từ backend (tunnel ở dev, URL production khi build).
-  - Trang tĩnh được prerender lúc `com build --target zalo`.
+- [x] **P1.1 Chuyển resolver sang `oxc_resolver`** (M)
+  - `compiler-rs/src/resolver/oxc.rs`: 3 resolver theo layer (client `browser/import/module`, ssr `node/import/require`, rsc `react-server/...`) cùng một cache file system, thêm resolver `require` riêng cho CommonJS của layer react-server; tsconfig `paths` + `extends` (tự tìm theo file import), alias `@/`, `~/` mặc định khi không có tsconfig, `extension_alias` `.js`→`.ts`.
+  - Rewrite import chuyển từ regex sang visitor SWC (`swc_compiler/module.rs`), URL canonical có phần mở rộng (`/_bundle/app/x.tsx`) nên mỗi module chỉ có một instance trên browser. Regex cũ chỉ còn cho `COM_RSC=0`. Test: `resolver/oxc_tests.rs` (exports lồng nhau, subpath pattern, `imports` `#x`, extends).
+  - Lưu ý: `oxc_resolver` khoá `=11.23.0` (bản 11.24 cần rustc 1.95); nó bật `serde_json/preserve_order` cho cả crate (thứ tự key JSON theo thứ tự chèn).
+- [x] **P1.2 Module graph trong Rust** (M+O)
+  - `compiler-rs/src/module_graph/`: node theo `(file, layer)` gồm hash, imports, importers, directive, exports, server actions, version; manifest server action; `invalidate` tăng version của file và importer bắc cầu (layer server). Metadata lưu cùng code trong cache `redb`.
+  - Directive `"use client"` / `"use server"` (đầu file và trong thân hàm) phát hiện trong pass SWC; JSX chuyển sang runtime automatic (`jsxDEV`).
+  - G2: khớp route bằng `matchit` (route không chèn được vào cây, ví dụ hai tên param khác nhau cùng vị trí, rơi về regex); watcher chỉ quét lại route khi thêm/xoá/đổi tên file đặc biệt.
+- [x] **P1.3 Rust phục vụ module cho Bun** (O)
+  - IPC hai chiều: thêm frame `CALL`/`REPLY` (worker hỏi engine) và `CHUNK` (stream). `Bun.plugin` namespace `rsc` / `ssr` nạp module qua `load_module` (`compiler-rs/src/module_server.rs`); route handler và RPC `modules/` cũng nạp qua layer `rsc`.
+  - Sửa file: chỉ tăng version trong graph, không restart worker. Đo: request kế tiếp chạy code mới sau **6ms**, state khác của worker giữ nguyên (`tests/worker_pool_test.rs`). Worker chỉ restart khi `.env*`, `package.json`, `tsconfig`, `next.config.*`, `lifecycle.ts` đổi, hoặc sau `COM_WORKER_RECYCLE` (300) lần invalidate.
+- [x] **P1.4 Spike chọn bản Flight** (M): chọn `react-server-dom-webpack` (xem mục 2). Spike cũng chứng minh tách 2 instance React trong 1 process Bun bằng namespace (người dùng đã chọn phương án này thay cho 2 process).
+- [x] **P1.5 Render pipeline RSC** (M)
+  - `rsc/rsc_runtime.ts` (layer react-server) dựng payload `{ nodes, keys, ... }`: mỗi thư mục route một node (layout bọc template / error / loading / not-found và `<Outlet>`), cuối cùng là page; `rsc/ssr_runtime.ts` stream HTML bằng `renderToReadableStream`, chèn Flight vào `<script>` xen giữa các chunk HTML; engine stream tiếp ra client (`Body::from_stream`).
+  - `loading.tsx` stream thật (fallback trong shell, nội dung đến sau); `notFound()` / `redirect()` trước khi shell gửi trả 404 / 307; sau khi đã stream thì boundary phía client xử lý (giống Next, status đã gửi là 200); lỗi ngoài Suspense chuyển sang render phía client để `error.tsx` hiển thị.
+  - G5: cảnh báo N+1 khi cùng câu SQL chạy > 5 lần trong một lần render; `React.cache` dùng được trong layer react-server.
+  - Khác kế hoạch: bộ chèn `<head>` / Flight nằm trong worker (JS) thay vì Rust; `makeComponent` / `unwrapHtmlBody` không xoá mà để lại cho `COM_RSC=0` (xem "Còn lại").
+- [x] **P1.6 Client router kiểu Next** (M)
+  - `client/router.js` (~4KB gzip): hydrate từ Flight inline, điều hướng bằng `RSC: 1` + `Nata-Router-State` (server bỏ các layout client đã có, client giữ nguyên element nên state layout còn), `router.push/replace/back/forward/refresh/prefetch`, scroll restoration, `useSelectedLayoutSegment(s)`.
+  - Prefetch `Link` theo viewport + `requestIdleCallback`, tắt khi Save-Data / 2G. Giống Next, chỉ tự prefetch ở production (`__NATA_CONFIG__.prefetch`); ở dev chỉ khi `prefetch={true}` hoặc gọi `router.prefetch()` (prefetch ở dev chạy cả page và làm mất `loading.tsx`).
+- [x] **P1.7 Server Actions chuẩn Next** (M)
+  - Pass SWC `swc_compiler/server_actions.rs`: file `"use server"` và action inline (hoist thành `$$ACTION_n`, biến closure truyền bằng `.bind`); browser và SSR chỉ nhận `createServerReference`. Id = `blake3(file#export)`.
+  - `POST` kèm `Next-Action` (`encodeReply`/`decodeReply`), form không JS (`decodeAction` + `decodeFormState`, `useActionState` giữ state), `revalidatePath` / `revalidateTag` / `refresh()` (shim `next/cache`) trả cây mới trong cùng response, `redirect()` trong action.
+  - Khác kế hoạch: import từ `modules/**` vẫn đi qua proxy `/_nata/rpc` (code server không xuống client, nay nạp qua layer `rsc`), chưa đổi thành server reference.
+- [x] **P1.8 React Fast Refresh** (O)
+  - SWC `react_refresh` + đăng ký theo URL module, `react-refresh/runtime` nạp trước react-dom; HMR message `update` cho biết module là client / server / boundary. Component client: nạp lại `?v=` và `performReactRefresh()` giữ state (**40–70ms**); Server Component: refetch Flight route hiện tại, state client giữ; module không phải component: reload.
+- [x] **P1.9 Zalo Mini App** (M cho sản phẩm)
+  - Router chạy chế độ zalo: payload lấy từ backend (`RSC: 1`, tunnel ở dev), vị trí ảo trong `history.state`, render vào container (bỏ lớp `<html>/<body>`), Server Action gọi về backend. App compat `zalo-mini-app` (`--target zalo`).
+  - `com build --target zalo` prerender payload các route tĩnh vào `dist/assets/rsc/` (`src/zalominiapp/prerender.ts`), router đọc file này trước khi hỏi backend. Bundle client offline và zip vẫn thuộc P3.3.
+
+**Còn lại sau P1 (chuyển sang P2/P3):**
+- Đường render cũ (client-only, `client/runtime.js`, `ssr/runtime.ts`, regex trong `resolver/imports.rs`, `/_nata/route_info`) vẫn giữ sau `COM_RSC=0`, chưa xoá như kế hoạch: nó là đường dự phòng khi chạy `COM_WORKER=0` (RSC cần worker thường trực). Xoá trong một thay đổi riêng.
+- RAM rảnh ~91MB, chưa đạt < 80MB (Tailwind trong worker ~15MB, hai layer React).
+- `COM_DEPS_PROD=1` chỉ để đo kích thước: worker vẫn chạy React bản dev (Bun 1.2.17 lỗi khi nạp `react-dom/server.edge` bản production trong worker), nên trang không hydrate ở chế độ này. Build production thật ở P3.
+- Prefetch chưa có kiểu "một phần đến loading boundary" như Next production; closure của action inline chưa được mã hoá; `headers()` vẫn trả `Headers` rỗng (P2).
 
 **Xong P1 khi:** app compat số 2 và số 3 chạy `com dev` với server component thật (page `async` không còn gọi RPC); JS client trang hello world < 100KB gzip.
 
@@ -234,12 +233,12 @@ Các giai đoạn P0–P5 là để *trở nên* nhẹ. Phần này là các k�
 ### G2. Engine Rust
 - [x] **Allocator `mimalloc`** (crate `mimalloc`, `#[global_allocator]`) (P0): giảm phân mảnh và RSS khi chạy lâu, nhanh hơn allocator hệ thống khi nhiều luồng.
 - [x] **Giới hạn luồng tokio ở dev** (P0): `worker_threads = 2` khi `com dev` (mỗi luồng tốn stack + buffer); production dùng số nhân CPU.
-- [ ] **Khớp route bằng `matchit`** (radix tree, thứ axum dùng) thay regex cho từng route (P1): O(độ dài path), không phụ thuộc số route.
+- [x] **Khớp route bằng `matchit`** (radix tree, thứ axum dùng) thay regex cho từng route (P1): O(độ dài path), không phụ thuộc số route.
 - [x] **Bỏ base64-trong-JSON khi gửi body sang worker** (P0.2): body gửi dạng frame nhị phân, metadata dạng MessagePack (`rmp-serde`). Hết phình 33% và hết copy.
-- [ ] **Zero-copy:** dùng `bytes::Bytes`, `Arc<str>` cho nội dung module/CSS dùng chung; body response là stream (`axum::body::Body::from_stream`) (P1.5).
+- [ ] **Zero-copy:** dùng `bytes::Bytes`, `Arc<str>` cho nội dung module/CSS dùng chung; body response là stream (`axum::body::Body::from_stream`) (P1.5: trang RSC đã stream bằng `Bytes`; module/CSS chưa dùng `Arc<str>`).
 - [ ] **Mọi cache đều có giới hạn:** cache module, route info, ảnh, Flight dùng LRU có giới hạn theo dung lượng (`moka` hoặc `quick_cache`); không dùng `HashMap` tăng mãi (P0.7).
 - [ ] **Giữ binary gọn:** `default-features = false` cho mọi crate, chỉ bật feature cần; kiểm tra `cargo bloat --release` và `cargo udeps` trong CI (G6).
-- [ ] **Chỉ quét lại phần route bị đổi:** watcher cập nhật trie theo file thay đổi thay vì `AppRouter::scan` lại toàn bộ (P1.2).
+- [x] **Chỉ quét lại phần route bị đổi:** watcher chỉ quét lại khi thêm/xoá/đổi tên file route; sửa nội dung page không quét (P1.2).
 
 ### G3. Worker Bun
 - [x] **Tắt khi rảnh ở dev** (P0.8): không có request trong 10 phút thì tắt worker (RAM về 0), bật lại khi có request đầu tiên (~60ms). Có thể cấu hình `COM_WORKER_IDLE`.
@@ -250,17 +249,17 @@ Các giai đoạn P0–P5 là để *trở nên* nhẹ. Phần này là các k�
 - [ ] **Giới hạn bộ nhớ và tự tái chế:** worker vượt ngưỡng RSS (vd 300MB) thì được thay bằng worker mới sau khi xử lý xong request đang chạy, chống rò rỉ bộ nhớ từ code người dùng (P3.2).
 
 ### G4. Client (trình duyệt và Zalo WebView)
-- [ ] **Runtime router < 10KB gzip** (P1.6); overlay lỗi và debug drawer chỉ có ở dev và chỉ tải khi cần (`import()` lúc có lỗi đầu tiên hoặc khi mở drawer).
+- [x] **Runtime router < 10KB gzip** (P1.6): ~4KB. Overlay và debug drawer chỉ có ở dev; markup drawer thêm sau hydrate (`client/debug.js`), chưa tải lười.
 - [ ] **Target JS hiện đại:** ES2020+, không polyfill mặc định; target CSS lấy từ `browserslist` qua Lightning CSS. Có profile riêng cho Zalo WebView (Android cũ) nếu đo thấy cần (P3.1).
 - [ ] **CSS quan trọng inline:** Lightning CSS tách CSS dùng cho route đầu tiên, inline vào `<head>`, phần còn lại tải bất đồng bộ (P3.1).
 - [ ] **Preload đúng chỗ:** `<link rel="modulepreload">` cho chunk của route, `103 Early Hints` ở production (P3.2).
-- [ ] **Prefetch có ý thức mạng:** prefetch `Link` khi vào viewport và trình duyệt rảnh (`requestIdleCallback`); tắt khi `navigator.connection.saveData` bật hoặc mạng 2G (P1.6).
+- [x] **Prefetch có ý thức mạng:** prefetch `Link` khi vào viewport và trình duyệt rảnh (`requestIdleCallback`); tắt khi `navigator.connection.saveData` bật hoặc mạng 2G (P1.6).
 - [ ] **Ảnh và font:** `loading="lazy"`, AVIF/WebP, `sizes` đúng; subset font theo ký tự dùng (giữ đủ tiếng Việt), `font-display: swap` (P2).
 - [ ] **Hydrate chọn lọc:** khuyến khích boundary `<Suspense>` quanh client component nặng để React hydrate theo ưu tiên (P1.5).
 - [ ] **Zalo:** asset nằm trong gói zip (không tải qua mạng lúc mở app); Eruda chỉ có ở dev; ngân sách JS riêng cho Zalo < 150KB gzip (P1.9, P3.3).
 
 ### G5. Dữ liệu và mạng
-- [ ] **Gộp truy vấn trùng trong một request:** `React.cache` cho hàm đọc dữ liệu; dev cảnh báo N+1 khi cùng một câu SQL chạy hơn 5 lần trong một request (dựa trên query log sẵn có) (P1.5).
+- [x] **Gộp truy vấn trùng trong một request:** `React.cache` cho hàm đọc dữ liệu; dev cảnh báo N+1 khi cùng một câu SQL chạy hơn 5 lần trong một request (dựa trên query log sẵn có) (P1.5).
 - [ ] **Pool kết nối Postgres nhỏ và dùng chung** trong worker (vd 5 kết nối), prepared statement (P3.2).
 - [ ] **Nén đúng cách:** brotli nén sẵn lúc build cho asset tĩnh; brotli/gzip mức thấp cho response động (P3.2).
 - [ ] **Cache HTTP chuẩn:** asset có hash → `immutable`; HTML tĩnh → `ETag` + `stale-while-revalidate` (P3.2).

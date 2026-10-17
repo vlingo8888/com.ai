@@ -1,0 +1,13 @@
+{
+  "name": "compat-zalo-mini-app",
+  "private": true,
+  "description": "Zalo Mini App (--target zalo): Server Components rendered from the backend's payload on the device, virtual routing, Server Actions",
+  "dependencies": {
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "react-server-dom-webpack": "^19.0.0"
+  },
+  "devDependencies": {
+    "react-refresh": "^0.19.0"
+  }
+}

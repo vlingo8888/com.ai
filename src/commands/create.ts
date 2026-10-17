@@ -124,11 +124,14 @@ export function getStarterProjectFiles(projectName: string): ProjectTemplateFile
             "@pglite/core": "^1.0.0",
             kysely: "^0.29.6",
             "lucide-react": "^1.16.0",
-            react: "^19.0.0",
-            "react-dom": "^19.0.0",
+            // Exact and identical: the Flight runtime must match React's version
+            react: "19.3.0",
+            "react-dom": "19.3.0",
+            "react-server-dom-webpack": "19.3.0",
           },
           devDependencies: {
             "@types/bun": "latest",
+            "react-refresh": "0.19.0",
             "@types/react": "^19.0.0",
             "@types/react-dom": "^19.0.0",
           },

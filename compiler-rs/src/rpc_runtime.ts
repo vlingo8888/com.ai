@@ -7,6 +7,8 @@
 export interface RpcInput {
   /** Absolute path of the module that exports the action */
   tsPath: string;
+  /** `rsc:` specifier when the engine serves server modules (edits apply without a restart) */
+  moduleSpecifier?: string | null;
   action: string;
   args: unknown;
   cookiesStr: string;
@@ -69,7 +71,7 @@ async function runLifecycle(input: RpcInput) {
 }
 
 async function invoke(input: RpcInput): Promise<unknown> {
-  const mod: any = await import(input.tsPath);
+  const mod: any = await import(input.moduleSpecifier || input.tsPath);
   const rawArgs = input.args;
   const args = Array.isArray(rawArgs) ? rawArgs : rawArgs !== null && rawArgs !== undefined ? [rawArgs] : [];
   const actionName = input.action;
