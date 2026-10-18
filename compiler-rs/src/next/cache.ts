@@ -2,6 +2,7 @@
 // restarts, bounded, persisted to disk); see `cache_store.rs`.
 
 import { cacheCall, cacheInvalidate, markRevalidated, currentCacheScope } from "./cache-runtime.ts";
+import { markDynamic } from "./request.ts";
 
 /** Purges cached data for `path` (and, in a Server Action, re-renders the page in the same response) */
 export function revalidatePath(path: string, type?: "page" | "layout") {
@@ -56,7 +57,9 @@ export const CACHE_PROFILES: Record<string, number> = {
   max: 2592000,
 };
 
-export function unstable_noStore() {}
+export function unstable_noStore() {
+  markDynamic("noStore()");
+}
 export const noStore = unstable_noStore;
 
 export default { revalidatePath, revalidateTag, updateTag, refresh, unstable_cache, cacheLife, cacheTag, unstable_noStore };

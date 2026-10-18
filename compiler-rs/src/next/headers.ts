@@ -1,7 +1,7 @@
 // next/headers on the server: cookies(), headers(), draftMode() for the current request. Next.js 15
 // returns Promises; the values are also usable synchronously, as older code expects.
 
-import { parseCookieHeader, requestCookies, requestHeaders, serializeCookie, setCookies, syncPromise, type SetCookie } from "./request.ts";
+import { markDynamic, parseCookieHeader, requestCookies, requestHeaders, serializeCookie, setCookies, syncPromise, type SetCookie } from "./request.ts";
 
 type CookieOptions = Partial<Omit<SetCookie, "name" | "value">> & { expires?: Date | string | number };
 
@@ -53,11 +53,13 @@ export class CookieStore {
 }
 
 export function cookies() {
+  markDynamic("cookies()");
   return syncPromise(new CookieStore());
 }
 
 /** Read-only request headers */
 export function headers() {
+  markDynamic("headers()");
   const h = new Headers();
   for (const [k, v] of Object.entries(requestHeaders())) {
     try {
@@ -81,6 +83,7 @@ export function headers() {
 const DRAFT_COOKIE = "__prerender_bypass";
 
 export function draftMode() {
+  markDynamic("draftMode()");
   const store = {
     get isEnabled() {
       return requestCookies().has(DRAFT_COOKIE) || parseCookieHeader(requestHeaders().cookie).has(DRAFT_COOKIE);

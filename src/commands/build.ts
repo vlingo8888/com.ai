@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, copyFileSync, writeFileSync } from "fs";
 import { join, resolve } from "path";
 import { logger, colors } from "../core/logger";
 import { findEngineBinary, isZaloMiniAppProject } from "./dev";
+import { engineEnv } from "../core/binaries";
 import { prerenderPayloads } from "../zalominiapp/prerender";
 
 export interface BuildOptions {
@@ -16,7 +17,7 @@ export async function buildCommand(options: BuildOptions = {}) {
   const projectDir = resolve(process.cwd(), options.dir || ".");
   const isZmp = options.target === "zalo" || (!options.target && isZaloMiniAppProject(projectDir));
   const targetMode = isZmp ? "zalo" : "web";
-  const outputDir = resolve(projectDir, options.outDir || (isZmp ? "dist" : ".next"));
+  const outputDir = resolve(projectDir, options.outDir || (isZmp ? "dist" : ".nata/build"));
 
   logger.section(`BUILDING FOR ${isZmp ? "ZALO MINI APP" : "PRODUCTION WEB"}`);
 
@@ -104,11 +105,19 @@ export async function buildCommand(options: BuildOptions = {}) {
         { label: "Deploy Command", value: "zmp deploy (or open in Zalo Mini App Studio)", color: colors.yellow },
       ]);
     } else {
-      spinner.stop(true, "Production build complete");
-      logger.card("WEB PRODUCTION BUILD COMPLETE", [
-        { label: "Target", value: "🌐 Standard Web App", color: colors.bold + colors.green },
-        { label: "Output Directory", value: outputDir, color: colors.green },
-      ]);
+      spinner.stop(true, "Building with the Rust engine");
+      const engine = findEngineBinary();
+      if (!engine) throw new Error("Engine binary not found: reinstall @com.ai.vn/cli or set COM_COMPILER_PATH");
+      // The engine prints the route table; output goes to .nata/build (and `output` of next.config)
+      const proc = Bun.spawn([engine, "build", "--dir", projectDir, "--target", "web"], {
+        stdout: "inherit",
+        stderr: "inherit",
+        stdin: "ignore",
+        env: { ...process.env, ...engineEnv(), COM_MANAGED: "1" },
+      });
+      const code = await proc.exited;
+      if (code !== 0) process.exit(code);
+      logger.nextSteps([{ cmd: "com start", desc: "Serve the production build" }]);
     }
   } catch (err: any) {
     spinner.stop(false, "Build failed");

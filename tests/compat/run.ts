@@ -2,7 +2,10 @@
 // Next.js compatibility suite: runs each app in tests/compat/apps under `com dev` (unmodified Next.js
 // App Router code) and checks it in headless Chrome.
 //
-//   bun tests/compat/run.ts [app...] [--engine <com-compiler>] [--json <file>]
+//   bun tests/compat/run.ts [app...] [--engine <com-compiler>] [--json <file>] [--prod]
+//
+// `--prod` runs each app with `com build` + `com start` instead (checks that edit files are skipped:
+// there is no hot reload in production; `prodKnownGap` marks a gap of production only).
 //
 // Each app has a compat.json listing checks. A check marked `knownGap` documents a feature that is not
 // supported yet: its failure is reported as XFAIL and does not fail the run, while an unexpected pass
@@ -10,12 +13,14 @@
 
 import { existsSync, readdirSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
-import { Browser, copyToTemp, findEngine, readJson, serverRssMb, sleep, startDev, type DevServer, type Page } from "./lib/harness";
+import { Browser, copyToTemp, findEngine, readJson, serverRssMb, sleep, startDev, startProd, type DevServer, type Page } from "./lib/harness";
 
 interface Check {
   name: string;
   path: string;
   knownGap?: string;
+  /** Like `knownGap`, for `--prod` runs only */
+  prodKnownGap?: string;
   status?: number;
   /** Text that must be in the server-rendered HTML (before any JavaScript runs) */
   ssr?: string[];
@@ -57,6 +62,9 @@ const flag = (name: string) => {
   return i >= 0 ? args.splice(i, 2)[1] : undefined;
 };
 const engine = findEngine(flag("--engine"));
+const prodIndex = args.indexOf("--prod");
+const prod = prodIndex >= 0;
+if (prod) args.splice(prodIndex, 1);
 const jsonOut = flag("--json");
 // Our fixture apps, then official Next.js examples (unmodified, see examples/README.md)
 const appsDir = join(import.meta.dir, "apps");
@@ -188,10 +196,12 @@ try {
     const dir = copyToTemp(appDir, app);
     let server: DevServer | null = null;
     try {
-      server = await startDev(dir, { engine, target });
+      server = prod ? await startProd(dir, { engine }) : await startDev(dir, { engine, target });
       console.log(`\n▲ ${app}  (ready in ${server.readyMs}ms)`);
       const page = await browser.newPage();
       for (const check of checks) {
+        if (prod && check.edit) continue;
+        const knownGap = prod ? check.prodKnownGap ?? check.knownGap : check.knownGap;
         let failure: string | null;
         try {
           // A hung check must not hang the whole suite
@@ -202,8 +212,8 @@ try {
         } catch (err: any) {
           failure = `threw: ${err?.message || err}`;
         }
-        const outcome: Outcome = check.knownGap ? (failure ? "XFAIL" : "XPASS") : failure ? "FAIL" : "PASS";
-        const detail = outcome === "XFAIL" ? check.knownGap : outcome === "XPASS" ? "now passes: remove `knownGap`" : failure ?? undefined;
+        const outcome: Outcome = knownGap ? (failure ? "XFAIL" : "XPASS") : failure ? "FAIL" : "PASS";
+        const detail = outcome === "XFAIL" ? knownGap : outcome === "XPASS" ? "now passes: remove `knownGap`" : failure ?? undefined;
         results.push({ app, check: check.name, outcome, detail });
         const icon = { PASS: "✓", FAIL: "⨯", XFAIL: "○", XPASS: "!" }[outcome];
         console.log(`  ${icon} ${outcome.padEnd(5)} ${check.name}${detail ? `\n          ${detail}` : ""}`);
@@ -211,7 +221,7 @@ try {
       page.close();
       metrics.push({ app, readyMs: server.readyMs, rssMb: serverRssMb(server) });
     } catch (err: any) {
-      results.push({ app, check: "start com dev", outcome: "FAIL", detail: String(err?.message || err).slice(0, 2000) });
+      results.push({ app, check: prod ? "com build + com start" : "start com dev", outcome: "FAIL", detail: String(err?.message || err).slice(0, 4000) });
       console.log(`\n⨯ ${app}: ${err?.message || err}`);
     } finally {
       if (server) await server.stop();

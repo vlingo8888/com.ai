@@ -98,6 +98,11 @@ pub fn event(msg: &str) {
     print!(" {} {}\n", p.dim("○"), msg);
 }
 
+pub fn info(msg: &str) {
+    let p = Palette::from_env();
+    print!(" {} {}\n", p.dim("-"), msg);
+}
+
 pub fn warn(msg: &str) {
     let p = Palette::from_env();
     print!(" {} {}\n", p.yellow("⚠"), msg);

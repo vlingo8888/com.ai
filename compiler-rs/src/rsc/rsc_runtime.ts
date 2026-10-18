@@ -17,6 +17,7 @@ import {
 } from "react-server-dom-webpack/server.edge";
 import { resolveCascadeMetadata } from "./metadata_runtime.ts";
 import { installFetchCache } from "./next/cache-runtime.ts";
+import { dynamicProps, markDynamic, noteRevalidate, noteTags, renderInfo } from "./next/request.ts";
 
 // fetch(url, { cache: "force-cache", next: { revalidate, tags } }) goes through the data cache
 installFetchCache();
@@ -124,7 +125,9 @@ function setRequestContext(input: RscInput) {
 export async function buildModel(input: RscInput) {
   setRequestContext(input);
   const params = asyncProps({ ...input.params });
-  const searchParams = asyncProps({ ...input.searchParams });
+  const searchParams = dynamicProps({ ...input.searchParams }, "searchParams");
+  // revalidatePath(pathname) purges the cached page and the data it rendered
+  noteTags([`_N_T_${input.pathname}`]);
 
   const segmentModules = await Promise.all(
     input.segments.map(async (seg) => ({
@@ -207,7 +210,7 @@ export async function buildModel(input: RscInput) {
   cascade.push(notFoundAt === null ? pageMod : segmentModules[notFoundAt][input.fallback ?? "notFound"]);
   const { resolvedTitle, headHtml } = await resolveCascadeMetadata(cascade, {
     params: input.params,
-    searchParams: input.searchParams,
+    searchParams: dynamicProps({ ...input.searchParams }, "searchParams"),
   });
 
   const skip = Math.min(input.skip ?? 0, nodes.length - 1);
@@ -276,6 +279,9 @@ function applySegmentConfig(modules: any[]) {
     if (typeof mod.fetchCache === "string") config.fetchCache = mod.fetchCache;
   }
   (globalThis as any).__NATA_SEGMENT_CONFIG__ = config;
+  if (config.dynamic === "force-dynamic") markDynamic("dynamic = \"force-dynamic\"");
+  if (config.dynamic === "force-static" || config.dynamic === "error") renderInfo().forceStatic = true;
+  noteRevalidate(config.revalidate);
 }
 
 /**
@@ -293,6 +299,27 @@ async function checkStaticParams(pageMod: any, layouts: any[], params: Record<st
     err.digest = "NEXT_NOT_FOUND";
     throw err;
   }
+}
+
+/**
+ * `com build`: the params to prerender, from `generateStaticParams` of the layouts and the page, top
+ * down (a layout's params are passed to the segments below it). `null` when none defines it.
+ */
+export async function staticParams(specifiers: (string | null)[]) {
+  let list: Record<string, unknown>[] = [{}];
+  let defined = false;
+  for (const specifier of specifiers) {
+    const mod = specifier ? await import(specifier) : null;
+    if (typeof mod?.generateStaticParams !== "function") continue;
+    defined = true;
+    const next: Record<string, unknown>[] = [];
+    for (const parent of list) {
+      const generated = await mod.generateStaticParams({ params: parent });
+      for (const params of Array.isArray(generated) ? generated : []) next.push({ ...parent, ...params });
+    }
+    list = next;
+  }
+  return defined ? list : null;
 }
 
 export function onFlightError(error: any) {

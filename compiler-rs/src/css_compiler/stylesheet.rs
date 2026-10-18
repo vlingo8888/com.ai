@@ -106,6 +106,10 @@ async fn compile_in_worker(root: &Path, entry: &Option<PathBuf>, input: &str) ->
 
 /// The compiled project stylesheet (or the browser fallback)
 pub async fn project_stylesheet(root: &Path) -> Stylesheet {
+    // `com start`: compiled (and minified) by `com build`, Tailwind is not needed at runtime
+    if let Some(css) = crate::build::manifest::styles(root) {
+        return Stylesheet::Compiled(css.to_string());
+    }
     let entry = find_entry(root);
     let legacy_css = || super::CssCompiler::find_and_load_custom_css(root);
     if !crate::worker_pool::enabled() || *tailwind_unavailable().lock().unwrap_or_else(|e| e.into_inner()) {

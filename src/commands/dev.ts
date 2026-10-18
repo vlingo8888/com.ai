@@ -3,7 +3,7 @@ import { join, resolve } from "path";
 import { createConnection, createServer } from "net";
 import { logger, colors } from "../core/logger";
 import { startTunnelBackground, printTunnelQrCode } from "./tunnel";
-import { exeName, resolvePrebuiltCompiler, compilerPackageName } from "../core/binaries";
+import { exeName, resolvePrebuiltCompiler, compilerPackageName, engineEnv } from "../core/binaries";
 import packageJson from "../../package.json";
 
 /** The Rust engine binary (`com-compiler`): COM_COMPILER_PATH, the prebuilt package, a local build */
@@ -527,6 +527,7 @@ export async function devCommand(options: DevOptions = {}) {
     stdin: "inherit",
     env: {
       ...process.env,
+      ...engineEnv(),
       COM_MANAGED: "1",
       COM_START_TIME: String(Math.round(performance.timeOrigin)),
       COM_BACKEND_URL: effectiveBackendUrl,

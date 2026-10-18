@@ -63,109 +63,25 @@ fn spawn_hmr_version_tracker(hmr_tx: &broadcast::Sender<String>, hmr_version: Ar
 
 pub struct DevServer;
 
+/// What the HTTP app serves
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ServeMode {
+    /// `com dev`: everything, compiled on demand, with HMR
+    Dev,
+    /// Internal server of `com build`: modules compiled for production (the bundler and the
+    /// prerenderer fetch from it), no HMR
+    Build,
+    /// `com start`: built assets and pages; modules are no longer compiled for the browser
+    Start,
+}
+
 impl DevServer {
     pub async fn run(root_dir: PathBuf, initial_port: u16, target: String) -> Result<(), Box<dyn std::error::Error>> {
-        let root_dir = root_dir.canonicalize().unwrap_or(root_dir);
-        if let Some(major) = crate::module_graph::check_react_support(&root_dir).await {
-            crate::term::warn(&format!(
-                "React {major} found and the framework's React {} could not be installed (offline?): Server Components, Server Actions and streaming need React 19, so pages render on the client. Upgrade with: bun add react@19 react-dom@19 react-server-dom-webpack@19",
-                crate::framework_react::VERSION
-            ));
-        }
-        // Pre-create .nata runtime and shim files
-        RpcExecutor::ensure_runtime_env(&root_dir);
-        // Start the Bun worker now so the first render / Server Action does not pay its startup
-        crate::worker_pool::prewarm(&crate::rpc::dunce_canonicalize(&root_dir));
-        crate::rsc::prewarm(&root_dir);
-        {
-            let root = root_dir.clone();
-            tokio::spawn(async move {
-                crate::next_config::ensure_loaded(&root).await;
-            });
-        }
-
-        if target == "zalo" {
-            let _ = crate::zmp::ZmpConfigGenerator::ensure_app_config(&root_dir);
-            crate::zmp::ZmpConfigGenerator::ensure_hr_config(&root_dir);
-        }
-
-        let router = Arc::new(tokio::sync::RwLock::new(AppRouter::scan(&root_dir)));
-        let (hmr_tx, _) = broadcast::channel::<String>(100);
-        let query_logs = Arc::new(RwLock::new(VecDeque::with_capacity(500)));
-        let hmr_version = Arc::new(RwLock::new(HmrVersion::default()));
-        spawn_hmr_version_tracker(&hmr_tx, hmr_version.clone());
-
+        let state = Self::prepare(root_dir, target).await;
+        let root_dir = state.root_dir.clone();
         // Start native file system watcher for live HMR & CSS hot reload
-        crate::watcher::ProjectWatcher::start(&root_dir, hmr_tx.clone(), router.clone());
-
-        let state = AppState {
-            root_dir: root_dir.clone(),
-            router: router.clone(),
-            hmr_tx: hmr_tx.clone(),
-            target: target.clone(),
-            query_logs: query_logs.clone(),
-            hmr_version: hmr_version.clone(),
-        };
-
-        let app = Router::new()
-            .route("/_hmr", get(ws_hmr_handler))
-            .route("/_nata/hmr_version", get(hmr_version_handler))
-            .route("/_nata/client.js", get(client_runtime_handler))
-            .route("/_nata/overlay.js", get(overlay_handler))
-            .route("/_nata/debug.js", get(|| async { javascript_response(crate::client::DEBUG_JS) }))
-            .route("/_next/image", get(next_image_handler))
-            .route("/_nata/fonts.css", get(|State(state): State<AppState>| async move {
-                let (css, _) = crate::font_loader::stylesheet(&state.root_dir).await;
-                ([(header::CONTENT_TYPE, "text/css; charset=utf-8"), (header::CACHE_CONTROL, "no-cache")], css)
-            }))
-            .route("/_nata/fonts/{*path}", get(|State(state): State<AppState>, Path(path): Path<String>| async move {
-                crate::font_loader::serve(&state.root_dir, path.trim_start_matches('/')).await
-            }))
-            .route("/_nata/media/{*path}", get(|State(state): State<AppState>, Path(path): Path<String>| async move {
-                crate::image_optimizer::media(&state.root_dir, path.trim_start_matches('/')).await
-            }))
-            .route("/_nata/image-module/{*path}", get(image_module_handler))
-            .route(
-                "/_nata/refresh.js",
-                get(|| async {
-                    javascript_response(if crate::module_graph::refresh_enabled() {
-                        crate::client::REFRESH_JS
-                    } else {
-                        "self.$RefreshReg$ = () => {};\nself.$RefreshSig$ = () => (type) => type;\n"
-                    })
-                }),
-            )
-            .route(crate::rsc::ROUTER_URL, get(|| async { javascript_response(crate::rsc::ROUTER_SOURCE) }))
-            .route("/_nata/rsc/boundaries.js", get(|| async { javascript_response(crate::worker_pool::RSC_BOUNDARIES) }))
-            .route("/_nata/deps/{*spec}", get(deps_handler))
-            .route("/_nata/css/{*path}", get(css_module_handler))
-            .route("/favicon.ico", get(favicon_handler))
-            .route("/robots.txt", get(robots_handler))
-            .route("/sitemap.xml", get(sitemap_handler))
-            .route("/manifest.webmanifest", get(manifest_handler))
-            .route("/manifest.json", get(manifest_handler))
-            .route("/icon", get(icon_handler))
-            .route("/apple-icon", get(apple_icon_handler))
-            .route("/opengraph-image", get(og_image_handler))
-            .route("/twitter-image", get(twitter_image_handler))
-            .route("/_nata/rpc", post(rpc_handler))
-            .route("/_nata/logs", get(logs_handler).delete(clear_logs_handler))
-            .route("/_nata/route_info", get(route_info_handler))
-            .route("/_nata/styles.css", get(styles_handler))
-            .route("/_nata/shims/{*path}", get(shims_handler))
-            .route("/_bundle/{*path}", get(bundle_handler))
-            .route("/app-config.json", get(zmp_app_config_handler))
-            .route("/app.config.json", get(zmp_app_config_handler))
-            .route("/hr.config.json", get(zmp_hr_config_handler))
-            .route("/hrr.config.json", get(zmp_hr_config_handler))
-            .route("/zmp.json", get(zmp_app_config_handler))
-            .route("/assets/app.css", get(zmp_css_handler))
-            .route("/assets/app.js", get(zmp_js_handler))
-            .route("/src/app.js", get(zmp_js_handler))
-            .fallback(app_router_fallback_handler)
-            .layer(axum::middleware::from_fn(log_request))
-            .layer(CorsLayer::permissive())
-            .with_state(state);
+        crate::watcher::ProjectWatcher::start(&root_dir, state.hmr_tx.clone(), state.router.clone());
+        let app = Self::app(state, ServeMode::Dev);
 
         // Auto-find next available port if in use
         let mut port = initial_port;
@@ -197,6 +113,118 @@ impl DevServer {
 
         axum::serve(listener, app).await?;
         Ok(())
+    }
+
+    /// Setup shared by every mode: runtime files, the worker, next.config, the route table
+    pub async fn prepare(root_dir: PathBuf, target: String) -> AppState {
+        let root_dir = root_dir.canonicalize().unwrap_or(root_dir);
+        if let Some(major) = crate::module_graph::check_react_support(&root_dir).await {
+            crate::term::warn(&format!(
+                "React {major} found and the framework's React {} could not be installed (offline?): Server Components, Server Actions and streaming need React 19, so pages render on the client. Upgrade with: bun add react@19 react-dom@19 react-server-dom-webpack@19",
+                crate::framework_react::VERSION
+            ));
+        }
+        // Pre-create .nata runtime and shim files
+        RpcExecutor::ensure_runtime_env(&root_dir);
+        // Start the Bun worker now so the first render / Server Action does not pay its startup
+        crate::worker_pool::prewarm(&crate::rpc::dunce_canonicalize(&root_dir));
+        crate::rsc::prewarm(&root_dir);
+        {
+            let root = root_dir.clone();
+            tokio::spawn(async move {
+                crate::next_config::ensure_loaded(&root).await;
+            });
+        }
+
+        if target == "zalo" {
+            let _ = crate::zmp::ZmpConfigGenerator::ensure_app_config(&root_dir);
+            crate::zmp::ZmpConfigGenerator::ensure_hr_config(&root_dir);
+        }
+
+        let router = Arc::new(tokio::sync::RwLock::new(AppRouter::scan(&root_dir)));
+        let (hmr_tx, _) = broadcast::channel::<String>(100);
+        let query_logs = Arc::new(RwLock::new(VecDeque::with_capacity(500)));
+        let hmr_version = Arc::new(RwLock::new(HmrVersion::default()));
+        spawn_hmr_version_tracker(&hmr_tx, hmr_version.clone());
+
+        AppState { root_dir, router, hmr_tx, target, query_logs, hmr_version }
+    }
+
+    pub fn app(state: AppState, mode: ServeMode) -> Router {
+        let mut app = Router::new()
+            .route("/_next/image", get(next_image_handler))
+            .route("/_nata/fonts.css", get(|State(state): State<AppState>| async move {
+                let (css, _) = crate::font_loader::stylesheet(&state.root_dir).await;
+                ([(header::CONTENT_TYPE, "text/css; charset=utf-8"), (header::CACHE_CONTROL, "no-cache")], css)
+            }))
+            .route("/_nata/fonts/{*path}", get(|State(state): State<AppState>, Path(path): Path<String>| async move {
+                crate::font_loader::serve(&state.root_dir, path.trim_start_matches('/')).await
+            }))
+            .route("/_nata/media/{*path}", get(|State(state): State<AppState>, Path(path): Path<String>| async move {
+                crate::image_optimizer::media(&state.root_dir, path.trim_start_matches('/')).await
+            }))
+            .route("/favicon.ico", get(favicon_handler))
+            .route("/robots.txt", get(robots_handler))
+            .route("/sitemap.xml", get(sitemap_handler))
+            .route("/manifest.webmanifest", get(manifest_handler))
+            .route("/manifest.json", get(manifest_handler))
+            .route("/icon", get(icon_handler))
+            .route("/apple-icon", get(apple_icon_handler))
+            .route("/opengraph-image", get(og_image_handler))
+            .route("/twitter-image", get(twitter_image_handler))
+            .route("/_nata/rpc", post(rpc_handler))
+            .route("/app-config.json", get(zmp_app_config_handler))
+            .route("/app.config.json", get(zmp_app_config_handler))
+            .route("/hr.config.json", get(zmp_hr_config_handler))
+            .route("/hrr.config.json", get(zmp_hr_config_handler))
+            .route("/zmp.json", get(zmp_app_config_handler));
+
+        if mode == ServeMode::Dev {
+            app = app
+                .route("/_hmr", get(ws_hmr_handler))
+                .route("/_nata/hmr_version", get(hmr_version_handler))
+                .route("/_nata/client.js", get(client_runtime_handler))
+                .route("/_nata/overlay.js", get(overlay_handler))
+                .route("/_nata/debug.js", get(|| async { javascript_response(crate::client::DEBUG_JS) }))
+                .route("/_nata/logs", get(logs_handler).delete(clear_logs_handler))
+                .route("/_nata/route_info", get(route_info_handler))
+                .route("/_nata/styles.css", get(styles_handler))
+                .route("/assets/app.css", get(zmp_css_handler))
+                .route("/assets/app.js", get(zmp_js_handler))
+                .route("/src/app.js", get(zmp_js_handler));
+        }
+
+        // Browser modules compiled on demand: what `com build` bundles. `com start` serves the bundles
+        // (and never compiles project files for the browser)
+        if mode != ServeMode::Start {
+            app = app
+                .route("/_nata/image-module/{*path}", get(image_module_handler))
+                .route(
+                    "/_nata/refresh.js",
+                    get(|| async {
+                        javascript_response(if crate::module_graph::refresh_enabled() {
+                            crate::client::REFRESH_JS
+                        } else {
+                            "self.$RefreshReg$ = () => {};\nself.$RefreshSig$ = () => (type) => type;\n"
+                        })
+                    }),
+                )
+                .route(crate::rsc::ROUTER_URL, get(|| async { javascript_response(crate::rsc::router_source().into_owned()) }))
+                .route("/_nata/rsc/boundaries.js", get(|| async { javascript_response(crate::worker_pool::RSC_BOUNDARIES) }))
+                .route("/_nata/deps/{*spec}", get(deps_handler))
+                .route("/_nata/css/{*path}", get(css_module_handler))
+                .route("/_nata/shims/{*path}", get(shims_handler))
+                .route("/_bundle/{*path}", get(bundle_handler));
+        } else {
+            app = app
+                .route("/_nata/static/{*path}", get(crate::prod::static_handler))
+                .route("/_nata/health", get(crate::prod::health_handler));
+        }
+
+        let app = app.fallback(app_router_fallback_handler).layer(axum::middleware::from_fn(log_request));
+        // Dev: the Zalo preview and tunnels load from other origins. Production: same-origin only
+        let app = if mode == ServeMode::Dev { app.layer(CorsLayer::permissive()) } else { app };
+        app.with_state(state)
     }
 }
 
@@ -288,11 +316,11 @@ async fn hmr_version_handler(State(state): State<AppState>) -> impl IntoResponse
     (StatusCode::OK, headers, Json(snapshot)).into_response()
 }
 
-fn javascript_response(body: &'static str) -> axum::response::Response {
+fn javascript_response(body: impl Into<axum::body::Body>) -> axum::response::Response {
     let mut headers = HeaderMap::new();
     headers.insert(header::CONTENT_TYPE, "application/javascript; charset=utf-8".parse().unwrap());
     headers.insert(header::CACHE_CONTROL, "no-cache".parse().unwrap());
-    (StatusCode::OK, headers, body).into_response()
+    (StatusCode::OK, headers, body.into()).into_response()
 }
 
 async fn client_runtime_handler() -> impl IntoResponse {
@@ -1937,6 +1965,13 @@ async fn route_request(state: AppState, req: axum::extract::Request) -> impl Int
             return resp_builder
                 .body(axum::body::Body::from(output.body))
                 .unwrap_or_else(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Response building failed").into_response());
+        }
+
+        // `com start`: prerendered and ISR pages from the page cache
+        if crate::prod::active() {
+            if let Some(cached) = crate::prod::serve_page(&state, &req.method().clone(), &req.headers().clone(), &path, route).await {
+                return cached;
+            }
         }
 
         let stylesheet_tags = crate::css_compiler::stylesheet::project_stylesheet(&state.root_dir).await.head_tags();

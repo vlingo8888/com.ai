@@ -67,7 +67,7 @@ fn error_reply(err: &crate::swc_compiler::CompileError) -> (Value, Vec<u8>) {
     (json!({ "kind": "error", "message": err.message, "error": err }), Vec::new())
 }
 
-fn is_esm_source(path: &Path, source: &str) -> bool {
+pub(crate) fn is_esm_source(path: &Path, source: &str) -> bool {
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
     match ext {
         "mjs" | "mts" => true,
@@ -183,8 +183,8 @@ fn require_regex() -> &'static Regex {
 /// with each file's source and how its `require` specifiers resolve
 fn cjs_closure(root: &Path, entry: &Path, layer: Layer) -> (Value, Vec<u8>) {
     let resolvers = oxc::resolvers(root);
-    // The worker runs with NODE_ENV=development (see `apply_runner_env`): the production build is dead code
-    let unused_build = ".production.";
+    // The worker's NODE_ENV (see `apply_runner_env`) decides which build is dead code
+    let unused_build = if crate::mode::is_production() { ".development." } else { ".production." };
     let mut files = serde_json::Map::new();
     let mut seen = HashSet::new();
     let mut queue = VecDeque::from([entry.to_path_buf()]);

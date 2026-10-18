@@ -68,13 +68,34 @@ export interface DevServer {
   log: () => string;
   pids: () => number[];
   stop: () => Promise<void>;
+  /** Output of `com build` (production runs) */
+  buildLog?: string;
 }
 
 /** Starts `com dev` through the real CLI (bin/cli.ts), like a user would */
 export async function startDev(dir: string, opts: { engine: string; target?: "web" | "zalo"; env?: Record<string, string> }): Promise<DevServer> {
   const port = await freePort();
+  return startServer(dir, port, ["dev", "--dir", dir, "--port", String(port), "--target", opts.target ?? "web", "--no-tunnel"], "/_nata/client.js", opts);
+}
+
+/** `com build` then `com start` (production) */
+export async function startProd(dir: string, opts: { engine: string; env?: Record<string, string> }): Promise<DevServer> {
+  const build = Bun.spawnSync(["bun", join(repoRoot, "bin/cli.ts"), "build", "--dir", dir], {
+    cwd: repoRoot,
+    stdin: "ignore",
+    env: { ...process.env, NO_COLOR: "1", COM_COMPILER_PATH: opts.engine, ...opts.env },
+    timeout: 300_000,
+  });
+  const buildLog = build.stdout.toString() + build.stderr.toString();
+  if (build.exitCode !== 0) throw new Error(`com build failed:\n${buildLog}`);
+  const port = await freePort();
+  const server = await startServer(dir, port, ["start", "--dir", dir, "--port", String(port)], "/_nata/health", opts);
+  return { ...server, buildLog };
+}
+
+async function startServer(dir: string, port: number, cliArgs: string[], readyPath: string, opts: { engine: string; env?: Record<string, string> }): Promise<DevServer> {
   let output = "";
-  const proc = Bun.spawn(["bun", join(repoRoot, "bin/cli.ts"), "dev", "--dir", dir, "--port", String(port), "--target", opts.target ?? "web", "--no-tunnel"], {
+  const proc = Bun.spawn(["bun", join(repoRoot, "bin/cli.ts"), ...cliArgs], {
     cwd: repoRoot,
     stdin: "ignore",
     stdout: "pipe",
@@ -96,14 +117,14 @@ export async function startDev(dir: string, opts: { engine: string; target?: "we
     if (ready) {
       readyMs = Number(ready[1]) * (ready[2] === "s" ? 1000 : 1);
       try {
-        await fetch(`${url}/_nata/client.js`);
+        await fetch(url + readyPath);
         break;
       } catch {}
     }
-    if (proc.exitCode !== null) throw new Error(`com dev exited early:\n${output}`);
+    if (proc.exitCode !== null) throw new Error(`com ${cliArgs[0]} exited early:\n${output}`);
     await sleep(100);
   }
-  if (Number.isNaN(readyMs)) throw new Error(`com dev did not become ready:\n${output}`);
+  if (Number.isNaN(readyMs)) throw new Error(`com ${cliArgs[0]} did not become ready:\n${output}`);
 
   const pids = () => {
     // The CLI, the engine and the Bun worker of this project

@@ -1,7 +1,7 @@
 // next/server: NextRequest, NextResponse, userAgent(), after(), connection() — the shapes Next.js
 // passes to route handlers and middleware.
 
-import { afterQueue, parseCookieHeader, serializeCookie, type SetCookie } from "./request.ts";
+import { afterQueue, markDynamic, parseCookieHeader, serializeCookie, type SetCookie } from "./request.ts";
 
 export class RequestCookies {
   private map: Map<string, string>;
@@ -216,7 +216,9 @@ export function after(task: Promise<unknown> | (() => unknown)) {
 }
 
 /** Marks the render as depending on the request (always dynamic in development) */
-export async function connection(): Promise<void> {}
+export async function connection(): Promise<void> {
+  markDynamic("connection()");
+}
 
 export const URLPattern = (globalThis as any).URLPattern;
 

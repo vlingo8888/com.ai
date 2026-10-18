@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use super::{client_reference_specifier, segment_key};
+use super::{client_reference_specifier, segment_key, ROUTER_DEV_IMPORTS, ROUTER_SOURCE};
 
 #[test]
 fn rsc_001_segment_keys_carry_param_values() {
@@ -32,4 +32,16 @@ fn rsc_002_client_reference_ids_map_to_ssr_modules() {
     assert_eq!(client_reference_specifier(&root, "/_nata/shims/next/link").unwrap(), format!("ssr:{}", root.join(".nata/next/link.js").display()));
     assert!(client_reference_specifier(&root, "/_bundle/../../etc/passwd").is_err());
     assert!(client_reference_specifier(&root, "/_bundle/app/missing.tsx").is_err());
+}
+
+#[test]
+fn production_router_has_no_dev_modules() {
+    // The markers `router_source` replaces must exist in the dev router
+    assert!(ROUTER_SOURCE.contains(ROUTER_DEV_IMPORTS));
+    assert!(ROUTER_SOURCE.contains("\nconnectHmr();\n"));
+    let prod = crate::mode::with_production(super::router_source);
+    for dev_only in ["./refresh.js", "./overlay.js", "./debug.js", "\nconnectHmr();"] {
+        assert!(!prod.contains(dev_only), "{dev_only} left in the production router");
+    }
+    assert!(prod.contains("const reportIssue"));
 }

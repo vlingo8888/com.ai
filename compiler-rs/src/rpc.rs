@@ -1152,7 +1152,11 @@ pub fn format_module_path(clean: &str) -> String {
     }
 }
 
+/// `COM_BUN` first: the CLI points it at the Bun it ships with (production React needs Bun >= 1.3)
 pub fn find_bun_bin() -> std::path::PathBuf {
+    if let Some(p) = std::env::var_os("COM_BUN").map(std::path::PathBuf::from).filter(|p| p.exists()) {
+        return p;
+    }
     if let Some(userprofile) = std::env::var_os("USERPROFILE") {
         let p = std::path::PathBuf::from(userprofile).join(".bun/bin/bun.exe");
         if p.exists() {

@@ -45,7 +45,7 @@ fn now() -> f64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0)
 }
 
-fn tag_matches(pattern: &str, tag: &str) -> bool {
+pub(crate) fn tag_matches(pattern: &str, tag: &str) -> bool {
     // `_N_T_/blog*` (revalidatePath(path, "layout")) purges everything below the path
     match pattern.strip_suffix('*') {
         Some(prefix) => tag.starts_with(prefix),
@@ -211,6 +211,8 @@ pub fn handle(root: &Path, cmd: &str, input: &serde_json::Value) -> serde_json::
         }
         "cache_invalidate" => {
             let tags: Vec<String> = input["tags"].as_array().map(|a| a.iter().filter_map(|t| t.as_str().map(String::from)).collect()).unwrap_or_default();
+            // Pages `com start` serves from its page cache carry the same tags
+            crate::prod::invalidate_tags(&tags);
             serde_json::json!({ "removed": cache.invalidate_tags(&tags) })
         }
         _ => serde_json::json!({ "error": format!("unknown cache command {cmd}") }),

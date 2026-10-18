@@ -1,3 +1,4 @@
+pub mod build;
 pub mod bundler;
 pub mod cache_store;
 pub mod client;
@@ -11,11 +12,13 @@ pub mod dev_log;
 pub mod image_optimizer;
 pub mod metadata;
 pub mod middleware;
+pub mod mode;
 pub mod module_graph;
 pub mod module_server;
 pub mod next_config;
 pub mod next_shims;
 pub mod og_image;
+pub mod prod;
 pub mod resolver;
 pub mod route_handler;
 pub mod rsc;

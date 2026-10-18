@@ -195,9 +195,11 @@ pub fn apply_runner_env(cmd: &mut Command, root: &Path) {
         }
     }
 
-    cmd.env("NODE_ENV", "development");
-    // The dev server renders SQL (including errors) from the query log itself
-    cmd.env("COM_DEV_QUERY_LOG", "1");
+    cmd.env("NODE_ENV", crate::mode::node_env());
+    if !crate::mode::is_production() {
+        // The dev server renders SQL (including errors) from the query log itself
+        cmd.env("COM_DEV_QUERY_LOG", "1");
+    }
 }
 
 /// `instrumentation.(ts|js)` at the project root or in `src/`
@@ -386,6 +388,16 @@ async fn spawn(root: &Path) -> Result<Arc<Handle>, String> {
         last_used: Mutex::new(Instant::now()),
         limiter: Semaphore::new(concurrency),
     }))
+}
+
+/// Stops every worker after its requests in flight (`com start` shutting down)
+pub async fn shutdown_all() {
+    let all: Vec<Slot> = slots().lock().unwrap_or_else(|e| e.into_inner()).values().cloned().collect();
+    for slot in all {
+        if let Some(handle) = slot.lock().await.take() {
+            shutdown(handle).await;
+        }
+    }
 }
 
 async fn shutdown(handle: Arc<Handle>) {

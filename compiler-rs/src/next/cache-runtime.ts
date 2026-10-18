@@ -8,6 +8,7 @@
 // purges it.
 
 import { AsyncLocalStorage } from "node:async_hooks";
+import { markDynamic, noteRevalidate, noteTags } from "./request.ts";
 
 const g = globalThis as any;
 
@@ -86,6 +87,9 @@ async function compute<R>(key: string, run: () => Promise<R> | R, options: { rev
   }
   if (text !== null) {
     const revalidate = options.revalidate === false ? null : scope.revalidate ?? (options.revalidate === undefined ? null : options.revalidate);
+    // The page using this data is no fresher than it
+    noteRevalidate(revalidate);
+    noteTags(scope.tags);
     await call("cache_set", { key, value: text, tags: [...new Set([...scope.tags, ...implicitTags()])], revalidate });
   }
   return result;
@@ -100,6 +104,8 @@ export async function cacheCall<R>(id: string, args: unknown[], run: () => Promi
     return run();
   }
   const key = `${id}|${argsKey}`;
+  noteRevalidate(options.revalidate);
+  noteTags(options.tags);
   const { meta } = await call("cache_get", { key });
   if (meta.hit) {
     // Stale: serve it now, refresh in the background (stale-while-revalidate)
@@ -149,6 +155,8 @@ export function installFetchCache() {
     // Next.js 15: not cached unless asked (`cache: "force-cache"`, `next.revalidate` > 0, tags)
     const wanted = init.cache === "force-cache" || (typeof revalidate === "number" && revalidate > 0) || (tags.length > 0 && init.cache !== "no-store");
     if (!wanted || method !== "GET" || revalidate === 0 || init.cache === "no-store") {
+      // Like Next.js: an uncached fetch runs at build time unless it opts out explicitly
+      if (method === "GET" && (revalidate === 0 || init.cache === "no-store")) markDynamic(`fetch ${input instanceof Request ? input.url : String(input)} with no-store`);
       const { next: _next, ...rest } = init;
       return nativeFetch(input as any, rest);
     }

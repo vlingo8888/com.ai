@@ -8,7 +8,7 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 #[derive(Parser, Debug)]
-#[command(name = "com-compiler")]
+#[command(name = "com-compiler", version)]
 #[command(about = "High-performance App Router & Server Actions compiler & dev server in Rust")]
 struct Cli {
     #[command(subcommand)]
@@ -31,6 +31,25 @@ enum Commands {
         #[arg(short, long, default_value = "web")]
         target: String,
     },
+    /// Production build into .nata/build
+    Build {
+        #[arg(short, long, default_value = ".")]
+        dir: PathBuf,
+        #[arg(short, long, default_value = "web")]
+        target: String,
+    },
+    /// Serve the production build
+    Start {
+        #[arg(short, long, default_value = ".")]
+        dir: PathBuf,
+        #[arg(short, long, default_value_t = 3000)]
+        port: u16,
+        /// Interface to listen on
+        #[arg(short = 'H', long, default_value = "0.0.0.0")]
+        hostname: String,
+        #[arg(short, long, default_value = "web")]
+        target: String,
+    },
     /// Scan App Router structure
     Routes {
         /// Project root directory
@@ -40,20 +59,27 @@ enum Commands {
 }
 
 /// `com dev` serves one developer: two runtime threads are plenty and every extra thread costs stack and
-/// buffers. Production serving (`com start`) will size the runtime from the CPU count.
-fn runtime_threads() -> usize {
-    std::env::var("COM_THREADS").ok().and_then(|v| v.parse().ok()).filter(|n: &usize| *n > 0).unwrap_or(2)
+/// buffers. Production (`com build`, `com start`) uses every core.
+fn runtime_threads(production: bool) -> usize {
+    let default = if production { std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4) } else { 2 };
+    std::env::var("COM_THREADS").ok().and_then(|v| v.parse().ok()).filter(|n: &usize| *n > 0).unwrap_or(default)
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let cli = Cli::parse();
+    let production = matches!(cli.command, Commands::Build { .. } | Commands::Start { .. });
+    if production {
+        // Before any thread starts: the worker and every module compiled inherit it
+        compiler_rs::mode::set_production();
+    }
     tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(runtime_threads())
+        .worker_threads(runtime_threads(production))
         .enable_all()
         .build()?
-        .block_on(run())
+        .block_on(run(cli))
 }
 
-async fn run() -> Result<(), Box<dyn std::error::Error>> {
+async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -61,8 +87,6 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         )
         .with(tracing_subscriber::fmt::layer())
         .init();
-
-    let cli = Cli::parse();
 
     match cli.command {
         Commands::Dev { dir, port, target } => {
@@ -73,6 +97,27 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
 
             DevServer::run(dir, port, target).await?;
+        }
+        Commands::Build { dir, target } => {
+            if std::env::var("COM_MANAGED").is_err() {
+                println!("\n   \x1b[1m▲ com.ai.vn\x1b[0m \x1b[90m(production build)\x1b[0m\n");
+            }
+            if let Err(err) = compiler_rs::build::run(dir, target).await {
+                compiler_rs::term::error("Build failed", Some(&err), None);
+                compiler_rs::worker_pool::shutdown_all().await;
+                std::process::exit(1);
+            }
+            compiler_rs::worker_pool::shutdown_all().await;
+        }
+        Commands::Start { dir, port, hostname, target } => {
+            compiler_rs::term::mark_start();
+            if std::env::var("COM_MANAGED").is_err() {
+                println!("\n   \x1b[1m▲ com.ai.vn\x1b[0m \x1b[90m(production)\x1b[0m");
+            }
+            if let Err(err) = compiler_rs::prod::run(dir, port, hostname, target).await {
+                compiler_rs::term::error("Could not start", Some(&err), None);
+                std::process::exit(1);
+            }
         }
         Commands::Routes { dir } => {
             let router = compiler_rs::router::AppRouter::scan(&dir);

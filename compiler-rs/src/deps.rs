@@ -198,7 +198,7 @@ pub fn content_etag(code: &str) -> String {
 /// payload the production client does not read, so pages do not hydrate in this mode. `com build`
 /// (ROADMAP P3) builds both sides for production.
 pub fn deps_node_env() -> &'static str {
-    if matches!(std::env::var("COM_DEPS_PROD").as_deref(), Ok("1") | Ok("true")) {
+    if crate::mode::is_production() || matches!(std::env::var("COM_DEPS_PROD").as_deref(), Ok("1") | Ok("true")) {
         "production"
     } else {
         "development"

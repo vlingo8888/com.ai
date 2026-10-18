@@ -22,6 +22,19 @@ use crate::worker_pool::{StreamEvent, WorkerError};
 pub const ROUTER_URL: &str = "/_nata/router.js";
 pub const ROUTER_SOURCE: &str = include_str!("../client/router.js");
 
+/// Dev-only parts of the router: React Refresh, the error overlay, the debug drawer and the HMR socket
+const ROUTER_DEV_IMPORTS: &str = "import \"./refresh.js\";\nimport { reportIssue, clearBlockingErrors } from \"./overlay.js\";\nimport { mountDebugUi, renderLogs } from \"./debug.js\";\n";
+const ROUTER_PROD_STUBS: &str = "const reportIssue = (error) => console.error(error), clearBlockingErrors = () => {}, mountDebugUi = () => {}, renderLogs = () => {};\n";
+
+/// The router for the current mode: in production without the dev-only modules (the bundler then
+/// drops the HMR code, which nothing calls)
+pub fn router_source() -> std::borrow::Cow<'static, str> {
+    if !crate::mode::is_production() {
+        return ROUTER_SOURCE.into();
+    }
+    ROUTER_SOURCE.replacen(ROUTER_DEV_IMPORTS, ROUTER_PROD_STUBS, 1).replacen("\nconnectHmr();\n", "\n", 1).into()
+}
+
 /// What the page request asks for
 pub enum Mode {
     /// A full HTML document
@@ -234,8 +247,17 @@ pub fn images_client_config(root: &Path) -> Value {
 }
 
 pub fn head_start(root: &Path, stylesheet_tags: &str, target: &str) -> String {
-    let import_map = serde_json::to_string(&crate::bundler::ClientTransformer::import_map("")).unwrap_or_else(|_| "{}".into());
-    let config = serde_json::to_string(&json!({ "mode": "web", "rsc": true, "origin": "", "basePath": crate::next_config::base_path(root) }))
+    let build = crate::build::manifest::current();
+    // Production build: bundles instead of the module URLs of development (no import map)
+    let module_globals = match &build {
+        Some(manifest) => crate::build::manifest::head_globals(manifest),
+        None => {
+            let import_map = serde_json::to_string(&crate::bundler::ClientTransformer::import_map("")).unwrap_or_else(|_| "{}".into());
+            format!("<script type=\"importmap\">{import_map}</script><script>{WEBPACK_GLOBALS}</script>")
+        }
+    };
+    // Links prefetch in production, like Next.js (in development only when asked)
+    let config = serde_json::to_string(&json!({ "mode": "web", "rsc": true, "origin": "", "basePath": crate::next_config::base_path(root), "prefetch": build.is_some() }))
         .unwrap_or_else(|_| "{}".into())
         .replace("</", "<\\/");
     let images = serde_json::to_string(&images_client_config(root)).unwrap_or_else(|_| "{}".into()).replace("</", "<\\/");
@@ -247,9 +269,8 @@ pub fn head_start(root: &Path, stylesheet_tags: &str, target: &str) -> String {
     };
     format!(
         "<meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
-         <script type=\"importmap\">{import_map}</script>\
-         <script>window.__NATA_CONFIG__={config};window.__NATA_IMAGES__={images};window.__COM_BACKEND_URL__={backend};self.__nata_f=self.__nata_f||[];{WEBPACK_GLOBALS}</script>\
-         {zmp}{stylesheet_tags}"
+         <script>window.__NATA_CONFIG__={config};window.__NATA_IMAGES__={images};window.__COM_BACKEND_URL__={backend};self.__nata_f=self.__nata_f||[];</script>\
+         {module_globals}{zmp}{stylesheet_tags}"
     )
 }
 
@@ -334,10 +355,90 @@ fn print_reply_logs(reply: &crate::worker_pool::Reply) {
 /// Renders a page (or runs a Server Action) and streams the response
 pub async fn handle(root: &Path, target: &str, stylesheet_tags: &str, req: PageRequest<'_>) -> Response {
     let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
-    crate::rpc::RpcExecutor::ensure_runtime_env(&root);
-    if let Err(message) = ensure_flight_runtime(&root).await {
-        return error_page(StatusCode::INTERNAL_SERVER_ERROR, &message);
+    match page_command(&root, target, stylesheet_tags, req).await {
+        Ok((cmd, input, body)) => stream_response(&root, cmd, input, body).await,
+        Err(message) => error_page(StatusCode::INTERNAL_SERVER_ERROR, &message),
     }
+}
+
+/// A page rendered to the end (prerendering, the page cache of `com start`)
+pub struct Rendered {
+    pub status: u16,
+    pub headers: Vec<(String, String)>,
+    pub body: Vec<u8>,
+    /// What the render depended on (see next/request.ts `RenderInfo`)
+    pub dynamic: Option<String>,
+    pub revalidate: Option<u64>,
+    pub tags: Vec<String>,
+}
+
+impl Rendered {
+    /// Can be served to every visitor: no request-time API, a cacheable status
+    pub fn is_static(&self) -> bool {
+        self.dynamic.is_none() && matches!(self.status, 200 | 404)
+    }
+}
+
+/// Renders a page to the end instead of streaming it
+pub async fn render_collect(root: &Path, target: &str, stylesheet_tags: &str, req: PageRequest<'_>) -> Result<Rendered, String> {
+    let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let (cmd, input, body) = page_command(&root, target, stylesheet_tags, req).await?;
+    let mut stream = crate::worker_pool::call_stream(&root, cmd, input, body).await.map_err(|e| match e {
+        WorkerError::Unavailable(e) | WorkerError::Failed(e) => format!("The server worker is unavailable: {e}"),
+    })?;
+    let mut rendered = Rendered { status: 200, headers: Vec::new(), body: Vec::new(), dynamic: None, revalidate: None, tags: Vec::new() };
+    let mut first = true;
+    while let Some(event) = stream.events.recv().await {
+        match event {
+            StreamEvent::Chunk { meta, body } => {
+                if first {
+                    first = false;
+                    let head = &meta["head"];
+                    rendered.status = head["status"].as_u64().unwrap_or(200) as u16;
+                    for (k, v) in head["headers"].as_object().into_iter().flatten() {
+                        match v {
+                            Value::Array(list) => rendered.headers.extend(list.iter().filter_map(|x| x.as_str()).map(|x| (k.clone(), x.to_string()))),
+                            other => rendered.headers.extend(other.as_str().map(|x| (k.clone(), x.to_string()))),
+                        }
+                    }
+                }
+                rendered.body.extend_from_slice(&body);
+            }
+            StreamEvent::End(reply) => {
+                print_reply_logs(&reply);
+                if let Some(err) = reply.error() {
+                    return Err(format!("{err}\n{}", reply.stderr()).trim().to_string());
+                }
+                let render = &reply.meta["render"];
+                let force_static = render["forceStatic"].as_bool().unwrap_or(false);
+                rendered.dynamic = if force_static { None } else { render["dynamic"].as_str().map(String::from) };
+                rendered.revalidate = render["revalidate"].as_f64().filter(|s| *s > 0.0).map(|s| s.ceil() as u64);
+                rendered.tags = render["tags"].as_array().into_iter().flatten().filter_map(|t| t.as_str().map(String::from)).collect();
+                break;
+            }
+        }
+    }
+    if first {
+        return Err("The server worker exited while rendering".to_string());
+    }
+    Ok(rendered)
+}
+
+/// `rsc:` specifier of the react-server runtime, its packages installed and runtime files written
+pub async fn runtime_specifier(root: &Path) -> Result<String, String> {
+    crate::rpc::RpcExecutor::ensure_runtime_env(root);
+    ensure_flight_runtime(root).await?;
+    let _ = crate::worker_pool::write_runtime_files(root);
+    let graph = crate::module_graph::for_root(root);
+    let graph = graph.read().unwrap_or_else(|e| e.into_inner());
+    Ok(graph.specifier(&root.join(".nata/rsc_runtime.ts"), Layer::Rsc))
+}
+
+/// The worker command, input and body for a page request
+async fn page_command(root: &Path, target: &str, stylesheet_tags: &str, req: PageRequest<'_>) -> Result<(&'static str, Value, Vec<u8>), String> {
+    let root = root.to_path_buf();
+    crate::rpc::RpcExecutor::ensure_runtime_env(&root);
+    ensure_flight_runtime(&root).await?;
     let _ = crate::worker_pool::write_runtime_files(&root);
     let (runtime, ssr_runtime) = {
         let graph = crate::module_graph::for_root(&root);
@@ -359,14 +460,13 @@ pub async fn handle(root: &Path, target: &str, stylesheet_tags: &str, req: PageR
         "headStart": head_start(&root, stylesheet_tags, target),
         "images": images_client_config(&root),
         "basePath": crate::next_config::base_path(&root),
-        "bootstrap": ROUTER_URL,
+        "bootstrap": crate::build::manifest::current().map(|m| m.router.clone()).unwrap_or_else(|| ROUTER_URL.to_string()),
         "cookies": req.cookies,
         "headers": req.headers,
         "actionId": action_id,
         "contentType": content_type,
     });
-
-    stream_response(&root, cmd, input, body).await
+    Ok((cmd, input, body))
 }
 
 /// Runs a streamed worker command (`rsc`, `action`, `route`) and turns it into an HTTP response: the
@@ -432,7 +532,8 @@ pub async fn stream_response(root: &Path, cmd: &str, input: Value, body: Vec<u8>
             }
         }
     });
-    builder.body(Body::from_stream(body_stream)).unwrap_or_else(|_| error_page(StatusCode::INTERNAL_SERVER_ERROR, "Invalid response"))
+    // Fused: body layers (compression) may poll again after the end, which `unfold` panics on
+    builder.body(Body::from_stream(futures_util::StreamExt::fuse(body_stream))).unwrap_or_else(|_| error_page(StatusCode::INTERNAL_SERVER_ERROR, "Invalid response"))
 }
 
 /// Resolves a client reference id (a browser URL) to what the SSR layer imports

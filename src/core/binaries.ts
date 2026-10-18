@@ -34,3 +34,36 @@ export function resolvePrebuiltCompiler(fromDir: string = __dirname): string | n
     return null;
   }
 }
+
+/** Bun releases able to load React's production server build in the worker (1.2.x cannot) */
+const MIN_PRODUCTION_BUN = [1, 3];
+
+function bunVersionAtLeast(version: string, min: number[]): boolean {
+  const [major = 0, minor = 0] = version.split(".").map((p) => parseInt(p, 10) || 0);
+  return major > min[0] || (major === min[0] && minor >= min[1]);
+}
+
+/**
+ * The Bun the engine's worker should run on: the one installed with the CLI (`bun` dependency), else
+ * the Bun running the CLI when it is recent enough. `null` leaves the engine to find one.
+ */
+export function resolveWorkerBun(fromDir: string = __dirname): string | null {
+  try {
+    const req = createRequire(join(fromDir, "noop.js"));
+    const pkg = req.resolve("bun/package.json");
+    for (const name of ["bin/bun.exe", "bin/bun"]) {
+      const bin = join(dirname(pkg), name);
+      if (existsSync(bin)) return bin;
+    }
+  } catch {}
+  const self = process.execPath;
+  if (/[\\/]bun(\.exe)?$/.test(self) && bunVersionAtLeast(Bun.version, MIN_PRODUCTION_BUN)) return self;
+  return null;
+}
+
+/** Environment for engine processes: `COM_BUN` unless the user set it */
+export function engineEnv(): Record<string, string> {
+  if (process.env.COM_BUN) return {};
+  const bun = resolveWorkerBun();
+  return bun ? { COM_BUN: bun } : {};
+}

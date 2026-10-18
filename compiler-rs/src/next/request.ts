@@ -30,6 +30,60 @@ export function setCookies(): SetCookie[] {
   return g.__NATA_SET_COOKIES__ || (g.__NATA_SET_COOKIES__ = []);
 }
 
+/**
+ * What a page render depends on, reported to the engine with the result: a dynamic API used (the page
+ * cannot be prerendered or cached whole), the shortest `revalidate` of its data and its cache tags
+ */
+export interface RenderInfo {
+  dynamic: string | null;
+  revalidate: number | null;
+  tags: string[];
+  forceStatic?: boolean;
+}
+
+export function renderInfo(): RenderInfo {
+  return g.__NATA_RENDER__ || (g.__NATA_RENDER__ = { dynamic: null, revalidate: null, tags: [] });
+}
+
+/** A request-time API was used (`cookies()`, `headers()`, `searchParams`, `fetch` with no-store...) */
+export function markDynamic(reason: string) {
+  const info = renderInfo();
+  if (!info.dynamic) info.dynamic = reason;
+}
+
+/** Data the page used revalidates after `seconds`: so does the page */
+export function noteRevalidate(seconds: number | false | null | undefined) {
+  if (typeof seconds !== "number") return;
+  if (seconds <= 0) return markDynamic("revalidate = 0");
+  const info = renderInfo();
+  info.revalidate = info.revalidate === null ? seconds : Math.min(info.revalidate, seconds);
+}
+
+export function noteTags(tags: string[]) {
+  const info = renderInfo();
+  for (const tag of tags) if (!info.tags.includes(tag)) info.tags.push(tag);
+}
+
+/** `searchParams`, as pages receive it: reading it makes the render dynamic */
+export function dynamicProps<T extends object>(value: T, reason: string): Promise<T> & T {
+  const target = Object.assign(Promise.resolve(value), value) as Promise<T> & T;
+  return new Proxy(target, {
+    get(t, prop, receiver) {
+      if (typeof prop === "string" && prop !== "$$typeof" && prop !== "toJSON") markDynamic(reason);
+      const v = Reflect.get(t, prop, receiver);
+      return typeof v === "function" && (prop === "then" || prop === "catch" || prop === "finally") ? v.bind(t) : v;
+    },
+    has(t, prop) {
+      markDynamic(reason);
+      return Reflect.has(t, prop);
+    },
+    ownKeys(t) {
+      markDynamic(reason);
+      return Reflect.ownKeys(t);
+    },
+  });
+}
+
 /** Callbacks registered with `after()`, run once the response has been sent */
 export function afterQueue(): Array<() => unknown> {
   return g.__NATA_AFTER__ || (g.__NATA_AFTER__ = []);

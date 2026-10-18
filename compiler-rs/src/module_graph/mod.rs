@@ -266,7 +266,7 @@ pub fn compile(root: &Path, file: &Path, layer: Layer, source: &str) -> Result<C
     let cache = CompileCache::for_root(&root);
     let refresh = layer == Layer::Client && !rel.contains("node_modules/") && refresh_enabled() && crate::framework_react::package_version(&root, "react-refresh").is_some();
     // Browser modules use the production JSX runtime with production dependencies
-    let development = layer != Layer::Client || crate::deps::deps_node_env() == "development";
+    let development = !crate::mode::is_production() && (layer != Layer::Client || crate::deps::deps_node_env() == "development");
     let cache_key = CompileCache::key(
         &format!("{}#{}#{}#{}#{}", rel, layer.as_str(), package_specifier.as_deref().unwrap_or(""), refresh, development),
         source,

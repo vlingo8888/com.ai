@@ -98,7 +98,7 @@ process.exit = ((code?: number) => {
 
 // ---------- request-scoped globals ----------
 
-const REQUEST_GLOBALS = ["__NATA_COOKIES__", "__NATA_SET_COOKIES__", "__NATA_QUERY_LOGS__", "__NATA_PARAMS__", "__NATA_LOCATION__", "__NATA_REVALIDATED__", "__NATA_HEADERS__", "__NATA_AFTER__", "__NATA_SEGMENT_CONFIG__", "__NATA_INTL_LOCALE__"] as const;
+const REQUEST_GLOBALS = ["__NATA_COOKIES__", "__NATA_SET_COOKIES__", "__NATA_QUERY_LOGS__", "__NATA_PARAMS__", "__NATA_LOCATION__", "__NATA_REVALIDATED__", "__NATA_HEADERS__", "__NATA_AFTER__", "__NATA_SEGMENT_CONFIG__", "__NATA_INTL_LOCALE__", "__NATA_RENDER__"] as const;
 const freshGlobals = (): Record<string, unknown> => ({
   __NATA_COOKIES__: new Map<string, string>(),
   __NATA_SET_COOKIES__: [],
@@ -110,6 +110,7 @@ const freshGlobals = (): Record<string, unknown> => ({
   __NATA_AFTER__: [],
   __NATA_SEGMENT_CONFIG__: {},
   __NATA_INTL_LOCALE__: null,
+  __NATA_RENDER__: null,
 });
 const processGlobals = freshGlobals();
 
@@ -367,6 +368,10 @@ async function runCommand(cmd: string, input: any, body: Uint8Array): Promise<Ha
       const { renderRoute } = await import(join(nataDir, "rsc_render.ts"));
       return await renderRoute(input);
     }
+    case "static_params": {
+      const rsc = await import(input.runtime);
+      return { output: await rsc.staticParams(input.specifiers) };
+    }
     case "instrumentation": {
       // instrumentation.ts: register() once per worker, before any request; onRequestError for later
       const mod = await import(input.specifier);
@@ -479,7 +484,7 @@ async function buildStylesheet(input: { entry: string | null; css: string }) {
   const ignored = [".nata/**", "node_modules/**", "data/**"].map((pattern) => ({ base: cwd, pattern, negated: true }));
   const scanner = new tw.Scanner({ sources: [...sources, ...compiler.sources, ...ignored] });
   const built = compiler.build(scanner.scan());
-  const css = tw.optimize(built, { file: from, minify: false }).code;
+  const css = tw.optimize(built, { file: from, minify: process.env.NODE_ENV === "production" }).code;
 
   const depList = [...dependencies];
   stylesheetCache = { input: input.css, dependencies: depList, stamp: stamp(depList), css };
@@ -503,6 +508,9 @@ async function handleRequest(id: number, meta: any, body: Uint8Array) {
     responseBody = handled.body ?? responseBody;
     const code = store.exitCode ?? handled.code ?? 0;
     result = { ok: true, output: handled.output ?? null, code };
+    // Streamed pages: whether the render used dynamic APIs, its revalidate time and cache tags
+    // (prerendering at build time and the page cache of `com start`, see next/request.ts)
+    if (handled.head !== undefined && store.globals.__NATA_RENDER__) result.render = store.globals.__NATA_RENDER__;
   } catch (err: any) {
     store.stderr.push(String(err?.stack || err?.message || err) + "\n");
     result = { ok: false, code: 1, error: String(err?.message || err) };

@@ -16,6 +16,10 @@ import {
 import { loginCommand, logoutCommand, whoamiCommand } from "../src/commands/login";
 import { saveCommand } from "../src/commands/save";
 import { publishCommand } from "../src/commands/publish";
+import { lintCommand, typecheck } from "../src/commands/lint";
+import { doctorCommand, infoCommand } from "../src/commands/doctor";
+import { startCommand } from "../src/commands/start";
+import { resolve } from "path";
 import { logger, colors } from "../src/core/logger";
 import packageJson from "../package.json";
 
@@ -33,7 +37,12 @@ function printHelp() {
     ${colors.green}clone${colors.reset}  ${colors.sky}<viewId>${colors.reset}       Download project source code by View ID
     ${colors.green}dev${colors.reset}                   Start local development server with Hot Reload
     ${colors.green}tunnel${colors.reset}                Expose local port to the internet via tunnel-rs
-    ${colors.green}build${colors.reset}                 Package project for Production or Zalo Mini App
+    ${colors.green}build${colors.reset}                 Production build (.nata/build) or Zalo Mini App package
+    ${colors.green}start${colors.reset}                 Serve the production build (after com build)
+    ${colors.green}lint${colors.reset}  ${colors.sky}[paths]${colors.reset}        Lint with oxlint (React + Next.js rules); --fix, --types
+    ${colors.green}typecheck${colors.reset}             Type check the project (tsc --noEmit)
+    ${colors.green}doctor${colors.reset}                Check Bun, engine, port, env and unsupported config
+    ${colors.green}info${colors.reset}                  Print system and project versions (for bug reports)
     ${colors.green}test | t${colors.reset}  ${colors.sky}[pattern]${colors.reset}   Run unit, integration & component tests with Bun Test
     ${colors.green}sync | pull${colors.reset}             Sync database schema, types/db.d.ts, AGENTS.md & dependencies
     ${colors.green}db pull | db sync${colors.reset}     Introspect database schema & generate types/db.d.ts for AI
@@ -238,8 +247,20 @@ async function main() {
       break;
     }
 
-    case "dev":
     case "start": {
+      let dir: string | undefined;
+      let port: string | undefined;
+      let hostname: string | undefined;
+      for (let i = 1; i < args.length; i++) {
+        if ((args[i] === "--port" || args[i] === "-p") && args[i + 1]) port = args[++i];
+        else if (args[i] === "--dir" && args[i + 1]) dir = args[++i];
+        else if ((args[i] === "--hostname" || args[i] === "-H") && args[i + 1]) hostname = args[++i];
+      }
+      await startCommand({ dir, port, hostname });
+      break;
+    }
+
+    case "dev": {
       let port: string | undefined;
       let dir: string | undefined;
       let engine: "rust" | "bun" | undefined;
@@ -315,6 +336,43 @@ async function main() {
         }
       }
       await buildCommand({ dir, target, outDir });
+      break;
+    }
+
+    case "doctor":
+    case "info": {
+      let dir: string | undefined;
+      let port: number | undefined;
+      const json = args.includes("--json");
+      for (let i = 1; i < args.length; i++) {
+        if (args[i] === "--dir" && args[i + 1]) dir = args[++i];
+        else if ((args[i] === "--port" || args[i] === "-p") && args[i + 1]) port = parseInt(args[++i], 10);
+      }
+      if (command === "doctor") await doctorCommand({ dir, json, port });
+      else await infoCommand({ dir, json });
+      break;
+    }
+
+    case "lint":
+    case "typecheck": {
+      let dir: string | undefined;
+      const paths: string[] = [];
+      let fix = false;
+      let json = false;
+      let types = command === "typecheck";
+      for (let i = 1; i < args.length; i++) {
+        if (args[i] === "--dir" && args[i + 1]) dir = args[++i];
+        else if (args[i] === "--fix") fix = true;
+        else if (args[i] === "--json") json = true;
+        else if (args[i] === "--types") types = true;
+        else if (!args[i].startsWith("-")) paths.push(args[i]);
+      }
+      if (command === "typecheck") {
+        const code = await typecheck(resolve(process.cwd(), dir || "."));
+        if (code !== 0) process.exit(code);
+      } else {
+        await lintCommand({ dir, paths, fix, json, types });
+      }
       break;
     }
 
