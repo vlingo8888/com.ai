@@ -112,10 +112,11 @@ export async function cloneView(viewIdArg: string | number, options: CloneOption
   // Step 5: Save local config & auxiliary files
   saveLocalViewConfig(targetDir, {
     viewId,
-    apiUrl: options.api || "https://base.myworkbeast.com",
+    apiUrl: client.baseUrl,
     name: viewDetails?.name || `View ${viewId}`,
     dbCode: viewDetails?.db_code,
     clonedAt: new Date().toISOString(),
+    remoteUpdatedAt: rawData.updated_at,
     files: fileConfigs,
   });
 

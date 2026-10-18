@@ -51,7 +51,7 @@ function printHelp() {
     ${colors.green}db search${colors.reset} ${colors.sky}<query>${colors.reset}    Search database tables and columns by keyword
     ${colors.green}migrate${colors.reset}  ${colors.sky}<sql|file>${colors.reset}  Execute SQL migration and auto-sync database schema
     ${colors.green}version | -v${colors.reset}          Display system, CLI, and runtime engine versions
-    ${colors.green}push | save${colors.reset}           Synchronize local changes back to the Cloud
+    ${colors.green}push | save${colors.reset}           Save local changes to the Cloud (not published; --dry-run, --force)
     ${colors.green}publish${colors.reset}       ${colors.sky}[viewId]${colors.reset}       Publish View to Production & activate public live endpoint
 
   ${colors.bold}${colors.white}OPTIONS:${colors.reset}
@@ -546,6 +546,7 @@ async function main() {
       for (let i = 1; i < args.length; i++) {
         if ((args[i] === "--dir" || args[i] === "-d") && args[i + 1]) {
           dir = args[++i];
+      let force = false;
         } else if (args[i] === "--api" && args[i + 1]) {
           api = args[++i];
         } else if (args[i] === "--token" && args[i + 1]) {
@@ -557,7 +558,9 @@ async function main() {
         }
       }
 
-      await saveCommand({ dir, api, token, viewId, dryRun });
+      await saveCommand({ dir, api, token, viewId, dryRun, force });
+        } else if (args[i] === "--force" || args[i] === "-f") {
+          force = true;
       break;
     }
 

@@ -2,6 +2,8 @@ import { getGlobalConfig } from "./config";
 
 export interface ViewRawFilesResponse {
   id: number;
+  /** Server version of the files; sent back as `baseUpdatedAt` on save. */
+  updated_at?: string;
   files: Array<{
     path: string;
     content: string;
@@ -24,6 +26,38 @@ export interface ViewDetailsResponse {
   }>;
 }
 
+export interface SaveViewOptions {
+  name?: string;
+  description?: string;
+  /** "merge" keeps server files that are not sent; omitted means the server replaces every file. */
+  mode?: "merge";
+  /** Paths to remove in merge mode. */
+  deleted?: string[];
+  /** Rejects the save with 409 when the server changed since this version. */
+  baseUpdatedAt?: string;
+  force?: boolean;
+}
+
+export interface SaveViewResponse {
+  success: boolean;
+  id: number;
+  files_count?: number;
+  updated_at?: string;
+  /** Echoed by servers that support merge saves. */
+  mode?: "merge" | "replace";
+  revision_id?: number | null;
+  ws6_snapshot_revision_id?: number | null;
+  realtime?: "reset" | "unavailable" | "disabled";
+}
+
+/** The view changed on the server since `baseUpdatedAt`. */
+export class SaveConflictError extends Error {
+  constructor(public readonly updatedAt?: string) {
+    super("View was changed on the server since your last clone/save");
+    this.name = "SaveConflictError";
+  }
+}
+
 export class NataApiClient {
   private apiUrl: string;
   private token?: string;
@@ -32,6 +66,14 @@ export class NataApiClient {
     const config = getGlobalConfig();
     this.apiUrl = (apiUrl || config.apiUrl || "https://base.myworkbeast.com").replace(/\/$/, "");
     this.token = token || config.token;
+  }
+
+  get baseUrl(): string {
+    return this.apiUrl;
+  }
+
+  get hasToken(): boolean {
+    return !!this.token;
   }
 
   private getHeaders(): HeadersInit {
@@ -110,14 +152,18 @@ export class NataApiClient {
   async saveViewRawFiles(
     viewId: number | string,
     files: Array<{ path: string; content: string }>,
-    options: { name?: string; description?: string } = {}
-  ): Promise<{ success: boolean; id: number; files_count?: number }> {
+    options: SaveViewOptions = {}
+  ): Promise<SaveViewResponse> {
     const rawFilesUrl = `${this.apiUrl}/api/views/${viewId}/raw_files`;
     const payload = {
       files,
       name: options.name,
       description: options.description,
       code: JSON.stringify({ files }),
+      mode: options.mode,
+      deleted: options.deleted,
+      base_updated_at: options.baseUpdatedAt,
+      force: options.force,
     };
 
     // 1. Try POST /api/views/:id/raw_files
@@ -145,6 +191,11 @@ export class NataApiClient {
         headers: this.getHeaders(),
         body: JSON.stringify(payload),
       });
+    }
+
+    if (res.status === 409) {
+      const body = await res.json().catch(() => ({}));
+      throw new SaveConflictError(body?.updated_at);
     }
 
     if (!res.ok) {

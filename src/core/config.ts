@@ -19,6 +19,8 @@ export interface LocalViewConfig {
   dbCode?: string;
   clonedAt: string;
   lastSyncedAt?: string;
+  /** Server `updated_at` of the files as of the last clone/save. */
+  remoteUpdatedAt?: string;
   files: Array<{
     path: string;
     checksum?: string;
