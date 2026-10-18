@@ -701,6 +701,28 @@ fn test_141_to_160_ensure_runtime_env() {
     let _ = fs::remove_dir_all(&tmp);
 }
 
+#[test]
+fn test_ensure_runtime_env_keeps_installed_zmp_sdk() {
+    let tmp = setup_test_project("runtime_env_zmp");
+    let nm_zmp = tmp.join("node_modules/zmp-sdk");
+    fs::create_dir_all(nm_zmp.join("apis")).unwrap();
+    fs::write(nm_zmp.join("package.json"), r#"{"name":"zmp-sdk","version":"2.53.2"}"#).unwrap();
+    fs::write(nm_zmp.join("index.js"), "// real zmp-sdk").unwrap();
+    fs::write(nm_zmp.join("apis/index.js"), "export { chooseImage } from './chooseImage.js';").unwrap();
+
+    RpcExecutor::ensure_runtime_env(&tmp);
+
+    assert_eq!(fs::read_to_string(nm_zmp.join("index.js")).unwrap(), "// real zmp-sdk");
+    assert!(fs::read_to_string(nm_zmp.join("apis/index.js")).unwrap().contains("chooseImage"));
+
+    // Not installed: nothing is faked either
+    let bare = setup_test_project("runtime_env_no_zmp");
+    RpcExecutor::ensure_runtime_env(&bare);
+    assert!(!bare.join("node_modules/zmp-sdk").exists());
+    let _ = fs::remove_dir_all(&bare);
+    let _ = fs::remove_dir_all(&tmp);
+}
+
 // -----------------------------------------------------------------------------
 // SECTION 5: RPC Payload & Serialization Edge Cases (40 testcases)
 // -----------------------------------------------------------------------------

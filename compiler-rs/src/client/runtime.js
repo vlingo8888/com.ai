@@ -1,6 +1,6 @@
 // Imported first so module load failures below are still reported in the overlay
 import { reportIssue, clearBlockingErrors } from "./overlay.js";
-import { renderLogs } from "./debug.js";
+import { mountDebugUi, renderLogs } from "./debug.js";
 import React from "react";
 import ReactDOM from "react-dom/client";
 
@@ -527,6 +527,8 @@ async function renderRoute(entryStr, layoutFiles, params = {}, timestamp = null,
           currentRoot = ReactDOM.createRoot(rootEl);
           currentRoot.render(React.createElement(RootComponent, routeProps));
         }
+        if (window.requestIdleCallback) window.requestIdleCallback(mountDebugUi);
+        else setTimeout(mountDebugUi, 200);
       } else {
         currentRoot.render(React.createElement(RootComponent, routeProps));
       }

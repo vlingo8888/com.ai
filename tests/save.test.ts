@@ -91,17 +91,19 @@ describe("API Client - saveViewRawFiles", () => {
     }
   });
 
-  it("should trigger publish endpoint with viewId", async () => {
+  it("should trigger the Publish V2 endpoint with view_id", async () => {
     let capturedMethod = "";
+    let capturedPath = "";
     let capturedBody: any = null;
 
     const mockServer = Bun.serve({
       port: 0,
       fetch(req) {
         capturedMethod = req.method;
+        capturedPath = new URL(req.url).pathname;
         return req.json().then((body) => {
           capturedBody = body;
-          return Response.json({ success: true, viewId: body.viewId || body.view_id });
+          return Response.json({ success: true, viewId: body.view_id });
         });
       },
     });
@@ -111,8 +113,9 @@ describe("API Client - saveViewRawFiles", () => {
       const res = await client.publishView(888, { domain: "demo.com.ai.vn" });
 
       expect(capturedMethod).toBe("POST");
+      expect(capturedPath).toBe("/api/views/publish/v2");
       expect(capturedBody).toBeDefined();
-      expect(capturedBody.viewId).toBe(888);
+      expect(capturedBody.view_id).toBe(888);
       expect(capturedBody.domain).toBe("demo.com.ai.vn");
       expect(res.success).toBe(true);
       expect(res.viewId).toBe(888);

@@ -11,6 +11,14 @@ export interface TunnelOptions {
   server?: string;
   provider?: "123c" | "rs";
   showQr?: boolean;
+  /** tunnel-rs only: fall back to a mini.123c.vn tunnel when tunnel-rs cannot connect (default true) */
+  fallback?: boolean;
+}
+
+export interface TunnelHandle {
+  publicUrl: string;
+  subdomain: string;
+  proc: any;
 }
 
 export function printTunnelQrCode(url: string, title = "QUÉT MÃ QR BẰNG ZALO HOẶC CAMERA ĐỂ MỞ TRÊN ĐIỆN THOẠI") {
@@ -40,12 +48,13 @@ export async function start123cTunnel(options: TunnelOptions = {}): Promise<{
     let resolved = false;
     const proc = Bun.spawn(args, {
       stdout: "pipe",
-      stderr: "pipe",
+      stderr: "ignore",
     });
 
     const timeout = setTimeout(() => {
       if (!resolved) {
         resolved = true;
+        proc.kill();
         reject(new Error("Timeout connecting to official Zalo tunnel server (mini.123c.vn)"));
       }
     }, 15000);
@@ -218,9 +227,102 @@ export async function startTunnelBackground(options: TunnelOptions = {}): Promis
       })();
     });
   } catch (err: any) {
+    if (options.fallback === false) throw err;
     logger.warn(`tunnel-rs unavailable (${err.message}), falling back to official mini.123c.vn tunnel...`);
     return await start123cTunnel(options);
   }
+}
+
+/** Dev server endpoint that always answers 200 locally; used to tell a dead tunnel from a missing page */
+const HEALTH_PATH = "/_nata/hmr_version";
+const HEALTH_INTERVAL_MS = 20_000;
+
+async function probe(url: string): Promise<boolean> {
+  try {
+    const res = await fetch(url, { signal: AbortSignal.timeout(10_000), headers: { "bypass-tunnel-reminder": "1" } });
+    await res.arrayBuffer().catch(() => {});
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Keeps a dev tunnel alive. The public URL is baked into the Zalo bootstrap (COM_BACKEND_URL) and the
+ * QR code, so a tunnel that silently drops leaves the app hanging on requests that never arrive. The
+ * client is restarted when its process exits, or when the relay stops forwarding (the public health
+ * check fails twice while the local one passes); it asks for the same subdomain so the URL stays valid.
+ */
+export function superviseTunnel(
+  initial: TunnelHandle,
+  options: TunnelOptions & { label: string },
+): { current: () => TunnelHandle; stop: () => void } {
+  const port = String(options.port || 3000);
+  let current = initial;
+  let stopped = false;
+  let failures = 0;
+  let restarting = false;
+
+  const restart = async () => {
+    if (stopped || restarting) return;
+    restarting = true;
+    try { current.proc?.kill(); } catch {}
+    // Let the relay release the old subdomain, otherwise it hands out a random one
+    await Bun.sleep(2000);
+    for (let attempt = 1; !stopped; attempt++) {
+      try {
+        const next = await startTunnelBackground({ ...options, subdomain: current.subdomain || options.subdomain });
+        if (stopped) { try { next.proc?.kill(); } catch {} return; }
+        if (next.publicUrl !== current.publicUrl) {
+          logger.warn(`${options.label} tunnel reconnected on a NEW URL ${next.publicUrl} (was ${current.publicUrl}); restart \`com dev\` so the app and QR code use it`);
+        } else {
+          logger.success(`${options.label} tunnel reconnected: ${next.publicUrl}`);
+        }
+        current = next;
+        failures = 0;
+        watchExit(next);
+        break;
+      } catch (err: any) {
+        const delay = Math.min(30_000, 1000 * 2 ** attempt);
+        logger.warn(`${options.label} tunnel reconnect failed (${err.message}); retrying in ${delay / 1000}s`);
+        await Bun.sleep(delay);
+      }
+    }
+    restarting = false;
+  };
+
+  const watchExit = (handle: TunnelHandle) => {
+    handle.proc?.exited?.then(() => {
+      if (stopped || handle !== current) return;
+      logger.warn(`${options.label} tunnel process exited; reconnecting...`);
+      restart();
+    });
+  };
+  watchExit(initial);
+
+  const timer = setInterval(async () => {
+    if (stopped || restarting) return;
+    const handle = current;
+    if (await probe(handle.publicUrl + HEALTH_PATH)) { failures = 0; return; }
+    // The dev server itself is down or restarting: not the tunnel's fault
+    if (!(await probe(`http://localhost:${port}${HEALTH_PATH}`))) return;
+    if (handle !== current) return;
+    if (++failures >= 2) {
+      logger.warn(`${options.label} tunnel ${handle.publicUrl} stopped forwarding requests; reconnecting...`);
+      failures = 0;
+      restart();
+    }
+  }, HEALTH_INTERVAL_MS);
+  timer.unref?.();
+
+  const stop = () => {
+    stopped = true;
+    clearInterval(timer);
+    try { current.proc?.kill(); } catch {}
+  };
+  process.once("exit", stop);
+
+  return { current: () => current, stop };
 }
 
 export async function tunnelCommand(options: TunnelOptions = {}) {

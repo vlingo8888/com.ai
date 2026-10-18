@@ -3,6 +3,21 @@
 pub struct ZmpMockBridge;
 
 impl ZmpMockBridge {
+    /// Opt-in only (`com dev --zmp-mock`, i.e. COM_ZMP_MOCK=1): the app talks to the real `zmp-sdk`
+    /// by default, and a fake `window.ZMP` would hide what the SDK actually does
+    pub fn enabled() -> bool {
+        std::env::var("COM_ZMP_MOCK").is_ok_and(|v| v == "1" || v == "true")
+    }
+
+    /// `<script>` installing the mock bridge when it is enabled, empty otherwise
+    pub fn script_tag() -> String {
+        if Self::enabled() {
+            format!("<script>{}</script>", Self::get_browser_mock_script())
+        } else {
+            String::new()
+        }
+    }
+
     /// Returns the client-side JavaScript snippet that initializes the ZMP Mock SDK
     pub fn get_browser_mock_script() -> &'static str {
         r#"
@@ -114,5 +129,17 @@ impl ZmpMockBridge {
   window.__ZMP_SIMULATOR__ = true;
 })();
 "#
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_mock_bridge_is_opt_in() {
+        if std::env::var("COM_ZMP_MOCK").is_err() {
+            assert_eq!(ZmpMockBridge::script_tag(), "");
+        }
     }
 }

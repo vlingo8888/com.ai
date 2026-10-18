@@ -52,7 +52,7 @@ function printHelp() {
     ${colors.green}migrate${colors.reset}  ${colors.sky}<sql|file>${colors.reset}  Execute SQL migration and auto-sync database schema
     ${colors.green}version | -v${colors.reset}          Display system, CLI, and runtime engine versions
     ${colors.green}push | save${colors.reset}           Save local changes to the Cloud (not published; --dry-run, --force)
-    ${colors.green}publish${colors.reset}       ${colors.sky}[viewId]${colors.reset}       Publish View to Production & activate public live endpoint
+    ${colors.green}publish${colors.reset}       ${colors.sky}[viewId]${colors.reset}       Publish View to Production (Publish V2, like the web editor)
 
   ${colors.bold}${colors.white}OPTIONS:${colors.reset}
     ${colors.yellow}--watch, -w${colors.reset}            Watch files for changes and re-run tests
@@ -64,6 +64,8 @@ function printHelp() {
     ${colors.yellow}--tunnel, -T${colors.reset}                  Auto-create public tunnel & QR code during dev
     ${colors.yellow}--provider, -P${colors.reset} ${colors.darkGray}<123c|rs>${colors.reset} Tunnel provider (default: 123c for Zalo, rs for Web)
     ${colors.yellow}--subdomain, -s${colors.reset} ${colors.darkGray}<name>${colors.reset}   Custom subdomain for tunnel
+    ${colors.yellow}--eruda${colors.reset}                       Load the Eruda mobile console in the Zalo app (or open with ?eruda)
+    ${colors.yellow}--zmp-mock${colors.reset}                    Fake Zalo bridge (window.ZMP) in the browser preview; default is the real zmp-sdk
     ${colors.yellow}--dir${colors.reset}        ${colors.darkGray}<path>${colors.reset}     Target directory (default: current directory)
     ${colors.yellow}--port, -p${colors.reset}   ${colors.darkGray}<port>${colors.reset}     Port to listen on in dev mode (default: 3000)
     ${colors.yellow}--api${colors.reset}        ${colors.darkGray}<url>${colors.reset}      Custom backend API URL (default: https://base.myworkbeast.com)
@@ -269,6 +271,8 @@ async function main() {
       let provider: "123c" | "rs" | undefined;
       let subdomain: string | undefined;
       let server: string | undefined;
+      let eruda = false;
+      let zmpMock = false;
       for (let i = 1; i < args.length; i++) {
         if ((args[i] === "--port" || args[i] === "-p") && args[i + 1]) {
           port = args[++i];
@@ -291,9 +295,13 @@ async function main() {
           subdomain = args[++i];
         } else if (args[i] === "--server" && args[i + 1]) {
           server = args[++i];
+        } else if (args[i] === "--eruda") {
+          eruda = true;
+        } else if (args[i] === "--zmp-mock") {
+          zmpMock = true;
         }
       }
-      await devCommand({ port, dir, engine, target, tunnel, subdomain, server, provider });
+      await devCommand({ port, dir, engine, target, tunnel, subdomain, server, provider, eruda, zmpMock });
       break;
     }
 
@@ -542,11 +550,11 @@ async function main() {
       let api: string | undefined;
       let token: string | undefined;
       let dryRun = false;
+      let force = false;
 
       for (let i = 1; i < args.length; i++) {
         if ((args[i] === "--dir" || args[i] === "-d") && args[i + 1]) {
           dir = args[++i];
-      let force = false;
         } else if (args[i] === "--api" && args[i + 1]) {
           api = args[++i];
         } else if (args[i] === "--token" && args[i + 1]) {
@@ -555,12 +563,12 @@ async function main() {
           viewId = args[++i];
         } else if (args[i] === "--dry-run" || args[i] === "-n") {
           dryRun = true;
+        } else if (args[i] === "--force" || args[i] === "-f") {
+          force = true;
         }
       }
 
       await saveCommand({ dir, api, token, viewId, dryRun, force });
-        } else if (args[i] === "--force" || args[i] === "-f") {
-          force = true;
       break;
     }
 

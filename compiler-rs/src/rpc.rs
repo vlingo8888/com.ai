@@ -223,7 +223,8 @@ function createDbInstance(): Kysely<any> {
         pool: new Pool({
           connectionString: dbUrl,
           max: 5,
-          idleTimeoutMillis: 1000,
+          // A remote database costs a TCP + TLS + auth round trip per new connection: keep them warm
+          idleTimeoutMillis: 30000,
           connectionTimeoutMillis: 5000,
         }),
       });
@@ -816,46 +817,8 @@ module.exports = new Proxy({}, {
         let _ = std::fs::create_dir_all(&nm_next_font_local);
         let _ = std::fs::write(nm_next_font_local.join("index.js"), nm_font_code);
 
-        // 6. Ensure node_modules/zmp-sdk and zmp-sdk/apis shims exist
-        let nm_zmp = root.join("node_modules").join("zmp-sdk");
-        let _ = std::fs::create_dir_all(&nm_zmp);
-        let _ = std::fs::create_dir_all(nm_zmp.join("apis"));
-        let zmp_shim_code = r#"const mockUser = { id: "123456789", name: "Zalo Tester", avatar: "https://h5.zdn.vn/static/images/avatar.png" };
-exports.getUserInfo = async () => ({ userInfo: mockUser });
-exports.getPhoneNumber = async () => ({ number: "0912345678" });
-exports.getSetting = async () => ({ authSetting: { "scope.userInfo": true, "scope.userLocation": true, "scope.userPhonenumber": true } });
-exports.authorize = async () => ({ success: true });
-exports.getLocation = async () => ({ latitude: 10.7769, longitude: 106.7009 });
-exports.openChat = async () => ({ success: true });
-exports.followOA = async () => ({ success: true });
-exports.createOrder = async () => ({ orderId: "order_123", success: true });
-exports.closeApp = async () => ({ success: true });
-exports.showToast = async () => ({ success: true });
-exports.getStorage = async () => ({ data: null });
-exports.setStorage = async () => ({ success: true });
-exports.removeStorage = async () => ({ success: true });
-exports.clearStorage = async () => ({ success: true });
-exports.getSystemInfo = async () => ({ platform: "browser", system: "Web", windowWidth: 390, windowHeight: 844 });
-exports.default = {
-  getUserInfo: exports.getUserInfo,
-  getPhoneNumber: exports.getPhoneNumber,
-  getSetting: exports.getSetting,
-  authorize: exports.authorize,
-  getLocation: exports.getLocation,
-  openChat: exports.openChat,
-  followOA: exports.followOA,
-  createOrder: exports.createOrder,
-  closeApp: exports.closeApp,
-  showToast: exports.showToast,
-  getStorage: exports.getStorage,
-  setStorage: exports.setStorage,
-  removeStorage: exports.removeStorage,
-  clearStorage: exports.clearStorage,
-  getSystemInfo: exports.getSystemInfo,
-};
-"#;
-        let _ = std::fs::write(nm_zmp.join("index.js"), zmp_shim_code);
-        let _ = std::fs::write(nm_zmp.join("apis").join("index.js"), zmp_shim_code);
+        // 6. zmp-sdk is never shimmed: the project uses the real SDK it installed (a fake one in
+        // node_modules silently replaced APIs such as chooseImage with stubs)
 
         // 7. Ensure tsconfig.json has paths configured
         let tsconfig_path = root.join("tsconfig.json");

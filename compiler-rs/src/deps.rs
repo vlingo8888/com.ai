@@ -46,7 +46,8 @@ pub fn installed_version(root: &Path, name: &str) -> Option<String> {
 }
 
 /// Bumped whenever the bundler's output changes, so bundles cached by an older engine are rebuilt
-const BUNDLE_FORMAT: &str = "v4";
+/// (v5: older engines bundled a fake zmp-sdk written into node_modules)
+const BUNDLE_FORMAT: &str = "v5";
 
 /// Where the bundled module for `spec` at `version` is cached
 pub fn cache_path(root: &Path, spec: &str, version: &str) -> PathBuf {
@@ -299,10 +300,10 @@ mod tests {
     #[test]
     fn cache_path_is_versioned_per_subpath() {
         let root = Path::new("/p");
-        assert_eq!(cache_path(root, "react", "19.1.0"), Path::new("/p/.nata/deps/v4/react@19.1.0/index.js"));
+        assert_eq!(cache_path(root, "react", "19.1.0"), Path::new("/p/.nata/deps/v5/react@19.1.0/index.js"));
         assert_eq!(
             cache_path(root, "@hookform/resolvers/zod", "3.9.0"),
-            Path::new("/p/.nata/deps/v4/@hookform__resolvers@3.9.0/zod.js")
+            Path::new("/p/.nata/deps/v5/@hookform__resolvers@3.9.0/zod.js")
         );
     }
 }

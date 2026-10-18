@@ -262,11 +262,7 @@ pub fn head_start(root: &Path, stylesheet_tags: &str, target: &str) -> String {
         .replace("</", "<\\/");
     let images = serde_json::to_string(&images_client_config(root)).unwrap_or_else(|_| "{}".into()).replace("</", "<\\/");
     let backend = serde_json::to_string(&std::env::var("COM_BACKEND_URL").unwrap_or_default()).unwrap_or_default();
-    let zmp = if target == "zalo" {
-        format!("<script>{}</script>", crate::zmp::ZmpMockBridge::get_browser_mock_script())
-    } else {
-        String::new()
-    };
+    let zmp = if target == "zalo" { crate::zmp::ZmpMockBridge::script_tag() } else { String::new() };
     format!(
         "<meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
          <script>window.__NATA_CONFIG__={config};window.__NATA_IMAGES__={images};window.__COM_BACKEND_URL__={backend};self.__nata_f=self.__nata_f||[];</script>\

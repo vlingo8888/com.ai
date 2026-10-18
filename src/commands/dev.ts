@@ -2,7 +2,7 @@ import { existsSync, readFileSync, readdirSync, writeFileSync, mkdirSync } from 
 import { join, resolve } from "path";
 import { createConnection, createServer } from "net";
 import { logger, colors } from "../core/logger";
-import { startTunnelBackground, printTunnelQrCode } from "./tunnel";
+import { startTunnelBackground, superviseTunnel, printTunnelQrCode } from "./tunnel";
 import { exeName, resolvePrebuiltCompiler, compilerPackageName, engineEnv } from "../core/binaries";
 import packageJson from "../../package.json";
 
@@ -55,6 +55,10 @@ export interface DevOptions {
   provider?: "123c" | "rs";
   subdomain?: string;
   server?: string;
+  /** Load the Eruda mobile console in the Zalo bootstrap */
+  eruda?: boolean;
+  /** Install the fake `window.ZMP` bridge in the browser preview instead of relying on the real zmp-sdk */
+  zmpMock?: boolean;
 }
 
 export function isZaloMiniAppProject(projectDir: string): boolean {
@@ -450,28 +454,23 @@ export async function devCommand(options: DevOptions = {}) {
 
   if (isTunnel) {
     if (target === "zalo") {
-      // 1. Zalo Mini App frontend tunnel via 123c (so Zalo mobile webview can load the app)
-      try {
-        const zTunnel = await startTunnelBackground({
-          port,
-          subdomain: options.subdomain,
-          provider: "123c",
-        });
-        zaloTunnelUrl = zTunnel.publicUrl;
-      } catch (err: any) {
-        logger.warn(`Could not start Zalo 123c tunnel: ${err.message}`);
+      // Both tunnels connect at the same time: 1. the Zalo Mini App frontend tunnel via 123c (so the
+      // Zalo mobile webview can load the app), 2. the backend tunnel via tunnel-rs for API / RPC calls.
+      // tunnel-rs gets no 123c fallback: the Zalo tunnel already is one, a second only adds a process
+      const [zTunnel, bTunnel] = await Promise.allSettled([
+        startTunnelBackground({ port, subdomain: options.subdomain, provider: "123c" }),
+        startTunnelBackground({ port, server: options.server, provider: "rs", fallback: false }),
+      ]);
+      if (zTunnel.status === "fulfilled") {
+        zaloTunnelUrl = zTunnel.value.publicUrl;
+        superviseTunnel(zTunnel.value, { port, provider: "123c", label: "Zalo" });
+      } else {
+        logger.warn(`Could not start Zalo 123c tunnel: ${zTunnel.reason?.message}`);
       }
-
-      // 2. High-performance backend tunnel via tunnel-rs (tunnel.myworkbeast.com) so Zalo calls backend APIs / RPC
-      try {
-        const bTunnel = await startTunnelBackground({
-          port,
-          server: options.server,
-          provider: "rs",
-        });
-        backendTunnelUrl = bTunnel.publicUrl;
-      } catch (err: any) {
-        // Fallback to zaloTunnelUrl if tunnel-rs relay fails
+      if (bTunnel.status === "fulfilled") {
+        backendTunnelUrl = bTunnel.value.publicUrl;
+        superviseTunnel(bTunnel.value, { port, server: options.server, provider: "rs", fallback: false, label: "Backend" });
+      } else {
         backendTunnelUrl = zaloTunnelUrl;
       }
     } else {
@@ -485,6 +484,7 @@ export async function devCommand(options: DevOptions = {}) {
           provider,
         });
         backendTunnelUrl = tunnel.publicUrl;
+        superviseTunnel(tunnel, { port, server: options.server, provider, label: "Public" });
       } catch (err: any) {
         logger.warn(`Could not start tunnel: ${err.message}`);
       }
@@ -531,6 +531,8 @@ export async function devCommand(options: DevOptions = {}) {
       COM_MANAGED: "1",
       COM_START_TIME: String(Math.round(performance.timeOrigin)),
       COM_BACKEND_URL: effectiveBackendUrl,
+      ...(options.eruda ? { COM_ERUDA: "1" } : {}),
+      ...(options.zmpMock ? { COM_ZMP_MOCK: "1" } : {}),
       NEXT_PUBLIC_API_URL: effectiveBackendUrl,
     },
   });

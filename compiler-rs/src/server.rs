@@ -10,6 +10,7 @@ use axum::{
 };
 use std::{collections::VecDeque, path::PathBuf, sync::Arc};
 use tokio::sync::{broadcast, RwLock};
+use tower_http::compression::Predicate;
 use tower_http::cors::CorsLayer;
 
 use crate::{
@@ -81,7 +82,19 @@ impl DevServer {
         let root_dir = state.root_dir.clone();
         // Start native file system watcher for live HMR & CSS hot reload
         crate::watcher::ProjectWatcher::start(&root_dir, state.hmr_tx.clone(), state.router.clone());
-        let app = Self::app(state, ServeMode::Dev);
+        // Over a tunnel every byte counts (react-dom alone is ~590 KB). Only JS and CSS are compressed:
+        // streamed pages, Flight payloads and Server Action responses must keep flushing chunk by chunk
+        let app = Self::app(state, ServeMode::Dev).layer(
+            tower_http::compression::CompressionLayer::new().br(true).gzip(true).compress_when(
+                tower_http::compression::predicate::SizeAbove::new(1024).and(
+                    |_: axum::http::StatusCode, _: axum::http::Version, headers: &HeaderMap, _: &axum::http::Extensions| {
+                        headers.get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).is_some_and(|ct| {
+                            ct.starts_with("application/javascript") || ct.starts_with("text/javascript") || ct.starts_with("text/css")
+                        })
+                    },
+                ),
+            ),
+        );
 
         // Auto-find next available port if in use
         let mut port = initial_port;
@@ -945,8 +958,10 @@ fn zmp_bootstrap_js(backend_url: &str, tailwind_in_browser: bool) -> String {
     };
   }
 
-  // 4. Inject Mobile DevTools (Eruda) for live on-device debugging
-  if (!window.__eruda_injected) {
+  // 4. Mobile DevTools (Eruda) for on-device debugging: ~500 KB from a CDN, so only on request
+  // (COM_ERUDA=1 / `com dev --eruda`, or `?eruda` in the page URL)
+  var wantEruda = __COM_ERUDA__ || /[?&]eruda\b/.test(window.location.search);
+  if (wantEruda && !window.__eruda_injected) {
     window.__eruda_injected = true;
     var erudaScript = document.createElement("script");
     erudaScript.src = "https://cdn.jsdelivr.net/npm/eruda";
@@ -1057,6 +1072,7 @@ fn zmp_bootstrap_js(backend_url: &str, tailwind_in_browser: bool) -> String {
         .replace("__COM_BACKEND_PLACEHOLDER__", backend_url)
         .replace("__COM_IMPORT_MAP_PLACEHOLDER__", &import_map_js)
         .replace("__COM_TAILWIND_BROWSER__", if tailwind_in_browser { "true" } else { "false" })
+        .replace("__COM_ERUDA__", if std::env::var("COM_ERUDA").is_ok_and(|v| v == "1" || v == "true") { "true" } else { "false" })
         .replace("__COM_RSC__", if crate::module_graph::rsc_enabled() { "true" } else { "false" })
 }
 
@@ -1662,11 +1678,11 @@ async fn loading_placeholder(root: &std::path::Path, segments: &[crate::router::
 }
 
 /// The Zalo Mini App document for the browser preview: the same bootstrap the device runs
-/// (`/assets/app.js`), with the mock Zalo bridge
+/// (`/assets/app.js`), with the mock Zalo bridge when it is enabled (`com dev --zmp-mock`)
 fn zalo_preview_document() -> String {
     format!(
-        "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>Zalo Mini App</title><script>{}</script></head><body><div id=\"app\"></div><script src=\"/assets/app.js\"></script></body></html>",
-        crate::zmp::ZmpMockBridge::get_browser_mock_script()
+        "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>Zalo Mini App</title>{}</head><body><div id=\"app\"></div><script src=\"/assets/app.js\"></script></body></html>",
+        crate::zmp::ZmpMockBridge::script_tag()
     )
 }
 
@@ -2197,6 +2213,9 @@ mod tests {
         assert!(!js.contains("__COM_SERVER_ORIGIN__"));
         assert!(!js.contains("hydrateRoot"));
         assert!(js.contains("if (false && !document.getElementById(\"_zmp_tailwind\"))"));
+        // Eruda only on request
+        assert!(js.contains("var wantEruda = false || /[?&]eruda\\b/.test(window.location.search);"));
+        assert!(!js.contains("__COM_ERUDA__"));
     }
 
     #[test]

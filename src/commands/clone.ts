@@ -125,11 +125,8 @@ export async function cloneView(viewIdArg: string | number, options: CloneOption
     await Bun.write(gitignorePath, "node_modules\n.DS_Store\n.env.local\n.nata\n");
   }
 
-  const envPath = join(targetDir, ".env");
-  if (!existsSync(envPath) && viewDetails?.db_code) {
-    const dbUrl = `postgresql://postgres:postgres@27.71.25.205:5433/${viewDetails.db_code}`;
-    await Bun.write(envPath, `DATABASE_URL="${dbUrl}"\n`);
-  }
+  // No .env with DATABASE_URL: a fresh clone runs on the embedded PGlite until the developer
+  // points it at a database themselves
 
   const readmePath = join(targetDir, "README.md");
   if (!existsSync(readmePath)) {
@@ -157,7 +154,7 @@ export async function cloneView(viewIdArg: string | number, options: CloneOption
   await Bun.write(antigravityRulesPath, agentsGuideContent);
   await Bun.write(agentsGuidePath, agentsGuideContent);
 
-  // Auto-introspect database schema if DATABASE_URL is available
+  // Types of the view's database schema (read only: nothing is written to .env)
   let dbStatusLabel = "No database configured";
   if (viewDetails?.db_code) {
     const dbUrl = `postgresql://postgres:postgres@27.71.25.205:5433/${viewDetails.db_code}`;
@@ -166,7 +163,7 @@ export async function cloneView(viewIdArg: string | number, options: CloneOption
       const res = await introspectAndGenerateSchema(targetDir, dbUrl);
       dbStatusLabel = `${res.tableCount} tables synced (types/db.d.ts)`;
     } catch {
-      dbStatusLabel = "Configured (.env) - Run `com db pull` to sync types";
+      dbStatusLabel = "Could not sync types - set DATABASE_URL in .env, then run `com db pull`";
     }
   }
 

@@ -152,7 +152,8 @@ function createDbInstance(): Kysely<any> {
         pool: new Pool({
           connectionString: dbUrl,
           max: 5,
-          idleTimeoutMillis: 1000,
+          // A remote database costs a TCP + TLS + auth round trip per new connection: keep them warm
+          idleTimeoutMillis: 30000,
           connectionTimeoutMillis: 5000,
         }),
       });

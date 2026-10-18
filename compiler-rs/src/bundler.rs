@@ -107,11 +107,7 @@ impl ClientTransformer {
         .unwrap_or_else(|_| "{}".to_string())
         .replace("</", "<\\/");
 
-        let zmp_script = if target == "zalo" {
-            format!("<script>{}</script>", crate::zmp::ZmpMockBridge::get_browser_mock_script())
-        } else {
-            String::new()
-        };
+        let zmp_script = if target == "zalo" { crate::zmp::ZmpMockBridge::script_tag() } else { String::new() };
 
         let ssr_state_json = serde_json::to_string(ssr_state).unwrap_or_else(|_| "{}".to_string());
         // Server-rendered page, or (when the page renders on the client) the route's loading.tsx rendered on
@@ -164,43 +160,6 @@ impl ClientTransformer {
 </head>
 <body>
   {root_content}
-
-  <div id="_nata_debug_pill" onclick="window.__NATA_TOGGLE_DEBUGGER__()" title="Toggle Query & Action Debugger (Ctrl+Shift+D)" style="position: fixed; bottom: 12px; right: 12px; z-index: 999990; display: flex; align-items: center; gap: 8px; padding: 6px 14px; background: #18181b; border: 1px solid #27272a; border-radius: 9999px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-size: 12px; color: #f4f4f5; cursor: pointer; user-select: none; box-shadow: 0 10px 25px rgba(0,0,0,0.6); transition: all 0.15s ease;">
-    <div id="_dev_status" style="width: 8px; height: 8px; border-radius: 50%; background: #10b981; box-shadow: 0 0 8px rgba(16,185,129,0.5);"></div>
-    <span style="font-weight: 600; letter-spacing: -0.2px;">⚡ Debug</span>
-    <span id="_nata_pill_stats" style="color: #a1a1aa; font-size: 11px; background: #27272a; padding: 2px 8px; border-radius: 9999px;">0 logs</span>
-    <span id="_nata_pill_err" style="display: none; color: #fda4af; background: rgba(244,63,94,0.25); border: 1px solid rgba(244,63,94,0.3); padding: 2px 8px; border-radius: 9999px; font-weight: 600;">0 err</span>
-  </div>
-
-  <div id="_nata_debug_drawer" style="display: none; position: fixed; bottom: 0; left: 0; right: 0; height: 480px; max-height: 85vh; background: #09090b; border-top: 1px solid #27272a; z-index: 999995; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; color: #f4f4f5; box-shadow: 0 -12px 40px rgba(0,0,0,0.8); flex-direction: column; border-top-left-radius: 12px; border-top-right-radius: 12px; overflow: hidden;">
-    <div style="padding: 10px 16px; border-bottom: 1px solid #27272a; display: flex; align-items: center; justify-content: space-between; background: #121215; gap: 12px; flex-wrap: wrap;">
-      <div style="display: flex; align-items: center; gap: 10px;">
-        <div style="display: flex; align-items: center; gap: 6px;">
-          <span style="font-weight: 700; font-size: 13px; color: #fafafa; letter-spacing: -0.3px;">⚡ NATA Query Inspector</span>
-          <span style="font-size: 10px; font-weight: 600; background: rgba(16,185,129,0.15); color: #34d399; border: 1px solid rgba(16,185,129,0.3); padding: 2px 6px; border-radius: 4px; text-transform: uppercase;">Live</span>
-        </div>
-        <div id="_dbg_tabs" style="display: flex; align-items: center; gap: 4px; background: #18181b; padding: 3px; border-radius: 8px; border: 1px solid #27272a;">
-          <button id="_tab_btn_all" onclick="window.__NATA_SET_TAB__('all')" style="background: #27272a; color: #fafafa; border: none; padding: 4px 10px; border-radius: 6px; font-size: 11px; font-weight: 500; cursor: pointer;">All <span id="_tab_cnt_all" style="color: #a1a1aa; margin-left: 2px;">(0)</span></button>
-          <button id="_tab_btn_sql" onclick="window.__NATA_SET_TAB__('sql')" style="background: transparent; color: #a1a1aa; border: none; padding: 4px 10px; border-radius: 6px; font-size: 11px; font-weight: 500; cursor: pointer;">SQL Queries <span id="_tab_cnt_sql" style="color: #71717a; margin-left: 2px;">(0)</span></button>
-          <button id="_tab_btn_rpc" onclick="window.__NATA_SET_TAB__('rpc')" style="background: transparent; color: #a1a1aa; border: none; padding: 4px 10px; border-radius: 6px; font-size: 11px; font-weight: 500; cursor: pointer;">RPC Actions <span id="_tab_cnt_rpc" style="color: #71717a; margin-left: 2px;">(0)</span></button>
-          <button id="_tab_btn_error" onclick="window.__NATA_SET_TAB__('error')" style="background: transparent; color: #a1a1aa; border: none; padding: 4px 10px; border-radius: 6px; font-size: 11px; font-weight: 500; cursor: pointer;">Errors <span id="_tab_cnt_err" style="color: #f43f5e; margin-left: 2px;">(0)</span></button>
-        </div>
-      </div>
-      <div style="display: flex; align-items: center; gap: 8px; flex: 1; max-width: 420px; min-width: 200px;">
-        <div style="position: relative; width: 100%;">
-          <input id="_dbg_search" oninput="window.__NATA_FILTER_LOGS__()" type="text" placeholder="Search SQL, table, action, params, response... (Ctrl+K)" style="width: 100%; box-sizing: border-box; background: #18181b; border: 1px solid #27272a; border-radius: 8px; padding: 6px 10px 6px 28px; font-size: 12px; color: #f4f4f5; outline: none;" />
-          <span style="position: absolute; left: 9px; top: 50%; transform: translateY(-50%); color: #71717a; font-size: 12px;">🔍</span>
-        </div>
-      </div>
-      <div style="display: flex; align-items: center; gap: 6px;">
-        <button onclick="window.__NATA_CLEAR_LOGS__()" title="Clear all logs" style="background: #18181b; border: 1px solid #27272a; color: #a1a1aa; padding: 5px 10px; border-radius: 6px; font-size: 11px; cursor: pointer; display: flex; align-items: center; gap: 4px;">🗑 Clear</button>
-        <button onclick="window.__NATA_EXPORT_LOGS__()" title="Export logs as JSON" style="background: #18181b; border: 1px solid #27272a; color: #a1a1aa; padding: 5px 10px; border-radius: 6px; font-size: 11px; cursor: pointer; display: flex; align-items: center; gap: 4px;">💾 Export</button>
-        <button id="_dbg_expand_btn" onclick="window.__NATA_TOGGLE_EXPAND__()" title="Toggle full height" style="background: #18181b; border: 1px solid #27272a; color: #a1a1aa; padding: 5px 9px; border-radius: 6px; font-size: 11px; cursor: pointer;">⤢</button>
-        <button onclick="window.__NATA_TOGGLE_DEBUGGER__()" title="Close Debugger (Esc)" style="background: transparent; border: none; color: #71717a; padding: 4px 8px; font-size: 15px; cursor: pointer;">✕</button>
-      </div>
-    </div>
-    <div id="_dbg_logs_container" style="flex: 1; overflow-y: auto; padding: 12px 16px; display: flex; flex-direction: column; gap: 8px; min-height: 0;"></div>
-  </div>
 
   <script>window.__NATA_CONFIG__ = {nata_config};</script>
   <script type="module">

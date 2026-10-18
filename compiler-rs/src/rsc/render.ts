@@ -2,6 +2,7 @@
 // Flight payload for the client router) and `action` (a Server Action, called by the client router or
 // posted by a <form> before JavaScript loaded). Results stream back to the engine chunk by chunk.
 
+import { createRequire } from "node:module";
 import { reportRequestError } from "./next/request.ts";
 
 const g = globalThis as any;
@@ -28,6 +29,10 @@ g.__webpack_chunk_load__ = (chunk: string) => {
 g.__webpack_require__ = (id: string) => (id.startsWith("/") ? ssr.ssrModules.get(id) : g.__NATA_ACTIONS__?.get(id));
 g.__webpack_require__.u = (chunk: string) => chunk;
 g.__webpack_get_script_filename__ = (chunk: string) => chunk;
+// Packages that detect webpack through `typeof __webpack_require__` (node-gyp-build, used by bcrypt and
+// other native addons) then load files with __non_webpack_require__, webpack's escape hatch to Node's own
+// require. Defining the shim above without it breaks them with "__non_webpack_require__ is not defined".
+g.__non_webpack_require__ ??= createRequire(import.meta.url);
 
 const serverManifest = new Proxy(
   {},

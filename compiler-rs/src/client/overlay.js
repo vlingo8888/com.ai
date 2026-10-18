@@ -3,7 +3,8 @@
 // Every error is classified before anything is shown:
 //   build   - a module failed to compile           -> full-screen "Build Error", cannot be dismissed
 //   runtime - the route could not render/mount     -> dialog opens automatically, dismissable
-//   issue   - stray errors, rejections, network    -> only counted on the "Issues" badge
+//   issue   - stray errors, rejections, network    -> only counted (dev tools indicator, or the
+//             "Issues" badge until the indicator is mounted)
 //   ignored - noise from dev tooling and browsers  -> never shown
 // The overlay lives in a Shadow DOM so the app's CSS (Tailwind, globals.css) cannot restyle it.
 
@@ -321,7 +322,14 @@ function renderFrame(frame) {
     .join("\n");
 }
 
+/** Shares the issue count with the dev tools indicator */
+function publishCount() {
+  window.__NATA_ISSUE_COUNT__ = issues.reduce((n, i) => n + i.count, 0);
+  window.__NATA_DEV_INDICATOR__?.update();
+}
+
 function render() {
+  publishCount();
   ensureHost();
   if (!shadow) {
     document.addEventListener("DOMContentLoaded", render, { once: true });
@@ -338,6 +346,11 @@ function render() {
 
   if (!showDialog) {
     const total = issues.reduce((n, i) => n + i.count, 0);
+    // The dev tools indicator (debug.js) shows the count and opens the dialog from its menu
+    if (window.__NATA_DEV_INDICATOR__) {
+      shadow.innerHTML = "";
+      return;
+    }
     html += `<div class="badge" part="badge" role="button" aria-label="Open issues"><span class="count">${total}</span>${total === 1 ? "Issue" : "Issues"}</div>`;
     shadow.innerHTML = html;
     shadow.querySelector(".badge").onclick = () => { dialogOpen = true; render(); };
@@ -419,6 +432,13 @@ function install() {
   window.__NATA_OVERLAY_INSTALLED__ = true;
   window.__NATA_BUILD_ERROR__ = reportBuildError;
   window.__NATA_REPORT_ISSUE__ = reportIssue;
+  window.__NATA_OPEN_ISSUES__ = () => {
+    if (!issues.length) return;
+    dialogOpen = true;
+    render();
+  };
+  // Once the indicator mounts, the fallback "Issues" badge gives way to it
+  window.addEventListener("nata:dev-indicator", () => render());
 
   window.addEventListener("error", (e) => {
     // Failed <script>/<link> loads fire error events without an Error object; they are not app crashes
