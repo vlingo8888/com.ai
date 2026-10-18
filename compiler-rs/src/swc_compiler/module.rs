@@ -519,6 +519,66 @@ fn proxy_legacy_rpc_imports(cm: &Lrc<SourceMap>, module: &mut Module, rel: &str,
     }
 }
 
+/// React APIs missing from the `react-server` build (React 19): importing one in the react-server
+/// layer fails to link with a bare "Export named 'useState' not found"
+const CLIENT_ONLY_REACT_APIS: &[&str] = &[
+    "Component",
+    "PureComponent",
+    "createContext",
+    "useContext",
+    "useState",
+    "useReducer",
+    "useRef",
+    "useEffect",
+    "useLayoutEffect",
+    "useInsertionEffect",
+    "useImperativeHandle",
+    "useSyncExternalStore",
+    "useTransition",
+    "useDeferredValue",
+    "useOptimistic",
+    "useActionState",
+    "useEffectEvent",
+    "startTransition",
+];
+
+/// Like Next.js: a Server Component (a module without "use client") importing a client-only React API
+/// is a compile error at that import, which names the API and the fix
+fn check_server_react_imports(cm: &Lrc<SourceMap>, program: &Program, source: &str, file_name: &str) -> Result<(), CompileError> {
+    let Program::Module(module) = program else { return Ok(()) };
+    for item in &module.body {
+        let ModuleItem::ModuleDecl(ModuleDecl::Import(import)) = item else { continue };
+        if import.type_only || import.src.value.to_string_lossy() != "react" {
+            continue;
+        }
+        for spec in &import.specifiers {
+            let ImportSpecifier::Named(named) = spec else { continue };
+            if named.is_type_only {
+                continue;
+            }
+            let api = named.imported.as_ref().map(export_name).unwrap_or_else(|| named.local.sym.to_string());
+            if !CLIENT_ONLY_REACT_APIS.contains(&api.as_str()) {
+                continue;
+            }
+            let kind = if api.starts_with("use") { "React Hook" } else { "React API" };
+            let pos = cm.lookup_char_pos(named.span.lo);
+            let (line, column) = (pos.line, pos.col_display + 1);
+            return Err(CompileError {
+                file: file_name.to_string(),
+                message: format!(
+                    "You're importing a component that needs `{api}`. This {kind} only works in a Client Component. \
+                     To fix, mark the file (or its parent) with the `\"use client\"` directive.\n\n \
+                     Learn more: https://nextjs.org/docs/app/api-reference/directives/use-client"
+                ),
+                line: Some(line),
+                column: Some(column),
+                frame: crate::term::code_frame(source, line, column, 2),
+            });
+        }
+    }
+    Ok(())
+}
+
 /// Client references for a `"use client"` module, as seen from the react-server layer
 fn client_reference_stub(root: &Path, file: &Path, id: &str, exports: &[String]) -> Result<String, String> {
     let resolvers = oxc::resolvers(root);
@@ -576,6 +636,12 @@ pub fn compile_module(source: &str, opts: &ModuleCompileOptions) -> Result<Compi
             .map_err(|message| CompileError { file: file_name.clone(), message, line: None, column: None, frame: String::new() })?;
         out.is_reference_stub = true;
         return Ok(out);
+    }
+
+    // Only the app's own files: packages are checked by whoever publishes them
+    let is_app_file = !rel.starts_with("node_modules/") && !rel.contains("/node_modules/") && !rel.starts_with(".nata/");
+    if opts.layer == Layer::Rsc && is_app_file {
+        check_server_react_imports(&cm, &program, source, &file_name)?;
     }
 
     // Outside the react-server layer, a "use server" module is only a set of references

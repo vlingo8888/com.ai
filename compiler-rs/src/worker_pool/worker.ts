@@ -22,6 +22,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { mkdirSync, unlinkSync, writeFileSync } from "fs";
 import { join } from "path";
 import { inspect } from "util";
+import { explainServerError } from "./explain_error.ts";
 
 const KIND_REQUEST = 1;
 const KIND_RESULT = 2;
@@ -50,8 +51,11 @@ const realStderrWrite = process.stderr.write.bind(process.stderr);
 const realConsoleError = console.error.bind(console);
 const realExit = process.exit.bind(process);
 
+// Runtimes loaded by the worker (route handlers, Server Actions) rewrite their errors with it too
+(globalThis as any).__NATA_EXPLAIN_ERROR__ = explainServerError;
+
 const format = (args: unknown[]) =>
-  args.map((a) => (typeof a === "string" ? a : inspect(a, { colors: false, depth: 6 }))).join(" ") + "\n";
+  args.map(explainServerError).map((a) => (typeof a === "string" ? a : inspect(a, { colors: false, depth: 6 }))).join(" ") + "\n";
 const toText = (chunk: unknown) =>
   typeof chunk === "string" ? chunk : chunk instanceof Uint8Array ? new TextDecoder().decode(chunk) : String(chunk);
 
@@ -512,6 +516,7 @@ async function handleRequest(id: number, meta: any, body: Uint8Array) {
     // (prerendering at build time and the page cache of `com start`, see next/request.ts)
     if (handled.head !== undefined && store.globals.__NATA_RENDER__) result.render = store.globals.__NATA_RENDER__;
   } catch (err: any) {
+    explainServerError(err);
     store.stderr.push(String(err?.stack || err?.message || err) + "\n");
     result = { ok: false, code: 1, error: String(err?.message || err) };
   }
@@ -588,11 +593,13 @@ function sendFrame(kind: number, id: number, meta: unknown, body: Uint8Array = n
 }
 
 process.on("uncaughtException", (err) => {
+  explainServerError(err);
   const store = als.getStore();
   if (store) store.stderr.push(String((err as any)?.stack || err) + "\n");
   else realConsoleError(err);
 });
 process.on("unhandledRejection", (err) => {
+  explainServerError(err);
   const store = als.getStore();
   if (store) store.stderr.push(String((err as any)?.stack || err) + "\n");
   else realConsoleError(err);

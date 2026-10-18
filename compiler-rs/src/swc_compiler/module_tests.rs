@@ -250,3 +250,34 @@ fn mod_011_public_env_is_inlined_in_the_browser_only() {
     let server = compile(&root, "app/config.ts", Layer::Rsc);
     assert!(server.code.contains("process.env.SECRET_KEY"), "{}", server.code);
 }
+
+#[test]
+fn mod_client_only_react_import_in_server_component_is_a_compile_error() {
+    let root = project(
+        "server_react_imports",
+        &[
+            ("components/counter.tsx", "import { useMemo, useState } from \"react\";\nexport function Counter() { const [n] = useState(0); return <b>{n}</b>; }\n"),
+            ("components/client.tsx", "\"use client\";\nimport { useState } from \"react\";\nexport function C() { useState(0); return null; }\n"),
+            ("components/types.tsx", "import type { Dispatch } from \"react\";\nimport { type SetStateAction, useMemo, cache } from \"react\";\nexport const f = cache(() => 1);\n"),
+            ("node_modules/lib/index.js", "import { useState } from \"react\";\nexport const x = 1;\n"),
+        ],
+    );
+    let compile_err = |rel: &str, layer: Layer| {
+        let file = root.join(rel);
+        let source = std::fs::read_to_string(&file).unwrap();
+        compile_module(&source, &ModuleCompileOptions { root: &root, file: &file, layer, development: true, refresh: false, package_specifier: None }).err()
+    };
+
+    let err = compile_err("components/counter.tsx", Layer::Rsc).expect("useState in a Server Component is rejected");
+    assert!(err.message.starts_with("You're importing a component that needs `useState`. This React Hook only works in a Client Component."), "{}", err.message);
+    assert!(err.message.contains("https://nextjs.org/docs/app/api-reference/directives/use-client"), "{}", err.message);
+    assert_eq!((err.file.as_str(), err.line, err.column), ("components/counter.tsx", Some(1), Some(19)));
+    assert!(err.frame.contains("import { useMemo, useState }"), "{}", err.frame);
+
+    // The same file is fine where React has every API, and so are client modules, type imports,
+    // server-safe APIs and packages
+    assert!(compile_err("components/counter.tsx", Layer::Ssr).is_none());
+    assert!(compile_err("components/client.tsx", Layer::Rsc).is_none());
+    assert!(compile_err("components/types.tsx", Layer::Rsc).is_none());
+    assert!(compile_err("node_modules/lib/index.js", Layer::Rsc).is_none());
+}

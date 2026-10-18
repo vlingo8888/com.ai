@@ -1,5 +1,8 @@
-import { describe, expect, it } from "bun:test";
-import { rewriteBareImports } from "../compiler-rs/src/deps_bundler";
+import { afterAll, describe, expect, it } from "bun:test";
+import { mkdtempSync, rmSync, writeFileSync } from "fs";
+import { tmpdir } from "os";
+import { join } from "path";
+import { isEsmModule, rewriteBareImports } from "../compiler-rs/src/deps_bundler";
 
 describe("deps bundler: rewriteBareImports", () => {
   it("rewrites single-line, minified and side-effect imports", () => {
@@ -38,5 +41,27 @@ describe("deps bundler: rewriteBareImports", () => {
   it("does not touch strings that only look like imports", () => {
     const code = `console.error('You should instead import it from "react-dom/client".');`;
     expect(rewriteBareImports(code)).toBe(code);
+  });
+});
+
+describe("deps bundler: isEsmModule", () => {
+  const dir = mkdtempSync(join(tmpdir(), "com-esm-"));
+  afterAll(() => rmSync(dir, { recursive: true, force: true }));
+  const file = (name: string, code: string) => {
+    const path = join(dir, name);
+    writeFileSync(path, code);
+    return path;
+  };
+
+  it("treats a file that only re-exports another package as ESM (victory-vendor/d3-shape)", () => {
+    expect(isEsmModule(file("reexport.js", '// vendored\nexport * from "d3-shape";\n'))).toBe(true);
+    expect(isEsmModule(file("side-effect.js", 'import "./polyfill";\n'))).toBe(true);
+    expect(isEsmModule(file("named.js", "export const a = 1;\n"))).toBe(true);
+  });
+
+  it("keeps CommonJS files CommonJS", () => {
+    expect(isEsmModule(file("cjs.js", 'const d3 = require("d3-shape");\nmodule.exports = d3;\n'))).toBe(false);
+    expect(isEsmModule(file("cjs-dynamic.js", 'module.exports = () => import("./lazy.js");\n'))).toBe(false);
+    expect(isEsmModule(file("x.cjs", "export const a = 1;\n"))).toBe(false);
   });
 });

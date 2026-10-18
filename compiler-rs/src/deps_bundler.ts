@@ -88,12 +88,18 @@ async function resolveForBrowser(spec: string, probe: string): Promise<string | 
   return resolved;
 }
 
-function isEsmModule(file: string): boolean {
+/**
+ * Whether `file` is an ES module. A file that only re-exports (`export * from "d3-shape"`, as
+ * victory-vendor does) lists no named exports, so `import` statements count too: wrapping such a
+ * file as CommonJS loses the re-exported namespace (`ReferenceError: Ae is not defined`).
+ */
+export function isEsmModule(file: string): boolean {
   if (file.endsWith(".mjs")) return true;
   if (file.endsWith(".cjs")) return false;
   try {
     const loader = /\.[mc]?tsx?$/.test(file) ? "tsx" : "jsx";
-    return new Bun.Transpiler({ loader }).scan(readFileSync(file, "utf-8")).exports.length > 0;
+    const { exports, imports } = new Bun.Transpiler({ loader }).scan(readFileSync(file, "utf-8"));
+    return exports.length > 0 || imports.some((i) => i.kind === "import-statement");
   } catch {
     return false;
   }

@@ -241,6 +241,7 @@ export async function handleRoute(input: RouteHandlerInput): Promise<RouteHandle
 
     return { output, body };
   } catch (err: any) {
+    (globalThis as any).__NATA_EXPLAIN_ERROR__?.(err);
     const duration = Number((performance.now() - startTime).toFixed(2));
     const errMsg = err?.message || String(err);
     const errStack = err?.stack || "";

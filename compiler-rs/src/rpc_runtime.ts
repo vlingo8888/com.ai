@@ -127,6 +127,7 @@ export async function runRpc(input: RpcInput): Promise<RpcResult> {
       code: 0,
     };
   } catch (err: any) {
+    g.__NATA_EXPLAIN_ERROR__?.(err);
     return {
       payload: { error: err?.message || String(err), stack: err?.stack || undefined, __nata_queries__: queries() },
       code: 1,

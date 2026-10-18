@@ -27,6 +27,7 @@ use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::{oneshot, Semaphore};
 
 const WORKER_SOURCE: &str = include_str!("worker.ts");
+const EXPLAIN_ERROR: &str = include_str!("explain_error.ts");
 const SSR_RUNTIME: &str = include_str!("../ssr/runtime.ts");
 const ROUTE_RUNTIME: &str = include_str!("../route_handler/runtime.ts");
 const RPC_RUNTIME: &str = include_str!("../rpc_runtime.ts");
@@ -216,6 +217,7 @@ pub fn write_runtime_files(root: &Path) -> std::io::Result<PathBuf> {
     std::fs::create_dir_all(&nata_dir)?;
     for (name, source) in [
         ("worker.ts", WORKER_SOURCE),
+        ("explain_error.ts", EXPLAIN_ERROR),
         ("ssr_runtime.ts", SSR_RUNTIME),
         ("route_handler_runtime.ts", ROUTE_RUNTIME),
         ("rpc_runtime.ts", RPC_RUNTIME),
