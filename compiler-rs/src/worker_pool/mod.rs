@@ -28,6 +28,7 @@ use tokio::sync::{oneshot, Semaphore};
 
 const WORKER_SOURCE: &str = include_str!("worker.ts");
 const EXPLAIN_ERROR: &str = include_str!("explain_error.ts");
+const SERIAL_IMPORT: &str = include_str!("serial_import.ts");
 const SSR_RUNTIME: &str = include_str!("../ssr/runtime.ts");
 const ROUTE_RUNTIME: &str = include_str!("../route_handler/runtime.ts");
 const RPC_RUNTIME: &str = include_str!("../rpc_runtime.ts");
@@ -197,6 +198,8 @@ pub fn apply_runner_env(cmd: &mut Command, root: &Path) {
     }
 
     cmd.env("NODE_ENV", crate::mode::node_env());
+    // Set by Next.js for server code; instrumentation.ts `register()` usually checks it
+    cmd.env("NEXT_RUNTIME", "nodejs");
     if !crate::mode::is_production() {
         // The dev server renders SQL (including errors) from the query log itself
         cmd.env("COM_DEV_QUERY_LOG", "1");
@@ -211,27 +214,41 @@ pub fn instrumentation_file(root: &Path) -> Option<PathBuf> {
         .find(|p| p.is_file())
 }
 
+/// A runtime source built into the engine, or with `COM_RUNTIME_SRC=<repo>/compiler-rs/src` the file
+/// itself (`rel` is its path under `src/`): editing a runtime then needs no Rust rebuild, only a
+/// `com dev` restart (framework development)
+pub fn runtime_source(rel: &str, embedded: &'static str) -> std::borrow::Cow<'static, str> {
+    match std::env::var_os("COM_RUNTIME_SRC") {
+        Some(dir) => std::fs::read_to_string(Path::new(&dir).join(rel)).map(Into::into).unwrap_or(embedded.into()),
+        None => embedded.into(),
+    }
+}
+
 /// Writes the worker and the runtimes it imports into `.nata/`
 pub fn write_runtime_files(root: &Path) -> std::io::Result<PathBuf> {
     let nata_dir = root.join(".nata");
     std::fs::create_dir_all(&nata_dir)?;
-    for (name, source) in [
-        ("worker.ts", WORKER_SOURCE),
-        ("explain_error.ts", EXPLAIN_ERROR),
-        ("ssr_runtime.ts", SSR_RUNTIME),
-        ("route_handler_runtime.ts", ROUTE_RUNTIME),
-        ("rpc_runtime.ts", RPC_RUNTIME),
-        ("deps_bundler.ts", DEPS_BUNDLER),
-        ("metadata_runtime.ts", METADATA_RUNTIME),
-        ("rsc_runtime.ts", RSC_RUNTIME),
-        ("rsc_ssr.ts", RSC_SSR),
-        ("rsc_render.ts", RSC_RENDER),
-        ("rsc_boundaries.js", RSC_BOUNDARIES),
+    // What these files import (`./next/request.ts`, `core`): restored first if it was deleted since startup
+    crate::rpc::RpcExecutor::ensure_runtime_env(root);
+    for (name, rel, embedded) in [
+        ("worker.ts", "worker_pool/worker.ts", WORKER_SOURCE),
+        ("explain_error.ts", "worker_pool/explain_error.ts", EXPLAIN_ERROR),
+        ("serial_import.ts", "worker_pool/serial_import.ts", SERIAL_IMPORT),
+        ("ssr_runtime.ts", "ssr/runtime.ts", SSR_RUNTIME),
+        ("route_handler_runtime.ts", "route_handler/runtime.ts", ROUTE_RUNTIME),
+        ("rpc_runtime.ts", "rpc_runtime.ts", RPC_RUNTIME),
+        ("deps_bundler.ts", "deps_bundler.ts", DEPS_BUNDLER),
+        ("metadata_runtime.ts", "ssr/metadata_runtime.ts", METADATA_RUNTIME),
+        ("rsc_runtime.ts", "rsc/rsc_runtime.ts", RSC_RUNTIME),
+        ("rsc_ssr.ts", "rsc/ssr_runtime.ts", RSC_SSR),
+        ("rsc_render.ts", "rsc/render.ts", RSC_RENDER),
+        ("rsc_boundaries.js", "rsc/boundaries.js", RSC_BOUNDARIES),
     ] {
+        let source = runtime_source(rel, embedded);
         let path = nata_dir.join(name);
         // Skip identical content so file watchers and Bun's cache see no change
-        if std::fs::read_to_string(&path).ok().as_deref() != Some(source) {
-            std::fs::write(&path, source)?;
+        if std::fs::read_to_string(&path).ok().as_deref() != Some(&*source) {
+            std::fs::write(&path, &*source)?;
         }
     }
     Ok(nata_dir.join("worker.ts"))
@@ -357,23 +374,22 @@ async fn spawn(root: &Path) -> Result<Arc<Handle>, String> {
     // instrumentation.ts: `register()` finishes before the worker takes requests
     if let Some(file) = instrumentation_file(root) {
         if let Some(specifier) = crate::module_graph::server_module_specifier(root, &file) {
-            let id = u32::MAX;
-            let (tx, rx) = oneshot::channel();
-            pending.lock().unwrap_or_else(|e| e.into_inner()).insert(id, PendingEntry::Once(tx));
-            let frame = encode_frame(KIND_REQUEST, id, &serde_json::json!({ "cmd": "instrumentation", "input": { "specifier": specifier } }), &[]);
-            {
-                let mut stdin = stdin.lock().await;
-                let _ = stdin.write_all(&frame).await;
-                let _ = stdin.flush().await;
+            // What it imports compiles with the config (serverExternalPackages): load that first
+            if crate::next_config::for_root(root).is_none() {
+                if let Some(input) = crate::next_config::load_input(root) {
+                    if let Some(reply) = startup_request(&stdin, &pending, u32::MAX - 1, "next_config", input).await {
+                        crate::next_config::store(root, &reply);
+                    }
+                }
             }
-            match tokio::time::timeout(STARTUP_TIMEOUT, rx).await {
-                Ok(Ok(reply)) => {
+            match startup_request(&stdin, &pending, u32::MAX, "instrumentation", serde_json::json!({ "specifier": specifier })).await {
+                Some(reply) => {
                     crate::ssr::worker::print_logs(reply.stdout(), reply.stderr());
                     if let Some(err) = reply.error() {
                         crate::term::error("instrumentation.ts register() failed", Some(err), None);
                     }
                 }
-                _ => crate::term::warn("instrumentation.ts register() did not finish in time"),
+                None => crate::term::warn("instrumentation.ts register() did not finish in time"),
             }
         }
     }
@@ -390,6 +406,25 @@ async fn spawn(root: &Path) -> Result<Arc<Handle>, String> {
         last_used: Mutex::new(Instant::now()),
         limiter: Semaphore::new(concurrency),
     }))
+}
+
+/// A request sent while the worker starts, before it takes other requests (ids above the counter's)
+async fn startup_request(
+    stdin: &tokio::sync::Mutex<ChildStdin>,
+    pending: &Pending,
+    id: u32,
+    cmd: &str,
+    input: serde_json::Value,
+) -> Option<Reply> {
+    let (tx, rx) = oneshot::channel();
+    pending.lock().unwrap_or_else(|e| e.into_inner()).insert(id, PendingEntry::Once(tx));
+    let frame = encode_frame(KIND_REQUEST, id, &serde_json::json!({ "cmd": cmd, "input": input }), &[]);
+    {
+        let mut stdin = stdin.lock().await;
+        let _ = stdin.write_all(&frame).await;
+        let _ = stdin.flush().await;
+    }
+    tokio::time::timeout(STARTUP_TIMEOUT, rx).await.ok()?.ok()
 }
 
 /// Stops every worker after its requests in flight (`com start` shutting down)
@@ -553,7 +588,15 @@ fn ensure_idle_reaper() {
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(Duration::from_secs(15).min(idle)).await;
-            let all: Vec<Slot> = slots().lock().unwrap_or_else(|e| e.into_inner()).values().cloned().collect();
+            // instrumentation.ts `register()` may start servers that live as long as the app (the RPC
+            // backend of comx builds): such workers stay up
+            let all: Vec<Slot> = slots()
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .iter()
+                .filter(|(root, _)| instrumentation_file(root).is_none())
+                .map(|(_, slot)| slot.clone())
+                .collect();
             for slot in all {
                 let Ok(mut guard) = slot.try_lock() else { continue };
                 let expired = guard.as_ref().is_some_and(|h| {

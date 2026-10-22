@@ -26,11 +26,26 @@ pub fn handle_call(root: PathBuf, cmd: String, input: Value, body: Vec<u8>) -> s
 async fn handle_call_inner(root: &Path, cmd: &str, input: &Value, _body: Vec<u8>) -> (Value, Vec<u8>) {
     match cmd {
         "load_module" => {
-            let root = root.to_path_buf();
-            let input = input.clone();
-            tokio::task::spawn_blocking(move || load_module(&root, &input))
-                .await
-                .unwrap_or_else(|e| (json!({ "kind": "error", "message": e.to_string() }), Vec::new()))
+            let load_blocking = |root: PathBuf, input: Value| async move {
+                tokio::task::spawn_blocking(move || load(&root, &input))
+                    .await
+                    .unwrap_or_else(|e| (json!({ "kind": "error", "message": e.to_string() }), Vec::new(), Vec::new()))
+            };
+            let (reply, code, missing) = load_blocking(root.to_path_buf(), input.clone()).await;
+            if missing.is_empty() {
+                return (reply, code);
+            }
+            // `import { nanoid } from "nanoid"` in a server file, before `bun add nanoid`: install it,
+            // like the browser's dependencies (deps.rs), then compile the file again
+            let mut installed = false;
+            for name in &missing {
+                installed |= crate::deps::ensure_installed_for_worker(root, name).await.is_some();
+            }
+            if !installed {
+                return (reply, code);
+            }
+            let (reply, code, _) = load_blocking(root.to_path_buf(), input.clone()).await;
+            (reply, code)
         }
         "svg_to_png" => match crate::og_image::svg_to_png(input["svg"].as_str().unwrap_or("")) {
             Ok(png) => (json!({}), png),
@@ -121,26 +136,32 @@ fn package_type_module(path: &Path) -> bool {
 }
 
 pub fn load_module(root: &Path, input: &Value) -> (Value, Vec<u8>) {
+    let (reply, code, _) = load(root, input);
+    (reply, code)
+}
+
+/// `load_module`, with the packages the module imports that are not installed
+fn load(root: &Path, input: &Value) -> (Value, Vec<u8>, Vec<String>) {
     let raw = input["path"].as_str().unwrap_or("");
     let Some(layer) = input["layer"].as_str().and_then(Layer::parse) else {
-        return (json!({ "kind": "error", "message": "missing layer" }), Vec::new());
+        return (json!({ "kind": "error", "message": "missing layer" }), Vec::new(), Vec::new());
     };
     let path_str = raw.split('?').next().unwrap_or(raw);
 
     if let Some(name) = path_str.strip_prefix("/__nata_client_shim/") {
         return match crate::swc_compiler::module::next_client_shim_stub(root, name) {
-            Some(code) => (json!({ "kind": "esm" }), code.into_bytes()),
-            None => (json!({ "kind": "error", "message": format!("no client shim for {name}") }), Vec::new()),
+            Some(code) => (json!({ "kind": "esm" }), code.into_bytes(), Vec::new()),
+            None => (json!({ "kind": "error", "message": format!("no client shim for {name}") }), Vec::new(), Vec::new()),
         };
     }
 
     let file = PathBuf::from(path_str);
     if crate::image_optimizer::is_image(&file) {
-        return (json!({ "kind": "esm" }), crate::image_optimizer::static_import_module(root, &file).into_bytes());
+        return (json!({ "kind": "esm" }), crate::image_optimizer::static_import_module(root, &file).into_bytes(), Vec::new());
     }
     let source = match std::fs::read_to_string(&file) {
         Ok(s) => s,
-        Err(e) => return (json!({ "kind": "error", "message": format!("Cannot read {}: {e}", file.display()) }), Vec::new()),
+        Err(e) => return (json!({ "kind": "error", "message": format!("Cannot read {}: {e}", file.display()) }), Vec::new(), Vec::new()),
     };
 
     let in_node_modules = file.components().any(|c| c.as_os_str() == "node_modules");
@@ -148,7 +169,8 @@ pub fn load_module(root: &Path, input: &Value) -> (Value, Vec<u8>) {
         // A "use client" CommonJS file still becomes client references
         let use_client = source.trim_start().starts_with("\"use client\"") || source.trim_start().starts_with("'use client'");
         if layer == Layer::Ssr || !use_client {
-            return cjs_closure(root, &file, layer);
+            let (reply, code) = cjs_closure(root, &file, layer);
+            return (reply, code, Vec::new());
         }
     }
 
@@ -157,9 +179,12 @@ pub fn load_module(root: &Path, input: &Value) -> (Value, Vec<u8>) {
             let graph = crate::module_graph::for_root(root);
             let code = graph.read().unwrap_or_else(|e| e.into_inner()).versioned_code(&compiled.code, layer, &compiled.imports);
             dump(root, &file, layer, &code);
-            (json!({ "kind": "esm", "directive": compiled.directive }), code.into_bytes())
+            (json!({ "kind": "esm", "directive": compiled.directive }), code.into_bytes(), compiled.missing_packages)
         }
-        Err(err) => error_reply(&err),
+        Err(err) => {
+            let (reply, code) = error_reply(&err);
+            (reply, code, Vec::new())
+        }
     }
 }
 

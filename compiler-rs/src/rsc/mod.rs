@@ -555,11 +555,15 @@ pub fn client_reference_specifier(root: &Path, id: &str) -> Result<String, Strin
         // load through the engine, which resolves `react` to it. Framework shims are files in .nata.
         if clean.starts_with("/_nata/shims/") || crate::framework_react::active_modules_dir(root).is_some() {
             let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
-            let resolved = crate::resolver::oxc::resolvers(&root)
+            // A client component inside a package is referenced by its file (client_reference_id), which
+            // the package's `exports` may not expose (next-intl's NextIntlClientProvider)
+            let path = crate::resolver::oxc::resolvers(&root)
                 .resolve(Layer::Ssr, &root.join("package.json"), spec)
+                .map(|r| r.path)
+                .or_else(|| Some(root.join("node_modules").join(spec)).filter(|f| !spec.split('/').any(|s| s == "..") && f.is_file()))
                 .ok_or_else(|| format!("cannot resolve {spec}"))?;
             let graph = crate::module_graph::for_root(&root);
-            return Ok(graph.read().unwrap_or_else(|e| e.into_inner()).specifier(&resolved.path, Layer::Ssr));
+            return Ok(graph.read().unwrap_or_else(|e| e.into_inner()).specifier(&path, Layer::Ssr));
         }
         return Ok(spec.to_string());
     }

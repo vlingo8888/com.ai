@@ -1,0 +1,15 @@
+---
+import Layout from '../layouts/Layout.astro';
+const { title } = Astro.props;
+const cls = isActive ? "text-emerald-600" : "text-slate-500";
+---
+
+<Layout title={title}>
+  <main class="mx-auto max-w-3xl px-4 py-16 sm:px-6 lg:px-8">
+    <h1 class:list={["text-4xl font-extrabold tracking-tight", { "text-red-500": hasError }]}>{title}</h1>
+    <p class={cls}>Hello</p>
+    <ul class="divide-y divide-gray-200 dark:divide-gray-800">
+      {items.map((item) => <li class="py-4 first:pt-0 last:pb-0">{item}</li>)}
+    </ul>
+  </main>
+</Layout>

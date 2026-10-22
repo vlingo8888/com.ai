@@ -51,15 +51,40 @@ const SUPPORTED: [&str; 17] = [
     "transpilePackages", "compiler", "devIndicators",
 ];
 
+/// Whether the package of `specifier` (`@scope/name/sub` → `@scope/name`) is in `serverExternalPackages`
+pub fn is_server_external(root: &Path, specifier: &str) -> bool {
+    let Some(config) = for_root(root) else { return false };
+    let segments = if specifier.starts_with('@') { 2 } else { 1 };
+    let package = specifier.splitn(segments + 1, '/').take(segments).collect::<Vec<_>>().join("/");
+    config["serverExternalPackages"].as_array().is_some_and(|list| list.iter().any(|p| p.as_str() == Some(package.as_str())))
+}
+
 /// (Re)loads the config through the worker; `None` when there is none or it failed
 pub async fn load(root: &Path) -> Option<Arc<Value>> {
     let root = key(root);
-    let Some(file) = find(&root) else {
+    let Some(input) = load_input(&root) else {
         registry().lock().ok()?.remove(&root);
         return None;
     };
-    let specifier = crate::module_graph::server_module_specifier(&root, &file).unwrap_or_else(|| file.to_string_lossy().to_string());
-    let reply = crate::worker_pool::call(&root, "next_config", serde_json::json!({ "specifier": specifier }), Vec::new()).await.ok()?;
+    let reply = crate::worker_pool::call(&root, "next_config", input, Vec::new()).await.ok()?;
+    store(&root, &reply)
+}
+
+/// The input of the worker's `next_config` command for `root`, `None` without a next.config
+pub fn load_input(root: &Path) -> Option<Value> {
+    let file = find(root)?;
+    // With the real `next` installed, the config uses Next.js plugins written for Node (next-intl/plugin
+    // pulls native bindings such as @swc/core): Bun loads it natively, as Next.js does
+    let native = crate::project::has_real_next(root);
+    let specifier = (!native)
+        .then(|| crate::module_graph::server_module_specifier(root, &file))
+        .flatten()
+        .unwrap_or_else(|| file.to_string_lossy().to_string());
+    Some(serde_json::json!({ "specifier": specifier }))
+}
+
+/// Keeps the config the worker's `next_config` command returned
+pub fn store(root: &Path, reply: &crate::worker_pool::Reply) -> Option<Arc<Value>> {
     crate::ssr::worker::print_logs(reply.stdout(), reply.stderr());
     if let Some(err) = reply.error() {
         crate::term::error("Could not load next.config", Some(err), None);
@@ -76,7 +101,7 @@ pub async fn load(root: &Path) -> Option<Arc<Value>> {
             crate::term::warn_once("next-config:output", "next.config `output` applies to `com build` (ROADMAP P3)");
         }
     }
-    registry().lock().ok()?.insert(root, config.clone());
+    registry().lock().ok()?.insert(key(root), config.clone());
     Some(config)
 }
 
@@ -301,6 +326,19 @@ pub fn response_headers(config: &Value, path: &str, query: &str, headers: &Heade
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn server_external_packages_match_by_package_name() {
+        let root = PathBuf::from("/nata-test/server-external");
+        let config = json!({ "serverExternalPackages": ["@electric-sql/pglite", "sharp"] });
+        registry().lock().unwrap().insert(key(&root), Arc::new(config));
+        assert!(is_server_external(&root, "@electric-sql/pglite"));
+        assert!(is_server_external(&root, "@electric-sql/pglite/vector"));
+        assert!(is_server_external(&root, "sharp"));
+        assert!(!is_server_external(&root, "@electric-sql/other"));
+        assert!(!is_server_external(&root, "kysely"));
+        assert!(!is_server_external(Path::new("/nata-test/no-config"), "sharp"));
+    }
 
     #[test]
     fn sources_capture_named_params() {

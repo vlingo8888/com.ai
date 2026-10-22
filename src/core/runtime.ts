@@ -448,7 +448,8 @@ export async function draftMode() { return { isEnabled: false, enable() {}, disa
 `;
   writeFileSync(join(nataDir, "headers.ts"), headersTs);
 
-  // 3. Write node_modules/core
+  // 3. Write node_modules/core, unless the project has its own core/ (comx builds map it in tsconfig)
+  if (["index.ts", "index.tsx", "index.js"].some((f) => existsSync(join(projectDir, "core", f)))) return;
   const nmCore = join(projectDir, "node_modules", "core");
   if (!existsSync(nmCore)) {
     mkdirSync(nmCore, { recursive: true });

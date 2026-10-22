@@ -5,6 +5,9 @@
 import { createRequire } from "node:module";
 import { reportRequestError } from "./next/request.ts";
 
+// One import at a time for modules a request has not loaded yet (serial_import.ts)
+const importModule = (specifier: string): Promise<any> => ((globalThis as any).__nata_import ?? ((s: string) => import(s)))(specifier);
+
 const g = globalThis as any;
 
 // The SSR runtime (rsc_ssr.ts) is loaded in the `ssr:` layer, through the engine like the client
@@ -19,7 +22,7 @@ async function loadActionModule(id: string) {
   if (g.__NATA_ACTIONS__?.has(id)) return;
   const { meta } = await g.__NATA_CALL_ENGINE__("action_module", { id });
   if (!meta.specifier) throw new Error(`Server Action "${id}" was not found. It may have been removed or renamed; reload the page.`);
-  await import(meta.specifier);
+  await importModule(meta.specifier);
 }
 
 g.__webpack_chunk_load__ = (chunk: string) => {

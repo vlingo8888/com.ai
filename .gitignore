@@ -6,6 +6,7 @@ node_modules/
 # Build Outputs & Compiled Binaries
 dist/
 build/
+!compiler-rs/src/build/
 out/
 /com
 /aivn

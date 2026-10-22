@@ -57,7 +57,7 @@ impl DataCache {
     pub fn new(db_path: Option<&Path>, max_bytes: usize) -> Self {
         let db = db_path.and_then(|p| {
             std::fs::create_dir_all(p.parent()?).ok()?;
-            Database::create(p).ok()
+            crate::compile_cache::open_database(p)
         });
         let mut cache = Self { entries: HashMap::new(), order: VecDeque::new(), bytes: 0, max_bytes, db };
         cache.load();

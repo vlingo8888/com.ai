@@ -7,6 +7,9 @@ import { renderToReadableStream } from "react-dom/server.edge";
 import { createFromReadableStream } from "react-server-dom-webpack/client.edge";
 import { AppRoot } from "./rsc_boundaries.js";
 
+// One import at a time for modules a request has not loaded yet (serial_import.ts)
+const importModule = (specifier: string): Promise<any> => ((globalThis as any).__nata_import ?? ((s: string) => import(s)))(specifier);
+
 // ---------- client references in the SSR layer ----------
 // Ids are browser URLs; each is loaded once per version through the engine (`ssr:` specifier) or, for
 // packages and framework shims, natively (one shared instance with react-dom/server).
@@ -17,7 +20,7 @@ export async function loadClientModule(id: string) {
   const callEngine = (globalThis as any).__NATA_CALL_ENGINE__;
   const { meta } = await callEngine("client_reference", { id });
   if (meta.error) throw new Error(meta.error);
-  const mod = await import(meta.specifier);
+  const mod = await importModule(meta.specifier);
   ssrModules.set(id, mod);
   return mod;
 }

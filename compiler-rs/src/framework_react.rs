@@ -16,7 +16,8 @@ const REFRESH_VERSION: &str = "0.19.0";
 /// The packages that come from the framework's React when it is used
 pub const PACKAGES: [&str; 5] = ["react", "react-dom", "react-server-dom-webpack", "scheduler", "react-refresh"];
 
-fn home() -> PathBuf {
+/// `~/.com` (or `COM_HOME`): what the framework installs once per machine
+pub fn com_home() -> PathBuf {
     if let Ok(dir) = std::env::var("COM_HOME") {
         return PathBuf::from(dir);
     }
@@ -26,7 +27,7 @@ fn home() -> PathBuf {
 
 /// `~/.com/react/<version>`
 pub fn install_dir() -> PathBuf {
-    home().join("react").join(VERSION)
+    com_home().join("react").join(VERSION)
 }
 
 pub fn modules_dir() -> PathBuf {

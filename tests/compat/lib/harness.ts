@@ -150,10 +150,11 @@ async function startServer(dir: string, port: number, cliArgs: string[], readyPa
   };
 }
 
-/** Resident memory of the engine + worker (not the Bun CLI wrapper, which just waits) */
+/** Resident memory of every process of the server: the CLI (when it still waits for the engine
+ *  instead of handing its process over), the engine, the worker and the dependency bundler */
 export function serverRssMb(server: DevServer): number {
   let kb = 0;
-  for (const pid of server.pids().slice(1)) {
+  for (const pid of server.pids()) {
     const out = Bun.spawnSync(["ps", "-o", "rss=", "-p", String(pid)]).stdout.toString().trim();
     kb += Number(out) || 0;
   }

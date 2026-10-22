@@ -1,0 +1,12 @@
+doctype html
+html
+  body.min-h-screen.bg-white
+    .container.mx-auto.px-4
+      h1.text-2xl.font-semibold Title
+      div class="flex gap-2 md:gap-4"
+        a.btn.btn-primary href="/" Home
+        span.text-sm.text-gray-500 = Time.now
+      .grid.grid-cols-2.md:grid-cols-4
+        - items.each do |item|
+          .p-4.rounded-lg.border class=(item.active ? "border-blue-500" : "border-gray-200")
+      p.w-[42px].h-1/2 x

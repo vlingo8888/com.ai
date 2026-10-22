@@ -683,6 +683,9 @@ async function handleHmrMessage(data) {
   } else if (data.type === 'css') {
     console.log('[HMR:CSS] Live updating styles:', data.file);
     await refreshStyles(now);
+  } else if (data.type === 'full_reload') {
+    // Many files changed at once (plugin install, checkout): one fresh page load
+    if (!IS_ZALO) location.reload();
   } else if (data.type === 'reload' || data.type === 'RELOAD' || data.type === 'update') {
     console.log('[HMR:RELOAD] Source modified, hot updating:', data.file);
     moduleCache.clear();
@@ -745,12 +748,12 @@ function connectHmr() {
     return;
   }
   ws.onopen = () => { opened = true; };
-  ws.onmessage = async (e) => {
-    try {
-      await handleHmrMessage(JSON.parse(e.data));
-    } catch (err) {
-      console.error('[HMR] Message processing error:', err);
-    }
+  // One message at a time: concurrent re-renders / reloads raced each other on bursts of changes
+  let queue = Promise.resolve();
+  ws.onmessage = (e) => {
+    queue = queue
+      .then(() => handleHmrMessage(JSON.parse(e.data)))
+      .catch((err) => console.error('[HMR] Message processing error:', err));
   };
   ws.onclose = () => {
     setDevStatus('#ef4444');

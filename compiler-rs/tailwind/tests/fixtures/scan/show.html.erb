@@ -1,0 +1,8 @@
+<div class="max-w-2xl mx-auto <%= @dark ? 'bg-gray-900 text-white' : 'bg-white' %>">
+  <%= link_to "Edit", edit_post_path(@post), class: "rounded-md bg-indigo-600 px-3 py-2 hover:bg-indigo-500" %>
+  <%= content_tag :span, @post.title, class: %w[text-lg font-semibold] %>
+  <% if @post.published? %>
+    <p class="mt-2 text-green-700">Published</p>
+  <% end %>
+  <%= tag.div class: class_names("p-4", "ring-1": @focus) %>
+</div>

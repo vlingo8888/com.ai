@@ -39,6 +39,22 @@ const h = React.createElement;
 // before any module runs (the Flight client reads them as it loads)
 const clientModules = self.__nata_modules || new Map();
 
+// Every `/_bundle/` module the page has loaded, client references or not: a component imported by
+// another client component is only ever fetched by the browser's module loader, and HMR must still
+// hot-update it. The default resource timing buffer (250 entries) is far below a real page's modules
+const loadedModules = new Set();
+try {
+  performance.setResourceTimingBufferSize(100000);
+  const track = (entries) => {
+    for (const entry of entries) {
+      const path = new URL(entry.name).pathname;
+      if (path.startsWith("/_bundle/")) loadedModules.add(path);
+    }
+  };
+  track(performance.getEntriesByType("resource"));
+  new PerformanceObserver((list) => track(list.getEntries())).observe({ type: "resource", buffered: true });
+} catch {}
+
 // ---------- router state ----------
 
 let current = null;
@@ -353,18 +369,23 @@ async function onHmr(data) {
     renderLogs();
   } else if (data.type === "css") {
     await refreshStyles();
+  } else if (data.type === "full_reload") {
+    // Many files changed at once (plugin install, checkout): one fresh page load
+    location.reload();
   } else if (data.type === "update" && data.module) {
     clearBlockingErrors();
     const { url, client, server, boundary, version } = data.module;
-    const loaded = [...clientModules.keys()].some((id) => id.split("?")[0] === url) || document.querySelector(`script[src="${url}"]`);
+    const reference = [...clientModules.keys()].find((id) => id.split("?")[0] === url);
+    const loaded = reference !== undefined || loadedModules.has(url) || document.querySelector(`script[src="${url}"]`);
     if (client && loaded) {
       // Components only: re-run the module and swap implementations, keeping state (Fast Refresh);
       // anything else (hooks, utilities, constants) may have been captured by importers: reload
       if (!boundary || !self.__NATA_REFRESH__) return location.reload();
       try {
+        const module = await import(`${ORIGIN}${url}?v=${version}`);
         // Later payloads must resolve this client reference to the new implementation too, or
         // React would see a different component type and remount it
-        clientModules.set(url, await import(`${ORIGIN}${url}?v=${version}`));
+        if (reference !== undefined) clientModules.set(url, module);
       } catch (error) {
         reportIssue(error, "runtime");
         return;
@@ -387,7 +408,12 @@ function connectHmr() {
   let opened = false;
   const ws = new WebSocket((ORIGIN || location.origin).replace(/^http/, "ws") + "/_hmr");
   ws.onopen = () => (opened = true);
-  ws.onmessage = (event) => onHmr(JSON.parse(event.data)).catch((error) => console.error("[HMR]", error));
+  // One message at a time: concurrent refreshes / reloads raced each other on bursts of changes
+  let queue = Promise.resolve();
+  ws.onmessage = (event) => {
+    const data = JSON.parse(event.data);
+    queue = queue.then(() => onHmr(data)).catch((error) => console.error("[HMR]", error));
+  };
   ws.onclose = () => {
     const status = document.getElementById("_dev_status");
     if (status) status.style.background = "#ef4444";

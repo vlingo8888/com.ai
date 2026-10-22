@@ -49,14 +49,28 @@ pub struct RpcResponse {
 pub struct RpcExecutor;
 
 impl RpcExecutor {
+    /// Whether the files `ensure_runtime_env` writes are all still there: `bun install` (after adding a
+    /// plugin) prunes `node_modules/core` and the stand-in `next`, and regenerating a build may drop `.nata/`
+    fn runtime_env_intact(root: &Path) -> bool {
+        let nata_dir = root.join(".nata");
+        nata_dir.join("core.ts").is_file()
+            && nata_dir.join("next/request.ts").is_file()
+            && nata_dir.join("next-intl-server.ts").is_file()
+            && (crate::project::project_core(root).is_some() || root.join("node_modules/core/index.js").is_file())
+            && (crate::project::has_real_next(root) || root.join("node_modules/next/package.json").is_file())
+    }
+
     /// Ensures that the project has the canonical NATA runtime files (.nata/core.ts, node_modules/core, etc.)
     pub fn ensure_runtime_env<P: AsRef<Path>>(project_dir: P) {
         let root = project_dir.as_ref();
-        // Called on every render/action/route request: write the files once per project per process
+        // Called on every render/action/route request and before the worker starts: written once per
+        // project per process, and again whenever one of them disappeared (a worker loading
+        // `.nata/rsc_render.ts` without `.nata/next/request.ts` caches that failure until it restarts)
         static PREPARED: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<std::path::PathBuf>>> =
             std::sync::OnceLock::new();
         let prepared = PREPARED.get_or_init(Default::default);
-        if !prepared.lock().map(|mut set| set.insert(root.to_path_buf())).unwrap_or(true) {
+        let first = prepared.lock().map(|mut set| set.insert(root.to_path_buf())).unwrap_or(true);
+        if !first && Self::runtime_env_intact(root) {
             return;
         }
         let nata_dir = root.join(".nata");
@@ -624,198 +638,39 @@ export default {
 "#;
         let _ = std::fs::write(nata_dir.join("core.ts"), core_ts);
 
+        // A project that installs the real `next` (or has its own `core/`) also runs with `next dev`:
+        // nothing outside `.nata/` is written for it, the resolver aliases reach the framework modules
+        let real_next = crate::project::has_real_next(root);
+        let own_core = crate::project::project_core(root).is_some();
+
         // 2-3. next/headers, next/server, next/navigation, next/cache: compiler-rs/src/next/
         crate::next_shims::write(root);
-
+        if !real_next {
+            crate::next_shims::write_node_modules(root);
+        }
 
         // next-intl/server: compiler-rs/src/next/intl-server.ts
         let _ = std::fs::write(nata_dir.join("next-intl-server.ts"), include_str!("next/intl-server.ts"));
 
         // 4. Ensure node_modules/core has canonical NATA package files (overriding any broken ancient core package)
-        let nm_core = root.join("node_modules").join("core");
-        let _ = std::fs::create_dir_all(&nm_core);
-        let _ = std::fs::write(
-            nm_core.join("package.json"),
-            r#"{"name":"core","version":"1.0.0","main":"../../.nata/core.ts","module":"../../.nata/core.ts","types":"../../.nata/core.ts"}"#,
-        );
-        let _ = std::fs::write(
-            nm_core.join("index.js"),
-            r#"module.exports = require("../../.nata/core.ts");"#,
-        );
+        if !own_core {
+            let nm_core = root.join("node_modules").join("core");
+            let _ = std::fs::create_dir_all(&nm_core);
+            let _ = std::fs::write(
+                nm_core.join("package.json"),
+                r#"{"name":"core","version":"1.0.0","main":"../../.nata/core.ts","module":"../../.nata/core.ts","types":"../../.nata/core.ts"}"#,
+            );
+            let _ = std::fs::write(
+                nm_core.join("index.js"),
+                r#"module.exports = require("../../.nata/core.ts");"#,
+            );
+        }
 
-        // 5. Ensure node_modules/next/headers, server, navigation, and font mock files
-        let nm_next = root.join("node_modules").join("next");
-        let _ = std::fs::create_dir_all(&nm_next);
-        let _ = std::fs::write(
-            nm_next.join("package.json"),
-            r#"{"name":"next","version":"14.2.5","main":"index.js","types":"index.d.ts"}"#,
-        );
-        let _ = std::fs::write(
-            nm_next.join("index.js"),
-            r#"module.exports = {};"#,
-        );
-        let _ = std::fs::write(
-            nm_next.join("index.d.ts"),
-            r#"export interface Metadata {
-  title?: string | { default?: string; template?: string; absolute?: string };
-  description?: string;
-  applicationName?: string;
-  authors?: Array<{ name: string; url?: string }> | { name: string; url?: string };
-  generator?: string;
-  keywords?: string | string[];
-  referrer?: string;
-  themeColor?: string | Array<{ media?: string; color: string }>;
-  colorScheme?: 'dark' | 'light' | 'dark light';
-  creator?: string;
-  publisher?: string;
-  robots?: string | { index?: boolean; follow?: boolean; nocache?: boolean; noarchive?: boolean; googleBot?: any };
-  alternates?: { canonical?: string; languages?: Record<string, string> };
-  icons?: string | { icon?: string | string[]; apple?: string | string[]; shortcut?: string };
-  openGraph?: {
-    title?: string;
-    description?: string;
-    url?: string;
-    siteName?: string;
-    images?: Array<{ url: string; width?: number; height?: number; alt?: string }> | string;
-    locale?: string;
-    type?: string;
-  };
-  twitter?: {
-    card?: string;
-    title?: string;
-    description?: string;
-    site?: string;
-    creator?: string;
-    images?: string | string[];
-  };
-  manifest?: string;
-  other?: Record<string, string | number | (string | number)[]>;
-  [key: string]: any;
-}
-
-export type ResolvingMetadata = Promise<Metadata>;
-
-export namespace MetadataRoute {
-  export type Robots = {
-    rules: {
-      userAgent?: string | string[];
-      allow?: string | string[];
-      disallow?: string | string[];
-      crawlDelay?: number;
-    } | Array<{
-      userAgent?: string | string[];
-      allow?: string | string[];
-      disallow?: string | string[];
-      crawlDelay?: number;
-    }>;
-    sitemap?: string | string[];
-    host?: string;
-  };
-
-  export type Sitemap = Array<{
-    url: string;
-    lastModified?: string | Date;
-    changeFrequency?: 'always' | 'hourly' | 'daily' | 'weekly' | 'monthly' | 'yearly' | 'never';
-    priority?: number;
-  }>;
-
-  export type Manifest = {
-    name?: string;
-    short_name?: string;
-    description?: string;
-    start_url?: string;
-    display?: 'fullscreen' | 'standalone' | 'minimal-ui' | 'browser';
-    background_color?: string;
-    theme_color?: string;
-    icons?: Array<{
-      src: string;
-      sizes?: string;
-      type?: string;
-      purpose?: string;
-    }>;
-    [key: string]: any;
-  };
-}
-"#,
-        );
-
-
-        // Server-renderable counterparts of the browser shims in `/_nata/shims/*`, so SSR markup matches hydration
-        let nm_next_link = r#"const React = require('react');
-
-function hrefString(href) {
-  if (typeof href === 'string') return href;
-  if (!href || typeof href !== 'object') return '#';
-  const query = href.query && typeof href.query === 'object' ? new URLSearchParams(href.query).toString() : '';
-  return (href.pathname || '') + (query ? '?' + query : '') + (href.hash ? (href.hash.startsWith('#') ? href.hash : '#' + href.hash) : '');
-}
-
-function withBasePath(url) {
-  const base = globalThis.__NATA_BASE_PATH__ || '';
-  return base && url.startsWith('/') && !url.startsWith('//') && url !== base && !url.startsWith(base + '/') ? base + url : url;
-}
-
-function Link({ href, children, onClick, onMouseEnter, target, replace, scroll, prefetch, shallow, passHref, legacyBehavior, locale, ...props }) {
-  return React.createElement('a', { ...props, href: withBasePath(hrefString(href)), target }, children);
-}
-
-module.exports = Link;
-module.exports.default = Link;
-"#;
-        let _ = std::fs::write(nm_next.join("link.js"), nm_next_link);
-
-
-        let nm_next_head = r#"function Head() {
-  return null;
-}
-
-module.exports = Head;
-module.exports.default = Head;
-"#;
-        let _ = std::fs::write(nm_next.join("head.js"), nm_next_head);
-
-        let nm_next_router = r#"exports.useRouter = function() {
-  const loc = globalThis.__NATA_LOCATION__ || { pathname: '/', search: '' };
-  const noop = function() {};
-  return {
-    push: noop,
-    replace: noop,
-    back: noop,
-    forward: noop,
-    reload: noop,
-    prefetch: function() { return Promise.resolve(); },
-    pathname: loc.pathname || '/',
-    asPath: (loc.pathname || '/') + (loc.search || ''),
-    query: { ...(globalThis.__NATA_PARAMS__ || {}) },
-    events: { on: noop, off: noop, emit: noop }
-  };
-};
-exports.default = { useRouter: exports.useRouter };
-"#;
-        let _ = std::fs::write(nm_next.join("router.js"), nm_next_router);
-
-
-        let nm_next_font_google = nm_next.join("font").join("google");
-        let _ = std::fs::create_dir_all(&nm_next_font_google);
-        let nm_font_code = r#"const createFont = (name) => (opts = {}) => ({
-  className: 'font-sans',
-  variable: opts.variable || '--font-sans',
-  style: { fontFamily: 'sans-serif' }
-});
-
-module.exports = new Proxy({}, {
-  get: (target, prop) => {
-    if (prop === '__esModule') return true;
-    if (prop === 'default') return createFont('default');
-    return createFont(String(prop));
-  }
-});
-"#;
-        let _ = std::fs::write(nm_next_font_google.join("index.js"), nm_font_code);
-
-        let nm_next_font_local = nm_next.join("font").join("local");
-        let _ = std::fs::create_dir_all(&nm_next_font_local);
-        let _ = std::fs::write(nm_next_font_local.join("index.js"), nm_font_code);
+        // 5. The stub `next` package (headers, server, navigation, font mocks): only when the project
+        // has not installed the real one, which `next dev` in the same folder still needs
+        if !real_next {
+            write_stub_next_package(root);
+        }
 
         // 6. zmp-sdk is never shimmed: the project uses the real SDK it installed (a fake one in
         // node_modules silently replaced APIs such as chooseImage with stubs)
@@ -830,25 +685,37 @@ module.exports = new Proxy({}, {
                             .entry("compilerOptions")
                             .or_insert_with(|| serde_json::json!({}));
                         if let Some(opts) = compiler_options.as_object_mut() {
-                            opts.entry("baseUrl").or_insert_with(|| serde_json::json!("."));
-                            let paths = opts
-                                .entry("paths")
-                                .or_insert_with(|| serde_json::json!({}));
-                            if let Some(paths_obj) = paths.as_object_mut() {
-                                paths_obj.insert("core".to_string(), serde_json::json!(["./.nata/core.ts"]));
-                                paths_obj.insert("next/headers".to_string(), serde_json::json!(["./.nata/headers.ts"]));
-                                paths_obj.insert("next/server".to_string(), serde_json::json!(["./.nata/server.ts"]));
-                                paths_obj.insert("next-intl/server".to_string(), serde_json::json!(["./.nata/next-intl-server.ts"]));
-                                if !paths_obj.contains_key("@/*") {
-                                    paths_obj.insert("@/*".to_string(), serde_json::json!(["./*", "./src/*"]));
-                                }
-                                if !paths_obj.contains_key("~/*") {
-                                    paths_obj.insert("~/*".to_string(), serde_json::json!(["./*", "./src/*"]));
+                            // The real Next.js reads these paths too: a project with its own `core/` or the
+                            // real `next` keeps its mappings (the resolver aliases cover the engine)
+                            let mut wanted: Vec<(&str, serde_json::Value)> = vec![];
+                            if !own_core {
+                                wanted.push(("core", serde_json::json!(["./.nata/core.ts"])));
+                            }
+                            if !real_next {
+                                wanted.push(("next/headers", serde_json::json!(["./.nata/headers.ts"])));
+                                wanted.push(("next/server", serde_json::json!(["./.nata/server.ts"])));
+                                wanted.push(("next-intl/server", serde_json::json!(["./.nata/next-intl-server.ts"])));
+                            }
+                            if !wanted.is_empty() {
+                                opts.entry("baseUrl").or_insert_with(|| serde_json::json!("."));
+                                let paths = opts
+                                    .entry("paths")
+                                    .or_insert_with(|| serde_json::json!({}));
+                                if let Some(paths_obj) = paths.as_object_mut() {
+                                    for (key, value) in wanted {
+                                        paths_obj.insert(key.to_string(), value);
+                                    }
+                                    if !real_next && !paths_obj.contains_key("@/*") {
+                                        paths_obj.insert("@/*".to_string(), serde_json::json!(["./*", "./src/*"]));
+                                    }
+                                    if !real_next && !paths_obj.contains_key("~/*") {
+                                        paths_obj.insert("~/*".to_string(), serde_json::json!(["./*", "./src/*"]));
+                                    }
                                 }
                             }
                         }
                         if let Ok(updated_str) = serde_json::to_string_pretty(&json_val) {
-                            if content.trim() != updated_str.trim() {
+                            if json_val != serde_json::from_str::<serde_json::Value>(&content).unwrap_or_default() {
                                 let _ = std::fs::write(&tsconfig_path, updated_str);
                             }
                         }
@@ -876,7 +743,7 @@ module.exports = new Proxy({}, {
         }
 
         let nm_next_intl = root.join("node_modules").join("next-intl");
-        if nm_next_intl.exists() {
+        if nm_next_intl.exists() && !real_next {
             let _ = std::fs::write(
                 nm_next_intl.join("server.js"),
                 r#"module.exports = require("../../.nata/next-intl-server.ts");"#,
@@ -1100,6 +967,182 @@ setTimeout(() => process.exit(code), 10);
     }
 }
 
+/// A stand-in `next` package in node_modules for projects that do not install Next.js
+fn write_stub_next_package(root: &Path) {
+    let nm_next = root.join("node_modules").join("next");
+    let _ = std::fs::create_dir_all(&nm_next);
+    let _ = std::fs::write(
+        nm_next.join("package.json"),
+        r#"{"name":"next","version":"14.2.5","main":"index.js","types":"index.d.ts"}"#,
+    );
+    let _ = std::fs::write(
+        nm_next.join("index.js"),
+        r#"module.exports = {};"#,
+    );
+    let _ = std::fs::write(
+        nm_next.join("index.d.ts"),
+        r#"export interface Metadata {
+  title?: string | { default?: string; template?: string; absolute?: string };
+  description?: string;
+  applicationName?: string;
+  authors?: Array<{ name: string; url?: string }> | { name: string; url?: string };
+  generator?: string;
+  keywords?: string | string[];
+  referrer?: string;
+  themeColor?: string | Array<{ media?: string; color: string }>;
+  colorScheme?: 'dark' | 'light' | 'dark light';
+  creator?: string;
+  publisher?: string;
+  robots?: string | { index?: boolean; follow?: boolean; nocache?: boolean; noarchive?: boolean; googleBot?: any };
+  alternates?: { canonical?: string; languages?: Record<string, string> };
+  icons?: string | { icon?: string | string[]; apple?: string | string[]; shortcut?: string };
+  openGraph?: {
+title?: string;
+description?: string;
+url?: string;
+siteName?: string;
+images?: Array<{ url: string; width?: number; height?: number; alt?: string }> | string;
+locale?: string;
+type?: string;
+  };
+  twitter?: {
+card?: string;
+title?: string;
+description?: string;
+site?: string;
+creator?: string;
+images?: string | string[];
+  };
+  manifest?: string;
+  other?: Record<string, string | number | (string | number)[]>;
+  [key: string]: any;
+}
+
+export type ResolvingMetadata = Promise<Metadata>;
+
+export namespace MetadataRoute {
+  export type Robots = {
+rules: {
+  userAgent?: string | string[];
+  allow?: string | string[];
+  disallow?: string | string[];
+  crawlDelay?: number;
+} | Array<{
+  userAgent?: string | string[];
+  allow?: string | string[];
+  disallow?: string | string[];
+  crawlDelay?: number;
+}>;
+sitemap?: string | string[];
+host?: string;
+  };
+
+  export type Sitemap = Array<{
+url: string;
+lastModified?: string | Date;
+changeFrequency?: 'always' | 'hourly' | 'daily' | 'weekly' | 'monthly' | 'yearly' | 'never';
+priority?: number;
+  }>;
+
+  export type Manifest = {
+name?: string;
+short_name?: string;
+description?: string;
+start_url?: string;
+display?: 'fullscreen' | 'standalone' | 'minimal-ui' | 'browser';
+background_color?: string;
+theme_color?: string;
+icons?: Array<{
+  src: string;
+  sizes?: string;
+  type?: string;
+  purpose?: string;
+}>;
+[key: string]: any;
+  };
+}
+"#,
+    );
+
+
+    // Server-renderable counterparts of the browser shims in `/_nata/shims/*`, so SSR markup matches hydration
+    let nm_next_link = r#"const React = require('react');
+
+function hrefString(href) {
+  if (typeof href === 'string') return href;
+  if (!href || typeof href !== 'object') return '#';
+  const query = href.query && typeof href.query === 'object' ? new URLSearchParams(href.query).toString() : '';
+  return (href.pathname || '') + (query ? '?' + query : '') + (href.hash ? (href.hash.startsWith('#') ? href.hash : '#' + href.hash) : '');
+}
+
+function withBasePath(url) {
+  const base = globalThis.__NATA_BASE_PATH__ || '';
+  return base && url.startsWith('/') && !url.startsWith('//') && url !== base && !url.startsWith(base + '/') ? base + url : url;
+}
+
+function Link({ href, children, onClick, onMouseEnter, target, replace, scroll, prefetch, shallow, passHref, legacyBehavior, locale, ...props }) {
+  return React.createElement('a', { ...props, href: withBasePath(hrefString(href)), target }, children);
+}
+
+module.exports = Link;
+module.exports.default = Link;
+"#;
+    let _ = std::fs::write(nm_next.join("link.js"), nm_next_link);
+
+
+    let nm_next_head = r#"function Head() {
+  return null;
+}
+
+module.exports = Head;
+module.exports.default = Head;
+"#;
+    let _ = std::fs::write(nm_next.join("head.js"), nm_next_head);
+
+    let nm_next_router = r#"exports.useRouter = function() {
+  const loc = globalThis.__NATA_LOCATION__ || { pathname: '/', search: '' };
+  const noop = function() {};
+  return {
+push: noop,
+replace: noop,
+back: noop,
+forward: noop,
+reload: noop,
+prefetch: function() { return Promise.resolve(); },
+pathname: loc.pathname || '/',
+asPath: (loc.pathname || '/') + (loc.search || ''),
+query: { ...(globalThis.__NATA_PARAMS__ || {}) },
+events: { on: noop, off: noop, emit: noop }
+  };
+};
+exports.default = { useRouter: exports.useRouter };
+"#;
+    let _ = std::fs::write(nm_next.join("router.js"), nm_next_router);
+
+
+    let nm_next_font_google = nm_next.join("font").join("google");
+    let _ = std::fs::create_dir_all(&nm_next_font_google);
+    let nm_font_code = r#"const createFont = (name) => (opts = {}) => ({
+  className: 'font-sans',
+  variable: opts.variable || '--font-sans',
+  style: { fontFamily: 'sans-serif' }
+});
+
+module.exports = new Proxy({}, {
+  get: (target, prop) => {
+if (prop === '__esModule') return true;
+if (prop === 'default') return createFont('default');
+return createFont(String(prop));
+  }
+});
+"#;
+    let _ = std::fs::write(nm_next_font_google.join("index.js"), nm_font_code);
+
+    let nm_next_font_local = nm_next.join("font").join("local");
+    let _ = std::fs::create_dir_all(&nm_next_font_local);
+    let _ = std::fs::write(nm_next_font_local.join("index.js"), nm_font_code);
+}
+
 pub fn format_module_path(clean: &str) -> String {
     let without_ext = clean
         .trim_end_matches(".ts")
@@ -1179,3 +1222,80 @@ pub fn dunce_canonicalize<P: AsRef<Path>>(p: P) -> std::path::PathBuf {
     }
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::RpcExecutor;
+
+    fn project(name: &str) -> std::path::PathBuf {
+        let root = std::env::temp_dir().join(format!("nata_runtime_env_{name}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    #[test]
+    fn leaves_a_next_app_with_its_own_core_untouched() {
+        // The shape of a comx `build/nextjs`: real next, core/index.ts mapped by the tsconfig
+        let root = project("comx");
+        std::fs::create_dir_all(root.join("node_modules/next/dist")).unwrap();
+        std::fs::create_dir_all(root.join("node_modules/next-intl")).unwrap();
+        std::fs::create_dir_all(root.join("core")).unwrap();
+        std::fs::write(root.join("core/index.ts"), "export const db = {};\n").unwrap();
+        let next_pkg = r#"{"name":"next","version":"15.2.0"}"#;
+        std::fs::write(root.join("node_modules/next/package.json"), next_pkg).unwrap();
+        let tsconfig = "{\n    \"compilerOptions\": {\n        \"baseUrl\": \".\",\n        \"paths\": { \"@/*\": [\"./*\"], \"core\": [\"./core/index.ts\"] }\n    }\n}\n";
+        std::fs::write(root.join("tsconfig.json"), tsconfig).unwrap();
+
+        RpcExecutor::ensure_runtime_env(&root);
+
+        assert_eq!(std::fs::read_to_string(root.join("tsconfig.json")).unwrap(), tsconfig);
+        assert_eq!(std::fs::read_to_string(root.join("node_modules/next/package.json")).unwrap(), next_pkg);
+        assert!(!root.join("node_modules/next/headers.js").exists());
+        assert!(!root.join("node_modules/next-intl/server.js").exists());
+        assert!(!root.join("node_modules/core").exists());
+        // The engine's own modules are still there for the resolver aliases
+        assert!(root.join(".nata/next/headers.ts").is_file());
+        assert!(root.join(".nata/core.ts").is_file());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn sets_up_a_plain_project() {
+        let root = project("plain");
+        std::fs::write(root.join("tsconfig.json"), r#"{"compilerOptions":{}}"#).unwrap();
+
+        RpcExecutor::ensure_runtime_env(&root);
+
+        let tsconfig: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(root.join("tsconfig.json")).unwrap()).unwrap();
+        assert_eq!(tsconfig["compilerOptions"]["paths"]["core"], serde_json::json!(["./.nata/core.ts"]));
+        assert_eq!(tsconfig["compilerOptions"]["paths"]["next/headers"], serde_json::json!(["./.nata/headers.ts"]));
+        assert!(root.join("node_modules/core/package.json").is_file());
+        assert!(root.join("node_modules/next/package.json").is_file());
+        assert!(root.join("node_modules/next/headers.js").is_file());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn restores_runtime_files_deleted_after_startup() {
+        let root = project("restore");
+        RpcExecutor::ensure_runtime_env(&root);
+        assert!(root.join(".nata/next/request.ts").is_file());
+
+        // `bun install` after adding a plugin prunes packages missing from package.json; a regenerated
+        // build may lose `.nata/next`
+        std::fs::remove_dir_all(root.join(".nata/next")).unwrap();
+        std::fs::remove_dir_all(root.join("node_modules/core")).unwrap();
+        RpcExecutor::ensure_runtime_env(&root);
+        assert!(root.join(".nata/next/request.ts").is_file());
+        assert!(root.join("node_modules/core/index.js").is_file());
+
+        // The worker's runtime files bring them back too, before the worker imports them
+        std::fs::remove_dir_all(root.join(".nata/next")).unwrap();
+        crate::worker_pool::write_runtime_files(&root).unwrap();
+        assert!(root.join(".nata/next/request.ts").is_file());
+        assert!(root.join(".nata/rsc_render.ts").is_file());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}

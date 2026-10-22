@@ -1,0 +1,8 @@
+{
+  "blocks": [
+    { "type": "hero", "className": "bg-gradient-to-r from-pink-500 to-violet-600 py-24" },
+    { "type": "text", "classes": ["text-lg", "md:text-xl", "leading-8"] },
+    { "type": "button", "class": "rounded-full px-6 py-3 hover:scale-105", "style": "--tw-shadow: 0 0 #0000" },
+    { "html": "<div class=\"grid grid-cols-[1fr_auto] gap-x-4\"></div>" }
+  ]
+}

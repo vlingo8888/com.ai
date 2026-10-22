@@ -281,3 +281,71 @@ fn mod_client_only_react_import_in_server_component_is_a_compile_error() {
     assert!(compile_err("components/types.tsx", Layer::Rsc).is_none());
     assert!(compile_err("node_modules/lib/index.js", Layer::Rsc).is_none());
 }
+
+#[test]
+fn mod_012_browser_require_becomes_a_hoisted_import() {
+    let src = "\"use client\";\nlet nav: any[] = [];\ntry {\n  const m = require(\"@/lib/posts\");\n  nav = m.getPosts;\n} catch (_) {}\nlet auth: any;\ntry {\n  auth = require(\"@/features/missing\");\n} catch (_) {}\nexport function Nav() { return nav; }\n";
+    let root = project("client_require", &[("app/nav.tsx", src)]);
+    let out = compile(&root, "app/nav.tsx", Layer::Client);
+    assert!(out.code.contains("import * as __nata_req_0 from \"/_bundle/lib/posts.ts\""), "{}", out.code);
+    assert!(out.code.contains("const m = __nata_req_0"), "{}", out.code);
+    assert!(out.code.contains("Cannot find module '@/features/missing'"), "missing module throws where required: {}", out.code);
+    assert!(!out.code.contains("require("), "{}", out.code);
+    // The server layers keep CommonJS `require`
+    let server = compile(&root, "app/nav.tsx", Layer::Ssr);
+    assert!(server.code.contains("require("), "{}", server.code);
+}
+
+#[test]
+fn mod_013_ts_files_parse_generic_arrows_without_jsx() {
+    // A `.ts` file is not TSX: `<T>(x) => x` is a generic arrow, even when a string holds "</"
+    let src = "type Spec<T> = { kind: string; label?: string };\nexport const tag = \"</b>\";\nexport const part = {\n  frame: <T>(label?: string, o: { accordion?: boolean } = {}): Spec<T> => ({ kind: \"frame\", label, ...o }),\n};\n";
+    let root = project("ts_generic_arrow", &[("lib/spec.ts", src)]);
+    let out = compile(&root, "lib/spec.ts", Layer::Ssr);
+    assert!(out.code.contains("frame: (label"), "{}", out.code);
+}
+
+#[test]
+fn mod_014_browser_imports_plain_values_of_a_modules_barrel() {
+    // `modules/<domain>/index.ts` re-exports both domain data and server actions: only the actions are RPC
+    let dialog = "\"use client\";\nimport { PAGE_TEMPLATES, SUBPAGE_TEMPLATES as SUB, slugify, createPage, listPages } from \"@/modules/site\";\nexport const choices = [...SUB, ...PAGE_TEMPLATES.map((p) => p.id), slugify(\"A\")];\nexport const go = () => [createPage(), listPages()];\n";
+    let root = project(
+        "legacy_rpc_barrel",
+        &[
+            ("modules/site/index.ts", "export * from \"./domain/templates\";\nexport { slugify } from \"./domain/slug\";\nexport * from \"./presentation\";\n"),
+            ("modules/site/domain/templates.ts", "export const PAGE_TEMPLATES = [{ id: \"home\" }];\nexport const SUBPAGE_TEMPLATES = [\"blank\"] as const;\n"),
+            ("modules/site/domain/slug.ts", "export function slugify(s: string) { return s.toLowerCase(); }\n"),
+            ("modules/site/presentation/index.ts", "export * from \"./site.actions\";\nexport * from \"./legacy\";\n"),
+            ("modules/site/presentation/site.actions.ts", "\"use server\";\nexport async function createPage() { return 1; }\n"),
+            ("modules/site/presentation/legacy.ts", "export async function listPages() { return []; }\n"),
+            ("features/site/dialog.tsx", dialog),
+        ],
+    );
+    let out = compile(&root, "features/site/dialog.tsx", Layer::Client);
+    assert!(out.code.contains("import { PAGE_TEMPLATES } from \"/_bundle/modules/site/domain/templates.ts\""), "{}", out.code);
+    assert!(out.code.contains("import { SUBPAGE_TEMPLATES as SUB } from \"/_bundle/modules/site/domain/templates.ts\""), "{}", out.code);
+    assert!(out.code.contains("import { slugify } from \"/_bundle/modules/site/domain/slug.ts\""), "{}", out.code);
+    // "use server" actions and legacy actions of `presentation/` stay calls to /_nata/rpc
+    assert!(out.code.contains("const createPage = new Proxy"), "{}", out.code);
+    assert!(out.code.contains("const listPages = new Proxy"), "{}", out.code);
+    assert!(!out.code.contains("const SUB = new Proxy"), "{}", out.code);
+}
+
+#[test]
+fn mod_015_server_imports_of_packages_that_are_not_installed_are_listed() {
+    let action = "\"use server\";\nimport { nanoid } from \"nanoid\";\nimport { z } from \"zod/v4\";\nimport { Star } from \"lucide-react\";\nimport { a } from \"@/lib/missing\";\nimport fs from \"node:fs\";\nexport async function create() { return [nanoid(), z, Star, a, fs]; }\n";
+    let root = project(
+        "missing_packages",
+        &[
+            ("modules/posts/actions.ts", action),
+            ("node_modules/lib-with-optional/package.json", r#"{"name":"lib-with-optional","module":"./index.js"}"#),
+            ("node_modules/lib-with-optional/index.js", "import \"optional-peer\";\nexport const x = 1;\n"),
+        ],
+    );
+    let out = compile(&root, "modules/posts/actions.ts", Layer::Rsc);
+    // One entry per package (`zod/v4` is `zod`); installed packages, aliases and builtins are not listed
+    assert_eq!(out.missing_packages, vec!["nanoid".to_string(), "zod".to_string()]);
+    // A package's own imports are its business (optional peers)
+    let dep = compile(&root, "node_modules/lib-with-optional/index.js", Layer::Rsc);
+    assert!(dep.missing_packages.is_empty(), "{:?}", dep.missing_packages);
+}

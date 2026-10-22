@@ -1,0 +1,5 @@
+<div class={["flex gap-2", @active && "bg-zinc-900 text-white"]}>
+  <.button class="rounded-lg px-3 py-2 phx-submit-loading:opacity-75">Save</.button>
+  <p :if={@error} class="mt-2 text-sm text-rose-600"><%= @error %></p>
+  <span class={"inline-block #{if @big, do: "text-2xl", else: "text-base"}"}>x</span>
+</div>

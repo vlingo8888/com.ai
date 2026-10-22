@@ -1,13 +1,11 @@
 use swc_core::common::{
     comments::NoopComments,
-    errors::Handler,
     sync::Lrc,
-    FileName, Globals, Mark, SourceMap, Spanned, GLOBALS,
+    Globals, Mark, SourceMap, GLOBALS,
 };
 use swc_core::ecma::{
     ast::Pass,
     codegen::{text_writer::JsWriter, Config as CodegenConfig, Emitter},
-    parser::{lexer::Lexer, Parser, StringInput, Syntax, TsSyntax},
     transforms::{
         base::resolver,
         react::{react, Options as ReactOptions, Runtime},
@@ -55,54 +53,9 @@ impl SwcCompiler {
     /// Compiles TypeScript / TSX source code into browser-executable JavaScript
     pub fn compile(source_code: &str, file_name: &str) -> Result<String, CompileError> {
         let cm: Lrc<SourceMap> = Default::default();
-        // Diagnostics are reported through `CompileError`, so SWC's own rustc-style output is discarded
-        let handler = Handler::with_emitter_writer(Box::new(std::io::sink()), Some(cm.clone()));
-
-        let fm = cm.new_source_file(
-            FileName::Custom(file_name.to_string()).into(),
-            source_code.to_string(),
-        );
-
         let is_tsx = file_name.ends_with(".tsx") || file_name.ends_with(".jsx") || source_code.contains("</") || source_code.contains("/>");
 
-        let syntax = Syntax::Typescript(TsSyntax {
-            tsx: true,
-            decorators: true,
-            dts: false,
-            no_early_errors: true,
-            ..Default::default()
-        });
-
-        let lexer = Lexer::new(
-            syntax,
-            Default::default(),
-            StringInput::from(&*fm),
-            None,
-        );
-
-        let mut parser = Parser::new_from(lexer);
-
-        for err in parser.take_errors() {
-            err.into_diagnostic(&handler).emit();
-        }
-
-        let mut program = match parser.parse_program() {
-            Ok(p) => p,
-            Err(err) => {
-                let pos = cm.lookup_char_pos(err.span().lo);
-                let message = err.kind().msg().to_string();
-                err.into_diagnostic(&handler).emit();
-                let line = pos.line;
-                let column = pos.col_display + 1;
-                return Err(CompileError {
-                    file: file_name.to_string(),
-                    message,
-                    line: Some(line),
-                    column: Some(column),
-                    frame: crate::term::code_frame(source_code, line, column, 2),
-                });
-            }
-        };
+        let mut program = super::module::parse(&cm, source_code, file_name)?;
 
         let globals = Globals::default();
         GLOBALS.set(&globals, || {

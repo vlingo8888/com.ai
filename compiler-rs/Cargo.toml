@@ -15,6 +15,8 @@ path = "src/main.rs"
 [dependencies]
 tokio = { version = "1.43", features = ["full"] }
 axum = { version = "0.8", features = ["ws"] }
+# `com build`: reads modules from the build server without a socket (`ServiceExt::oneshot`)
+tower = { version = "0.5", default-features = false, features = ["util"] }
 tower-http = { version = "0.6", features = ["cors", "trace", "fs", "compression-br", "compression-gzip"] }
 # `com start`: precompressed pages
 brotli = { version = "8", default-features = false, features = ["std"] }
@@ -29,6 +31,9 @@ clap = { version = "4.5", features = ["derive"] }
 futures-util = "0.3"
 walkdir = "2.5"
 lightningcss = "1.0.0-alpha.72"
+# Native Tailwind CSS v4 (instead of @tailwindcss/node in the Bun worker)
+tailwind-rs = { path = "tailwind" }
+rayon = "1.10"
 mimalloc = { version = "0.1", default-features = false }
 blake3 = "1"
 redb = "2"
@@ -54,9 +59,20 @@ ttf-parser = { version = "0.25", default-features = false, features = ["std"] }
 # next/og: rasterizes the SVG Satori renders (text is already paths: no font features needed)
 resvg = { version = "0.48", default-features = false }
 
+# Day-to-day builds (`cargo build --release`, what `com dev` runs from target/release): fully
+# optimized code, but compiled in parallel and incrementally, so a rebuild after a change is quick
 [profile.release]
 opt-level = 3
-lto = true
-codegen-units = 1
+lto = false
+codegen-units = 256
+incremental = true
 panic = "abort"
 strip = true
+
+# Published binaries (.github/workflows/release.yml): whole-program LTO in one codegen unit, smaller
+# and a little faster, but every build re-optimizes everything (minutes)
+[profile.dist]
+inherits = "release"
+lto = true
+codegen-units = 1
+incremental = false

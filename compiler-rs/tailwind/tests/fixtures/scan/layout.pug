@@ -1,0 +1,12 @@
+doctype html
+html(lang="en")
+  body.bg-gray-50.text-gray-900
+    header.sticky.top-0.z-50.border-b.backdrop-blur
+      nav.flex.items-center.justify-between(class="h-16 px-4 md:px-8")
+        a.text-xl.font-semibold(href="/") Brand
+        ul.hidden.md:flex.gap-6
+          li: a.hover:underline(href="/docs") Docs
+    main(class=["container", "mx-auto"])
+      .grid.grid-cols-1.lg:grid-cols-3.gap-8
+        div(class!=attributes.class)
+        p.w-1/2.mt-[10px] text

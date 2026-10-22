@@ -4,6 +4,9 @@
  * in Next.js App Router API endpoints (`route.ts` / `route.js`).
  */
 
+// One import at a time for modules a request has not loaded yet (serial_import.ts)
+const importModule = (specifier: string): Promise<any> => ((globalThis as any).__nata_import ?? ((s: string) => import(s)))(specifier);
+
 const ROUTE_DELIM_START = "__NATA_ROUTE_OUT_START__";
 const ROUTE_DELIM_END = "__NATA_ROUTE_OUT_END__";
 
@@ -74,7 +77,7 @@ export async function handleRoute(input: RouteHandlerInput): Promise<RouteHandle
     const NextResponse = serverModule?.NextResponse || (globalThis as any).Response;
 
     // 3. Dynamically import the target route handler module
-    const mod = await import(input.moduleSpecifier || input.filePath);
+    const mod = await importModule(input.moduleSpecifier || input.filePath);
 
     // List of standard HTTP methods supported by Next.js route handlers
     const httpMethods = ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS", "HEAD"];

@@ -1,0 +1,9 @@
+@model IndexModel
+<div class="container mx-auto @(Model.IsDark ? "bg-slate-900" : "bg-white")">
+    <h1 class="text-4xl font-bold @@md:text-5xl">@Model.Title</h1>
+    <a class="text-blue-600 hover:underline" href="mailto:info@@example.com">Mail</a>
+    @foreach (var item in Model.Items)
+    {
+        <p class="py-2 border-b">@item</p>
+    }
+</div>

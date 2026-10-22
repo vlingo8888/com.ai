@@ -104,6 +104,15 @@ async fn compile_in_worker(root: &Path, entry: &Option<PathBuf>, input: &str) ->
     }
 }
 
+/// Prints `message` once per project and message
+fn warn_once(root: &Path, message: &str) {
+    static SEEN: OnceLock<Mutex<std::collections::HashSet<String>>> = OnceLock::new();
+    let key = format!("{}\0{message}", root.display());
+    if SEEN.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner()).insert(key) {
+        crate::term::warn(message);
+    }
+}
+
 /// The compiled project stylesheet (or the browser fallback)
 pub async fn project_stylesheet(root: &Path) -> Stylesheet {
     // `com start`: compiled (and minified) by `com build`, Tailwind is not needed at runtime
@@ -112,12 +121,28 @@ pub async fn project_stylesheet(root: &Path) -> Stylesheet {
     }
     let entry = find_entry(root);
     let legacy_css = || super::CssCompiler::find_and_load_custom_css(root);
+    let user_css = entry.as_ref().and_then(|p| std::fs::read_to_string(p).ok()).unwrap_or_default();
+    let input = compose_input(&user_css);
+
+    // Native Tailwind in the engine; the worker only for what it does not support
+    if super::tailwind_native::enabled() {
+        let (root_buf, entry_buf, input_buf) = (root.to_path_buf(), entry.clone(), input.clone());
+        let minify = crate::mode::is_production();
+        let outcome = tokio::task::spawn_blocking(move || super::tailwind_native::compile(&root_buf, entry_buf.as_deref(), &input_buf, minify)).await;
+        match outcome {
+            Ok(super::tailwind_native::Outcome::Compiled(css)) => return Stylesheet::Compiled(css),
+            Ok(super::tailwind_native::Outcome::Failed(err)) => {
+                crate::term::error("Could not compile the stylesheet", Some(&err), None);
+                return Stylesheet::Browser(legacy_css());
+            }
+            Ok(super::tailwind_native::Outcome::Unsupported(reason)) => warn_once(root, &format!("{reason} needs the JavaScript Tailwind compiler: compiling the stylesheet in the worker")),
+            Err(_) => {}
+        }
+    }
+
     if !crate::worker_pool::enabled() || *tailwind_unavailable().lock().unwrap_or_else(|e| e.into_inner()) {
         return Stylesheet::Browser(legacy_css());
     }
-
-    let user_css = entry.as_ref().and_then(|p| std::fs::read_to_string(p).ok()).unwrap_or_default();
-    let input = compose_input(&user_css);
     match compile_in_worker(root, &entry, &input).await {
         Ok(css) => Stylesheet::Compiled(css),
         Err(err) if err.contains("TAILWIND_MISSING") => {

@@ -1,0 +1,11 @@
+{% extends "base.twig" %}
+{% block content %}
+  <div class="container mx-auto {{ extra_class }} {% if active %}bg-blue-500{% else %}bg-gray-200{% endif %}">
+    <h1 class="text-3xl font-bold">{{ title|upper }}</h1>
+    {% for item in items %}
+      <p class="{{ loop.first ? 'mt-0' : 'mt-4' }} text-gray-700">{{ item }}</p>
+    {% endfor %}
+    {% set classes = html_classes('px-4', { 'py-2': small, 'py-4': not small }) %}
+    {{ el.addClass('ring-2') }} {{ el.removeClass('hidden') }}
+  </div>
+{% endblock %}

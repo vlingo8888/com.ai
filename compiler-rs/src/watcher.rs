@@ -3,7 +3,6 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::HashSet,
     path::{Path, PathBuf},
-    sync::mpsc::channel,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tokio::sync::broadcast;
@@ -63,6 +62,24 @@ impl ProjectWatcher {
 pub struct ProjectWatcher;
 
 impl ProjectWatcher {
+    /// A save (one file, or a few: editors write a temporary file and rename it) is applied once
+    /// changes have been quiet this long
+    const QUIET_EDIT: Duration = Duration::from_millis(20);
+    /// Bulk writes (plugin install, git checkout, codegen) must be quiet this long before a batch is
+    /// applied: applying them mid-write restarted the worker, rescanned routes and reloaded the browser
+    /// again and again
+    const QUIET_BULK: Duration = Duration::from_millis(300);
+    /// A batch with more files than this is bulk…
+    const EDIT_FILES: usize = 3;
+    /// …and so is one following BURST_BATCHES batches applied within BURST_WINDOW (a tool writing files
+    /// one by one, slowly enough for each to look like a save)
+    const BURST_BATCHES: usize = 3;
+    const BURST_WINDOW: Duration = Duration::from_secs(1);
+    /// …unless they keep coming: apply what we have after this
+    const MAX_WAIT: Duration = Duration::from_secs(10);
+    /// More files than this in one batch ⇒ a single full page reload
+    const BULK_FILES: usize = 40;
+
     /// Starts the native background file watcher for the project root and symlinked node_modules
     pub fn start<P: AsRef<Path>>(
         root_dir: P,
@@ -73,9 +90,13 @@ impl ProjectWatcher {
         let canon_root = root.canonicalize().unwrap_or_else(|_| root.clone());
 
         tokio::spawn(async move {
-            let (tx, rx) = channel();
+            // Events wake this task up: nothing runs while no file changes
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<notify::Result<Event>>();
+            let handler = move |event: notify::Result<Event>| {
+                let _ = tx.send(event);
+            };
 
-            let mut watcher: RecommendedWatcher = match RecommendedWatcher::new(tx, notify::Config::default()) {
+            let mut watcher: RecommendedWatcher = match RecommendedWatcher::new(handler, notify::Config::default()) {
                 Ok(w) => w,
                 Err(e) => {
                     crate::term::error("Failed to start the file watcher (hot reload disabled)", Some(&e.to_string()), None);
@@ -98,35 +119,56 @@ impl ProjectWatcher {
                 }
             }
 
-            // 3. Debounced Event Loop
-            let mut last_event_time = Instant::now() - Duration::from_secs(1);
+            // 3. Debounced event loop: a batch is applied once changes have been quiet for QUIET_EDIT (a
+            // save) or QUIET_BULK (many files), or after MAX_WAIT when they keep coming
+            let mut last_event_time = Instant::now();
             let mut pending_files: HashSet<PathBuf> = HashSet::new();
             // When the current batch of changes started, for the ` ✓ Compiled … in Xms` line
             let mut first_change: Option<Instant> = None;
+            let mut recent_batches: std::collections::VecDeque<Instant> = std::collections::VecDeque::new();
 
             loop {
-                // Poll from sync channel non-blockingly with tokio sleep
-                while let Ok(event_res) = rx.try_recv() {
-                    if let Ok(event) = event_res {
-                        if Self::is_relevant_event(&event) {
-                            for path in event.paths {
-                                if !Self::should_ignore_path(&path, &canon_root) {
-                                    pending_files.insert(path);
-                                    first_change.get_or_insert_with(Instant::now);
-                                }
+                let event = if pending_files.is_empty() {
+                    match rx.recv().await {
+                        Some(event) => Some(event),
+                        None => return,
+                    }
+                } else {
+                    recent_batches.retain(|at| at.elapsed() < Self::BURST_WINDOW);
+                    let bulk = pending_files.len() > Self::EDIT_FILES || recent_batches.len() >= Self::BURST_BATCHES;
+                    let quiet = if bulk { Self::QUIET_BULK } else { Self::QUIET_EDIT };
+                    let deadline = (last_event_time + quiet).min(first_change.unwrap_or(last_event_time) + Self::MAX_WAIT);
+                    match tokio::time::timeout_at(deadline.into(), rx.recv()).await {
+                        Ok(Some(event)) => Some(event),
+                        Ok(None) => return,
+                        Err(_) => None,
+                    }
+                };
+                if let Some(event) = event {
+                    // A watcher error is not a change: keep waiting
+                    let Ok(event) = event else { continue };
+                    if Self::is_relevant_event(&event) {
+                        for path in event.paths {
+                            if !Self::should_ignore_path(&path, &canon_root) {
+                                pending_files.insert(path);
+                                first_change.get_or_insert_with(Instant::now);
+                                last_event_time = Instant::now();
                             }
                         }
                     }
+                    continue;
                 }
 
-                // If we have pending changes and debounce time has elapsed (80ms)
-                if !pending_files.is_empty() && last_event_time.elapsed() >= Duration::from_millis(80) {
+                if !pending_files.is_empty() {
+                    recent_batches.push_back(Instant::now());
                     let now_ms = SystemTime::now()
                         .duration_since(UNIX_EPOCH)
                         .unwrap_or_default()
                         .as_millis();
 
                     let files_to_notify: Vec<PathBuf> = pending_files.drain().collect();
+                    // New class names, CSS edits: the next stylesheet request rescans (changed files only)
+                    crate::css_compiler::tailwind_native::invalidate(&canon_root);
                     let changed_at = first_change.take().unwrap_or_else(Instant::now);
 
                     // Server code: with React Server Components the worker loads modules through the
@@ -148,6 +190,21 @@ impl ProjectWatcher {
                         let new_router = crate::router::AppRouter::scan(&canon_root);
                         let mut r_guard = router.write().await;
                         *r_guard = new_router;
+                    }
+
+                    // A big batch (plugin install, git checkout, codegen): one reload of the page instead of one
+                    // message per file, which made the browser refetch or reload dozens of times concurrently
+                    if files_to_notify.len() > Self::BULK_FILES {
+                        let msg = HmrMessage { event_type: "full_reload".to_string(), file: String::new(), timestamp: now_ms, module: None };
+                        if let Ok(json_str) = serde_json::to_string(&msg) {
+                            let _ = hmr_tx.send(json_str);
+                        }
+                        crate::term::success(&format!(
+                            "Reloaded after {} file changes in {}",
+                            files_to_notify.len(),
+                            crate::term::format_ms(changed_at.elapsed().as_secs_f64() * 1000.0)
+                        ));
+                        continue;
                     }
 
                     for path in files_to_notify {
@@ -186,10 +243,7 @@ impl ProjectWatcher {
                         }
                     }
 
-                    last_event_time = Instant::now();
                 }
-
-                tokio::time::sleep(Duration::from_millis(50)).await;
             }
         })
     }

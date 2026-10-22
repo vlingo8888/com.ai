@@ -5,11 +5,17 @@
 //! browser. Stored with redb in `.nata/cache/compile.redb`. The file is dropped and recreated when it
 //! grows past `COM_CACHE_MAX_MB` (default 256), so the cache stays bounded. If the database cannot be
 //! opened (e.g. another `com dev` holds it), the cache is simply disabled.
+//!
+//! Writes skip fsync: a durable redb commit is an `F_FULLFSYNC` on macOS (~4ms), and a cold page
+//! compiles hundreds of modules one commit each. A background thread makes them durable once writes
+//! pause (or every `FLUSH_EVERY` writes); a crash loses at most those entries, which recompile.
 
-use redb::{Database, ReadableTableMetadata, TableDefinition};
+use redb::{Database, Durability, ReadableTableMetadata, TableDefinition};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::time::{Duration, Instant};
 
 const TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("compiled_modules");
 
@@ -26,13 +32,29 @@ fn engine_fingerprint() -> &'static str {
     })
 }
 
+/// Non-durable writes made durable at once
+const FLUSH_EVERY: u64 = 64;
+/// How long writes must pause before the background flush
+const FLUSH_IDLE: Duration = Duration::from_millis(500);
+
 pub struct CompileCache {
     db: Database,
+    /// Writes committed without fsync since the last durable commit
+    pending: AtomicU64,
+    last_write: Mutex<Instant>,
 }
 
 fn caches() -> &'static Mutex<HashMap<PathBuf, Option<Arc<CompileCache>>>> {
     static CACHES: OnceLock<Mutex<HashMap<PathBuf, Option<Arc<CompileCache>>>>> = OnceLock::new();
     CACHES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Opens (or creates) a redb file with a small page cache. redb caches up to 1 GiB by default, which
+/// a long `com dev` session slowly fills with pages it never reads again; the OS page cache already
+/// keeps the hot part of the file in memory.
+pub fn open_database(path: &Path) -> Option<Database> {
+    const PAGE_CACHE: usize = 4 * 1024 * 1024;
+    redb::Builder::new().set_cache_size(PAGE_CACHE).create(path).ok()
 }
 
 fn max_bytes() -> u64 {
@@ -50,7 +72,13 @@ impl CompileCache {
             return None;
         }
         let mut map = caches().lock().unwrap_or_else(|e| e.into_inner());
-        map.entry(root.to_path_buf()).or_insert_with(|| Self::open(root).map(Arc::new)).clone()
+        map.entry(root.to_path_buf())
+            .or_insert_with(|| {
+                let cache = Arc::new(Self::open(root)?);
+                spawn_flusher(Arc::downgrade(&cache));
+                Some(cache)
+            })
+            .clone()
     }
 
     fn open(root: &Path) -> Option<CompileCache> {
@@ -60,8 +88,8 @@ impl CompileCache {
         if std::fs::metadata(&path).map(|m| m.len() > max_bytes()).unwrap_or(false) {
             let _ = std::fs::remove_file(&path);
         }
-        let db = Database::create(&path).ok()?;
-        Some(CompileCache { db })
+        let db = open_database(&path)?;
+        Some(CompileCache { db, pending: AtomicU64::new(0), last_write: Mutex::new(Instant::now()) })
     }
 
     /// Cache key for one module; any change to the inputs produces a new key
@@ -82,12 +110,31 @@ impl CompileCache {
     }
 
     pub fn put(&self, key: &[u8; 32], compiled: &str) {
-        let Ok(txn) = self.db.begin_write() else { return };
+        let Ok(mut txn) = self.db.begin_write() else { return };
+        txn.set_durability(Durability::None);
         {
             let Ok(mut table) = txn.open_table(TABLE) else { return };
             let _ = table.insert(key.as_slice(), compiled.as_bytes());
         }
-        let _ = txn.commit();
+        if txn.commit().is_err() {
+            return;
+        }
+        *self.last_write.lock().unwrap_or_else(|e| e.into_inner()) = Instant::now();
+        if self.pending.fetch_add(1, Ordering::SeqCst) + 1 >= FLUSH_EVERY {
+            self.flush();
+        }
+    }
+
+    /// Makes every write so far durable (an empty commit persists the non-durable ones before it)
+    pub fn flush(&self) {
+        let count = self.pending.swap(0, Ordering::SeqCst);
+        if count == 0 {
+            return;
+        }
+        let committed = self.db.begin_write().map(|txn| txn.commit().is_ok()).unwrap_or(false);
+        if !committed {
+            self.pending.fetch_add(count, Ordering::SeqCst);
+        }
     }
 
     pub fn len(&self) -> u64 {
@@ -102,6 +149,18 @@ impl CompileCache {
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
+}
+
+/// Flushes `cache` whenever writes pause, until it is dropped
+fn spawn_flusher(cache: Weak<CompileCache>) {
+    let _ = std::thread::Builder::new().name("compile-cache-flush".into()).spawn(move || loop {
+        std::thread::sleep(FLUSH_IDLE / 2);
+        let Some(cache) = cache.upgrade() else { return };
+        let idle = cache.last_write.lock().unwrap_or_else(|e| e.into_inner()).elapsed() >= FLUSH_IDLE;
+        if idle && cache.pending.load(Ordering::SeqCst) > 0 {
+            cache.flush();
+        }
+    });
 }
 
 /// Fingerprint of the project's tsconfig (path aliases change how imports are rewritten)
@@ -158,7 +217,20 @@ mod tests {
         assert_eq!(reopened.len(), 1);
 
         assert_ne!(key, CompileCache::key("app/page.tsx", "export default 2", "ts"));
+        drop(reopened);
+
+        // Writes skip fsync; a flush makes them survive reopening
+        let other = CompileCache::key("app/other.tsx", "export default 3", "ts");
+        {
+            let cache = CompileCache::open(&root).unwrap();
+            cache.put(&other, "other");
+            assert_eq!(cache.pending.load(Ordering::SeqCst), 1);
+            cache.flush();
+            assert_eq!(cache.pending.load(Ordering::SeqCst), 0);
+        }
+        assert_eq!(CompileCache::open(&root).unwrap().get(&other).as_deref(), Some("other"));
         assert_ne!(key, CompileCache::key("app/page.tsx", "export default 1", "other"));
         let _ = std::fs::remove_dir_all(&root);
     }
 }
+

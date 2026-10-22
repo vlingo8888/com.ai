@@ -1,0 +1,11 @@
+%section.container.mx-auto.py-12
+  .flex.items-center.gap-4{ class: "rounded-md shadow" }
+    %h1.text-3xl.font-bold= @post.title
+    %span{ class: ["badge", @post.draft? ? "bg-yellow-200" : "bg-green-200"] }
+  %p.mt-4.text-gray-700
+    = @post.body
+  - if @post.comments.any?
+    %ul.divide-y
+      - @post.comments.each do |c|
+        %li.py-2.md:py-3= c.body
+  .w-1/2.lg:w-[300px]

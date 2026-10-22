@@ -19,6 +19,9 @@ import { resolveCascadeMetadata } from "./metadata_runtime.ts";
 import { installFetchCache } from "./next/cache-runtime.ts";
 import { dynamicProps, markDynamic, noteRevalidate, noteTags, renderInfo } from "./next/request.ts";
 
+// One import at a time for modules a request has not loaded yet (serial_import.ts)
+const importModule = (specifier: string): Promise<any> => ((globalThis as any).__nata_import ?? ((s: string) => import(s)))(specifier);
+
 // fetch(url, { cache: "force-cache", next: { revalidate, tags } }) goes through the data cache
 installFetchCache();
 
@@ -98,7 +101,7 @@ export const clientManifest = new Proxy(
 
 async function load(specifier: string | null | undefined) {
   if (!specifier) return null;
-  return await import(specifier);
+  return await importModule(specifier);
 }
 
 const componentOf = (mod: any, hint: RegExp) => {
@@ -309,7 +312,7 @@ export async function staticParams(specifiers: (string | null)[]) {
   let list: Record<string, unknown>[] = [{}];
   let defined = false;
   for (const specifier of specifiers) {
-    const mod = specifier ? await import(specifier) : null;
+    const mod = specifier ? await importModule(specifier) : null;
     if (typeof mod?.generateStaticParams !== "function") continue;
     defined = true;
     const next: Record<string, unknown>[] = [];

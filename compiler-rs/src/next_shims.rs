@@ -65,12 +65,16 @@ pub fn write(root: &Path) {
     let dir = root.join(".nata").join("next");
     let _ = std::fs::create_dir_all(&dir);
     for (name, source) in FILES {
-        write_if_changed(&dir.join(name), source);
+        write_if_changed(&dir.join(name), &crate::worker_pool::runtime_source(&format!("next/{name}"), source));
     }
     // Older import paths (tsconfig `paths` written by earlier versions point here)
     write_if_changed(&root.join(".nata/headers.ts"), "export * from \"./next/headers.ts\";\nexport { default } from \"./next/headers.ts\";\n");
     write_if_changed(&root.join(".nata/server.ts"), "export * from \"./next/server.ts\";\nexport { default } from \"./next/server.ts\";\n");
+}
 
+/// `node_modules/next/<name>.js` pointing at `.nata/next/`: for projects without the real `next`
+/// package (packages Bun loads natively import `next/*` from there)
+pub fn write_node_modules(root: &Path) {
     let nm_next = root.join("node_modules").join("next");
     let _ = std::fs::create_dir_all(&nm_next);
     for (entry, file) in ENTRIES {

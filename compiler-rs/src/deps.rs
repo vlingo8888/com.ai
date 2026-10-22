@@ -3,8 +3,10 @@
 //! - The package comes from the project's `node_modules`, so client and server run the same version
 //!   and `com dev` works offline. A package that is not installed yet is added with `bun add`
 //!   (Bun's global cache makes this fast and usually offline-capable).
-//! - Each specifier is bundled once by the worker (`Bun.build`, CJS converted to ESM with named
-//!   exports) into `.nata/deps/<name>@<version>/<subpath>.js`; every other bare import inside it stays
+//! - Each specifier is bundled once by the bundler process (deps_process.rs: Bun.build, or Rolldown
+//!   with `COM_BUNDLER=rolldown`; CJS converted to ESM with named exports) into `.nata/deps/<name>@<version>/<subpath>.js`,
+//!   a hard link to the machine-wide copy in `~/.com/cache/deps/` that other projects reuse (cleared
+//!   with `com cache clean`); every other bare import inside it stays
 //!   external and points back to `/_nata/deps/...`, so each package (React especially) exists once.
 //! - If the package cannot be installed (offline, unknown name) the request falls back to esm.sh.
 
@@ -47,14 +49,32 @@ pub fn installed_version(root: &Path, name: &str) -> Option<String> {
 
 /// Bumped whenever the bundler's output changes, so bundles cached by an older engine are rebuilt
 /// (v5: older engines bundled a fake zmp-sdk written into node_modules; v6: re-export-only ESM files
-/// such as victory-vendor/d3-shape were wrapped as CommonJS and lost their exports)
-const BUNDLE_FORMAT: &str = "v6";
+/// such as victory-vendor/d3-shape were wrapped as CommonJS and lost their exports; v7: `#name` subpath
+/// imports such as vfile's `#minpath` were left external and fetched from `/_nata/deps/#name`; v8: a file
+/// a package exports as another specifier is imported from it, so `use-intl` and `use-intl/react` share
+/// one React context; v9: likewise for wildcard exports imported by subpath, so `konva` and the
+/// `konva/lib/Core.js` of react-konva share one Konva object)
+const BUNDLE_FORMAT: &str = "v9";
 
 /// Where the bundled module for `spec` at `version` is cached
 pub fn cache_path(root: &Path, spec: &str, version: &str) -> PathBuf {
     let (name, subpath) = split_specifier(spec);
     let file = if subpath.is_empty() { "index".to_string() } else { subpath.replace('/', "__") };
     root.join(".nata")
+        .join("deps")
+        .join(BUNDLE_FORMAT)
+        .join(format!("{}@{}", name.replace('/', "__"), version))
+        .join(format!("{file}.js"))
+}
+
+/// The machine-wide copy of a bundle (`~/.com/cache/deps/...`, see `com cache`): every project with the
+/// same package version reuses it instead of bundling again. The bundler may add a fingerprint to the
+/// name (bundles whose shape depends on the project, see `packageEntries` in deps_bundler.ts)
+pub fn shared_cache_path(spec: &str, version: &str) -> PathBuf {
+    let (name, subpath) = split_specifier(spec);
+    let file = if subpath.is_empty() { "index".to_string() } else { subpath.replace('/', "__") };
+    crate::framework_react::com_home()
+        .join("cache")
         .join("deps")
         .join(BUNDLE_FORMAT)
         .join(format!("{}@{}", name.replace('/', "__"), version))
@@ -80,6 +100,16 @@ fn failed_installs() -> &'static Mutex<HashSet<String>> {
 /// Concurrent requests for the same package wait for a single install; a failed install is not
 /// retried during this process (the esm.sh fallback is used instead).
 pub async fn ensure_installed(root: &Path, name: &str) -> Option<String> {
+    install(root, name, true).await
+}
+
+/// `ensure_installed` for a module the worker is waiting on (module_server.rs): the worker is not
+/// restarted, since it is in the middle of loading that module and has cached no failure yet
+pub async fn ensure_installed_for_worker(root: &Path, name: &str) -> Option<String> {
+    install(root, name, false).await
+}
+
+async fn install(root: &Path, name: &str, restart_worker: bool) -> Option<String> {
     if let Some(version) = installed_version(root, name) {
         return Some(version);
     }
@@ -105,8 +135,11 @@ pub async fn ensure_installed(root: &Path, name: &str) -> Option<String> {
                 "Installed {name}@{version} in {}",
                 crate::term::format_ms(started.elapsed().as_secs_f64() * 1000.0)
             ));
-            // The worker may have cached a failed resolution of this package
-            crate::worker_pool::restart(root).await;
+            // The resolvers (and the worker) may have cached a failed resolution of this package
+            crate::resolver::oxc::invalidate(root);
+            if restart_worker {
+                crate::worker_pool::restart(root).await;
+            }
             Some(version)
         }
         (result, _) => {
@@ -235,39 +268,64 @@ pub async fn resolve(root: &Path, spec: &str) -> DepResult {
     };
     let node_env = deps_node_env();
     // Production builds (smaller, no dev warnings) are cached apart from development ones
-    let out_file = cache_path(root, spec, &if node_env == "production" { format!("{version}-prod") } else { version.clone() });
+    let cache_version = if node_env == "production" { format!("{version}-prod") } else { version.clone() };
+    let out_file = cache_path(root, spec, &cache_version);
     if let Ok(code) = std::fs::read_to_string(&out_file) {
         return DepResult::Module { etag: content_etag(&code), code };
     }
 
     let started = std::time::Instant::now();
-    let mut input = serde_json::json!({ "spec": spec, "outFile": out_file, "nodeEnv": node_env });
+    let started_at = std::time::SystemTime::now();
+    let shared_file = shared_cache_path(spec, &cache_version);
+    let mut input = serde_json::json!({ "spec": spec, "outFile": out_file, "sharedFile": shared_file, "nodeEnv": node_env });
     if let Some(dir) = framework_dir.as_ref().and_then(|d| d.parent()) {
         input["resolveDir"] = serde_json::json!(dir);
     }
-    // A one-off process: bundling happens once per package version, and Bun.build's memory would
-    // otherwise stay in the long-lived worker
+    if let Some(module) = crate::deps_process::rolldown_module().await {
+        input["rolldown"] = serde_json::json!(module);
+    }
+    let errors = match bundle(root, &input).await {
+        Ok(errors) => errors,
+        Err(e) => {
+            crate::term::warn(&format!("No JavaScript runtime to bundle {spec} ({e}), loading it from esm.sh"));
+            return DepResult::Fallback(esm_sh_url(spec));
+        }
+    };
+    match std::fs::read_to_string(&out_file) {
+        Ok(code) => {
+            // A link to the machine-wide copy keeps that copy's time: built earlier, by another project
+            let reused = std::fs::metadata(&out_file).and_then(|m| m.modified()).is_ok_and(|t| t < started_at);
+            if !reused {
+                crate::term::success(&format!(
+                    "Prebundled {spec}@{version} in {}",
+                    crate::term::format_ms(started.elapsed().as_secs_f64() * 1000.0)
+                ));
+            }
+            DepResult::Module { etag: content_etag(&code), code }
+        }
+        Err(_) => DepResult::Error(format!("Could not bundle {spec}:\n{}", errors.trim())),
+    }
+}
+
+/// Runs `bundleDependency(input)`: in the project's bundler process (retried once, it may have just
+/// exited after being idle), else in a one-off process. `Ok` holds the bundler's errors, if any;
+/// `Err` means no JavaScript runtime could run it.
+async fn bundle(root: &Path, input: &serde_json::Value) -> Result<String, String> {
+    // `COM_DEPS_PROCESS=0`: a one-off process per package, as before the bundler process
+    let attempts = if matches!(std::env::var("COM_DEPS_PROCESS").as_deref(), Ok("0") | Ok("false")) { 0 } else { 2 };
+    for _ in 0..attempts {
+        match crate::deps_process::bundle(root, input).await {
+            Ok(()) => return Ok(String::new()),
+            Err(crate::deps_process::BundleError::Failed(message)) => return Ok(message),
+            Err(crate::deps_process::BundleError::Unavailable(_)) => {}
+        }
+    }
     let script = format!(
         "import {{ bundleDependency }} from {};\nawait bundleDependency({});\n",
         serde_json::to_string(&crate::rpc::clean_path(root.join(".nata/deps_bundler.ts"))).unwrap_or_default(),
         input
     );
-    match crate::worker_pool::spawn_once(root, &script).await {
-        Ok(output) => match std::fs::read_to_string(&out_file) {
-            Ok(code) => {
-                crate::term::success(&format!(
-                    "Prebundled {spec}@{version} in {}",
-                    crate::term::format_ms(started.elapsed().as_secs_f64() * 1000.0)
-                ));
-                DepResult::Module { etag: content_etag(&code), code }
-            }
-            Err(_) => DepResult::Error(format!("Could not bundle {spec}:\n{}", output.stderr.trim())),
-        },
-        Err(e) => DepResult::Fallback({
-            crate::term::warn(&format!("No JavaScript runtime to bundle {spec} ({e}), loading it from esm.sh"));
-            esm_sh_url(spec)
-        }),
-    }
+    crate::worker_pool::spawn_once(root, &script).await.map(|output| output.stderr)
 }
 
 #[cfg(test)]
@@ -299,12 +357,19 @@ mod tests {
     }
 
     #[test]
+    fn shared_cache_is_per_machine_and_versioned_like_the_project_cache() {
+        let file = shared_cache_path("@hookform/resolvers/zod", "3.9.0");
+        let home = crate::framework_react::com_home();
+        assert_eq!(file, home.join("cache/deps").join(BUNDLE_FORMAT).join("@hookform__resolvers@3.9.0/zod.js"));
+    }
+
+    #[test]
     fn cache_path_is_versioned_per_subpath() {
         let root = Path::new("/p");
-        assert_eq!(cache_path(root, "react", "19.1.0"), Path::new("/p/.nata/deps/v6/react@19.1.0/index.js"));
+        assert_eq!(cache_path(root, "react", "19.1.0"), Path::new("/p/.nata/deps/v9/react@19.1.0/index.js"));
         assert_eq!(
             cache_path(root, "@hookform/resolvers/zod", "3.9.0"),
-            Path::new("/p/.nata/deps/v6/@hookform__resolvers@3.9.0/zod.js")
+            Path::new("/p/.nata/deps/v9/@hookform__resolvers@3.9.0/zod.js")
         );
     }
 }

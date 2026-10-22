@@ -19,10 +19,13 @@
 // or the SSR layer. The two layers are separate module instances in this one process.
 
 import { AsyncLocalStorage } from "node:async_hooks";
-import { mkdirSync, unlinkSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, unlinkSync, writeFileSync } from "fs";
 import { join } from "path";
 import { inspect } from "util";
 import { explainServerError } from "./explain_error.ts";
+import { serialImport } from "./serial_import.ts";
+
+(globalThis as any).__nata_import = serialImport;
 
 const KIND_REQUEST = 1;
 const KIND_RESULT = 2;
@@ -252,6 +255,43 @@ Bun.plugin({
     });
   },
 });
+
+// ---------- next/* in packages Bun loads natively ----------
+// With the real `next` installed (the app also runs with `next dev`), node_modules/next is left alone, so
+// packages loaded natively (next-intl in the SSR layer) would get Next.js internals that need its app
+// router: their files load as the framework's modules instead, as the engine's resolver aliases do
+// (next_shims.rs SERVER_MODULES). Same for next-intl/server (its non react-server build), imported by the
+// project's i18n/request.ts that the next-intl/server shim imports natively. Bun's runtime `onResolve`
+// does not see bare imports of native files, so this replaces what the package files load (synchronously,
+// so `require()` works too).
+
+/** module -> [file in .nata, has a default export] */
+const NEXT_SERVER_MODULES: Record<string, [string, boolean]> = {
+  headers: ["next/headers.ts", true], server: ["next/server.ts", true], navigation: ["next/navigation.ts", true],
+  cache: ["next/cache.ts", true], og: ["next/og.ts", false], dynamic: ["next/dynamic.js", true],
+  script: ["next/script.js", true], image: ["next/image.js", true], link: ["next/link.js", true],
+  router: ["next/router.js", true], head: ["next/head.js", true],
+};
+
+function reexport(file: string, hasDefault: boolean) {
+  const target = JSON.stringify(join(process.cwd(), ".nata", file));
+  return { contents: `export * from ${target};\n` + (hasDefault ? `export { default } from ${target};\n` : ""), loader: "js" as const };
+}
+
+if (existsSync(join(process.cwd(), "node_modules/next/dist"))) {
+  Bun.plugin({
+    name: "nata-next-modules",
+    setup(build) {
+      build.onLoad({ filter: /[\\/]node_modules[\\/]next[\\/](headers|server|navigation|cache|og|dynamic|script|image|link|router|head)\.js$/ }, (args) => {
+        const name = args.path.replace(/^.*[\\/]/, "").replace(/\.js$/, "");
+        return reexport(...NEXT_SERVER_MODULES[name]);
+      });
+      build.onLoad({ filter: /[\\/]node_modules[\\/]next-intl[\\/]dist[\\/][^\\/]+[\\/][^\\/]+[\\/]server\.react-client\.js$/ }, () =>
+        reexport("next-intl-server.ts", true),
+      );
+    },
+  });
+}
 
 // ---------- module layers (rsc: / ssr:), loaded through the engine ----------
 

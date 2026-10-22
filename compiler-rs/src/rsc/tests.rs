@@ -45,3 +45,25 @@ fn production_router_has_no_dev_modules() {
     }
     assert!(prod.contains("const reportIssue"));
 }
+
+#[test]
+fn rsc_003_client_references_inside_packages_resolve_by_file() {
+    // React from the framework (no react in package.json): package client references go through the engine
+    let root = std::env::temp_dir().join(format!("nata_rsc_pkg_refs_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let pkg = root.join("node_modules/intl-pkg");
+    std::fs::create_dir_all(pkg.join("dist/shared")).unwrap();
+    std::fs::write(root.join("package.json"), r#"{"dependencies":{}}"#).unwrap();
+    // `exports` hides dist/: only the file path of the client component reaches it
+    std::fs::write(pkg.join("package.json"), r#"{"name":"intl-pkg","exports":{".":"./dist/index.js"}}"#).unwrap();
+    std::fs::write(pkg.join("dist/index.js"), "export {};").unwrap();
+    std::fs::write(pkg.join("dist/shared/Provider.js"), "\"use client\";").unwrap();
+    let root = root.canonicalize().unwrap();
+    if crate::framework_react::active_modules_dir(&root).is_some() {
+        let spec = client_reference_specifier(&root, "/_nata/deps/intl-pkg/dist/shared/Provider.js").unwrap();
+        assert_eq!(spec, format!("ssr:{}", pkg.canonicalize().unwrap().join("dist/shared/Provider.js").display()));
+    }
+    assert!(client_reference_specifier(&root, "/_nata/deps/intl-pkg/../../package.json").is_err()
+        || crate::framework_react::active_modules_dir(&root).is_none());
+    let _ = std::fs::remove_dir_all(&root);
+}

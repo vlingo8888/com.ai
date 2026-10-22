@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="vi" class=dark>
+<head>
+  <style>.x { color: var(--color-red-500); }</style>
+</head>
+<body class=bg-white>
+  <div class=flex id=root data-state=open>
+    <p class='text-sm/6 md:text-lg/[1.2] [&_a]:underline'>Xin chào <b class=font-bold>bạn</b></p>
+    <div class="grid grid-cols-[repeat(auto-fill,minmax(200px,1fr))] gap-4 *:p-2 [&>*]:m-1"></div>
+    <div class="[&_svg:not([class*='size-'])]:size-4 rtl:**:[.rdp-button\_next>svg]:rotate-180"></div>
+    <div class="group-[]:flex peer-checked:bg-blue-500 has-[img]:p-2 data-[state=open]:block"></div>
+    <img class="w-[calc(100%-2rem)] h-(--my-height) bg-[url('/img/a.png')] aspect-video" src="/a.png">
+    <a class="hover:focus:bg-red-500 !p-4 p-4! -mt-4 -translate-x-1/2" href="#">x</a>
+    <div style="--my-var: 10px" class="[--my-var:10px] [mask-type:luminance] [color:red]/50"></div>
+    <span class="bg-red-500/[0.35] bg-red-500/(--alpha) text-(--my-color) bg-(image:--my-img)"></span>
+    <div class="@container @md:flex @max-lg:block @min-[400px]:grid"></div>
+    <script>
+      el.classList.add('opacity-0', "translate-y-2");
+      el.className = `px-4 ${active ? 'bg-blue-500' : 'bg-gray-100'} rounded-lg`;
+    </script>
+  </div>
+</body>
+</html>

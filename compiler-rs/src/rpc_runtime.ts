@@ -4,6 +4,9 @@
  * scopes per request with AsyncLocalStorage.
  */
 
+// One import at a time for modules a request has not loaded yet (serial_import.ts)
+const importModule = (specifier: string): Promise<any> => ((globalThis as any).__nata_import ?? ((s: string) => import(s)))(specifier);
+
 export interface RpcInput {
   /** Absolute path of the module that exports the action */
   tsPath: string;
@@ -57,7 +60,7 @@ async function runLifecycle(input: RpcInput) {
     if (lifecycleDone.has(lcPath)) return;
     lifecycleDone.add(lcPath);
     try {
-      const lcMod: any = await import(lcPath);
+      const lcMod: any = await importModule(lcPath);
       const lc = lcMod?.lifecycle || lcMod?.default || lcMod;
       if (lc && typeof lc.onInstalled === "function") {
         const { db } = await import("core");
@@ -71,7 +74,7 @@ async function runLifecycle(input: RpcInput) {
 }
 
 async function invoke(input: RpcInput): Promise<unknown> {
-  const mod: any = await import(input.moduleSpecifier || input.tsPath);
+  const mod: any = await importModule(input.moduleSpecifier || input.tsPath);
   const rawArgs = input.args;
   const args = Array.isArray(rawArgs) ? rawArgs : rawArgs !== null && rawArgs !== undefined ? [rawArgs] : [];
   const actionName = input.action;

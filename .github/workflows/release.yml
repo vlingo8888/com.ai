@@ -33,12 +33,12 @@ jobs:
           key: ${{ matrix.rust }}
       - name: Build com-compiler
         working-directory: compiler-rs
-        run: cargo build --release --target ${{ matrix.rust }} --bin com-compiler
+        run: cargo build --profile dist --target ${{ matrix.rust }} --bin com-compiler
       - name: Stage binary
         shell: bash
         run: |
           mkdir -p staged/${{ matrix.target }}
-          cp compiler-rs/target/${{ matrix.rust }}/release/${{ matrix.bin }} staged/${{ matrix.target }}/
+          cp compiler-rs/target/${{ matrix.rust }}/dist/${{ matrix.bin }} staged/${{ matrix.target }}/
       - uses: actions/upload-artifact@v4
         with:
           name: compiler-${{ matrix.target }}

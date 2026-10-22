@@ -19,6 +19,7 @@ import { publishCommand } from "../src/commands/publish";
 import { lintCommand, typecheck } from "../src/commands/lint";
 import { doctorCommand, infoCommand } from "../src/commands/doctor";
 import { startCommand } from "../src/commands/start";
+import { cacheCommand } from "../src/commands/cache";
 import { resolve } from "path";
 import { logger, colors } from "../src/core/logger";
 import packageJson from "../package.json";
@@ -43,6 +44,7 @@ function printHelp() {
     ${colors.green}typecheck${colors.reset}             Type check the project (tsc --noEmit)
     ${colors.green}doctor${colors.reset}                Check Bun, engine, port, env and unsupported config
     ${colors.green}info${colors.reset}                  Print system and project versions (for bug reports)
+    ${colors.green}cache${colors.reset}  ${colors.sky}[clean]${colors.reset}        Show or delete cached dependency builds (--global, --project)
     ${colors.green}test | t${colors.reset}  ${colors.sky}[pattern]${colors.reset}   Run unit, integration & component tests with Bun Test
     ${colors.green}sync | pull${colors.reset}             Sync database schema, types/db.d.ts, AGENTS.md & dependencies
     ${colors.green}db pull | db sync${colors.reset}     Introspect database schema & generate types/db.d.ts for AI
@@ -358,6 +360,16 @@ async function main() {
       }
       if (command === "doctor") await doctorCommand({ dir, json, port });
       else await infoCommand({ dir, json });
+      break;
+    }
+
+    case "cache": {
+      let dir: string | undefined;
+      for (let i = 1; i < args.length; i++) {
+        if (args[i] === "--dir" && args[i + 1]) dir = args[++i];
+      }
+      const action = args.slice(1).find((a, i, all) => !a.startsWith("-") && all[i - 1] !== "--dir");
+      await cacheCommand({ action, dir, global: args.includes("--global"), project: args.includes("--project"), json: args.includes("--json") });
       break;
     }
 
