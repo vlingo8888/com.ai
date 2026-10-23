@@ -104,10 +104,9 @@ impl ProjectWatcher {
                 }
             };
 
-            // 1. Watch root directory recursively
-            if let Err(e) = watcher.watch(&canon_root, RecursiveMode::Recursive) {
-                crate::term::error(&format!("Could not watch {}", canon_root.display()), Some(&e.to_string()), None);
-            }
+            // 1. Watch the project: the root itself (new files and folders), and each folder in it
+            // recursively, except those whose events are ignored anyway
+            Self::watch_project(&mut watcher, &canon_root);
 
             // 2. Discover and watch symlinks in node_modules (e.g. bun link, npm link)
             let symlinks = Self::discover_node_modules_symlinks(&canon_root);
@@ -147,6 +146,12 @@ impl ProjectWatcher {
                 if let Some(event) = event {
                     // A watcher error is not a change: keep waiting
                     let Ok(event) = event else { continue };
+                    // A folder created in the root (the root is only watched for its own entries)
+                    if matches!(event.kind, EventKind::Create(_)) {
+                        for path in event.paths.iter().filter(|p| p.parent() == Some(canon_root.as_path())) {
+                            Self::watch_folder(&mut watcher, path);
+                        }
+                    }
                     if Self::is_relevant_event(&event) {
                         for path in event.paths {
                             if !Self::should_ignore_path(&path, &canon_root) {
@@ -356,12 +361,20 @@ impl ProjectWatcher {
             || path_str.contains(".next\\")
             || path_str.contains(".nata/")
             || path_str.contains(".nata\\")
-            || path_str.contains("target/")
-            || path_str.contains("target\\")
             || path_str.contains(".turbo/")
             || path_str.contains(".turbo\\")
         {
             return true;
+        }
+
+        // 1b. Build output and the local PGlite database at the root: a write to them (every query that
+        // changes data) must not trigger a reload. Only the root level, so `app/target/page.tsx` still counts
+        if let Ok(rel) = path.strip_prefix(root) {
+            let mut parts = rel.components().map(|c| c.as_os_str().to_string_lossy());
+            let first = parts.next().unwrap_or_default();
+            if Self::UNWATCHED.contains(&first.as_ref()) || (first == "data" && parts.next().is_some_and(|p| p == "app.db")) {
+                return true;
+            }
         }
 
         // 2. Ignore non-symlinked node_modules files
@@ -418,8 +431,39 @@ impl ProjectWatcher {
         }
     }
 
+    /// Folders of the root that are never watched (their events are ignored, see `should_ignore_path`).
+    /// inotify and kqueue walk a watched tree and follow links: watching `node_modules` (or the shared
+    /// store's links) would register every installed package, for every project.
+    /// `dist`, `out`, `coverage` hold build and test output, `.data` the default PGlite database.
+    const UNWATCHED: &'static [&'static str] =
+        &["node_modules", ".git", ".next", ".nata", "target", ".turbo", "dist", "out", "coverage", ".data", ".vercel"];
+
+    fn watch_project(watcher: &mut RecommendedWatcher, root: &Path) {
+        if let Err(e) = watcher.watch(root, RecursiveMode::NonRecursive) {
+            crate::term::error(&format!("Could not watch {}", root.display()), Some(&e.to_string()), None);
+        }
+        for entry in std::fs::read_dir(root).into_iter().flatten().flatten() {
+            Self::watch_folder(watcher, &entry.path());
+        }
+    }
+
+    /// Watches a folder of the root recursively, unless it is one of `UNWATCHED`
+    fn watch_folder(watcher: &mut RecommendedWatcher, path: &Path) {
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        if Self::UNWATCHED.contains(&name) || !path.is_dir() {
+            return;
+        }
+        if let Err(e) = watcher.watch(path, RecursiveMode::Recursive) {
+            crate::term::warn(&format!("Could not watch {}: {e}", path.display()));
+        }
+    }
+
     /// Discovers symlinked packages inside node_modules/
     pub fn discover_node_modules_symlinks(root: &Path) -> Vec<PathBuf> {
+        // On the shared store every package is a link into it: watching them would watch the store
+        if crate::store::uses_store(root) {
+            return Vec::new();
+        }
         let mut symlinks = Vec::new();
         let nm_dir = root.join("node_modules");
 
@@ -527,6 +571,18 @@ mod tests {
             Path::new("/workspace/app/.DS_Store"),
             root
         ));
+    }
+
+    #[test]
+    fn test_should_ignore_build_output_and_local_database() {
+        let root = Path::new("/workspace");
+        assert!(ProjectWatcher::should_ignore_path(Path::new("/workspace/dist/index.js"), root));
+        assert!(ProjectWatcher::should_ignore_path(Path::new("/workspace/target/debug/x.json"), root));
+        assert!(ProjectWatcher::should_ignore_path(Path::new("/workspace/.data/pglite/pg_control.json"), root));
+        assert!(ProjectWatcher::should_ignore_path(Path::new("/workspace/data/app.db/base/1/1259.json"), root));
+        // Only at the root: routes and data files with these names stay watched
+        assert!(!ProjectWatcher::should_ignore_path(Path::new("/workspace/app/target/page.tsx"), root));
+        assert!(!ProjectWatcher::should_ignore_path(Path::new("/workspace/data/products.ts"), root));
     }
 
     #[test]

@@ -71,7 +71,7 @@ const pathOf = (url) => url.pathname + url.search;
 const VIRTUAL_BASE = "http://zalo.local";
 function currentUrl() {
   if (!IS_ZALO) return new URL(location.href);
-  return new URL((history.state && history.state.path) || "/", VIRTUAL_BASE);
+  return new URL((history.state && history.state.path) || CONFIG.start || "/", VIRTUAL_BASE);
 }
 function writeHistory(method, url, extra) {
   const state = { __nata: true, key: Math.random().toString(36).slice(2), ...extra };
@@ -433,6 +433,22 @@ function pollHmr() {
   };
   tick();
 }
+
+// Zalo: the container owns the page URL, so a full page load leaves the mini app (the tunnel's web server answers).
+// Plain <a href="/x"> links (website sections, rich text, plugin views) navigate inside the app instead; <Link>
+// already handles its own clicks (defaultPrevented), other sites / tel: / mailto: / new tabs keep the default.
+function interceptZaloLinks(go) {
+  document.addEventListener("click", (e) => {
+    if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+    const a = e.target instanceof Element ? e.target.closest("a[href]") : null;
+    if (!a || a.hasAttribute("download") || (a.getAttribute("target") && a.getAttribute("target") !== "_self")) return;
+    const href = a.getAttribute("href") || "";
+    if (!href || href.startsWith("#") || href.startsWith("//") || /^[a-z][a-z0-9+.-]*:/i.test(href)) return;
+    e.preventDefault();
+    go(href);
+  });
+}
+if (IS_ZALO) interceptZaloLinks((href) => navigate(href));
 
 start();
 connectHmr();

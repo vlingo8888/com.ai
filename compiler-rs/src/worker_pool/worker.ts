@@ -20,7 +20,7 @@
 
 import { AsyncLocalStorage } from "node:async_hooks";
 import { existsSync, mkdirSync, unlinkSync, writeFileSync } from "fs";
-import { join } from "path";
+import { dirname, join } from "path";
 import { inspect } from "util";
 import { explainServerError } from "./explain_error.ts";
 import { serialImport } from "./serial_import.ts";
@@ -278,7 +278,8 @@ function reexport(file: string, hasDefault: boolean) {
   return { contents: `export * from ${target};\n` + (hasDefault ? `export { default } from ${target};\n` : ""), loader: "js" as const };
 }
 
-if (existsSync(join(process.cwd(), "node_modules/next/dist"))) {
+// The project's packages: node_modules, or the shared store's links (COM_PACKAGES_DIR, store.rs)
+if (existsSync(join(existsSync(join(process.cwd(), "node_modules")) ? join(process.cwd(), "node_modules") : process.env.COM_PACKAGES_DIR || join(process.cwd(), "node_modules"), "next/dist"))) {
   Bun.plugin({
     name: "nata-next-modules",
     setup(build) {
@@ -375,7 +376,11 @@ for (const layer of ["rsc", "ssr"] as const) {
         if (meta.kind === "esm") return { contents: decoder.decode(body), loader: "js" };
         if (meta.kind === "cjs") {
           for (const [file, entry] of Object.entries<any>(meta.files)) {
-            if (!cjsSources.has(layer + ":" + file)) cjsSources.set(layer + ":" + file, entry);
+            // Sources come one after the other in the body; files this layer already has are not decoded
+            if (!cjsSources.has(layer + ":" + file)) {
+              entry.code = decoder.decode(body.subarray(entry.offset, entry.offset + entry.length));
+              cjsSources.set(layer + ":" + file, entry);
+            }
             for (const target of Object.values<any>(entry.requires ?? {})) {
               if (target.esm && !esmForRequire.has(target.esm)) esmForRequire.set(target.esm, await import(target.esm));
             }
@@ -492,8 +497,10 @@ let stylesheetCache: { input: string; dependencies: string[]; stamp: string; css
 
 async function loadTailwind() {
   try {
-    const node = await import(Bun.resolveSync("@tailwindcss/node", process.cwd()));
-    const oxide = await import(Bun.resolveSync("@tailwindcss/oxide", process.cwd()));
+    // A project on the shared store resolves its packages from `.nata/modules` (store.rs)
+    const from = process.env.COM_PACKAGES_DIR ? dirname(process.env.COM_PACKAGES_DIR) : process.cwd();
+    const node = await import(Bun.resolveSync("@tailwindcss/node", from));
+    const oxide = await import(Bun.resolveSync("@tailwindcss/oxide", from));
     return { compile: node.compile, optimize: node.optimize, Scanner: oxide.Scanner };
   } catch {
     // The engine installs the packages and retries
@@ -603,14 +610,24 @@ function warnRepeatedQueries(store: Store) {
 }
 
 // A full collection once requests stop for a moment: rendering leaves garbage (Flight and HTML
-// buffers, compiled module sources) that the incremental collector keeps around for a long time
+// buffers, compiled module sources) that the incremental collector keeps around for a long time.
+// Only when the heap grew since the last one, and at most every GC_MIN_INTERVAL: under steady traffic a
+// stop-the-world collection after every burst cost CPU for little memory
+const GC_MIN_INTERVAL = 10_000;
+const GC_MIN_GROWTH = 8 * 1024 * 1024;
 let idleGcTimer: ReturnType<typeof setTimeout> | null = null;
+let lastGcAt = 0;
+let heapAfterGc = 0;
 function scheduleIdleGc() {
   if (idleGcTimer) clearTimeout(idleGcTimer);
+  const wait = Math.max(1000, lastGcAt + GC_MIN_INTERVAL - Date.now());
   idleGcTimer = setTimeout(() => {
     idleGcTimer = null;
+    if (process.env.COM_WORKER_GC !== "full" && process.memoryUsage().heapUsed - heapAfterGc < GC_MIN_GROWTH) return;
     Bun.gc(true);
-  }, 1000);
+    lastGcAt = Date.now();
+    heapAfterGc = process.memoryUsage().heapUsed;
+  }, wait);
   (idleGcTimer as any).unref?.();
 }
 

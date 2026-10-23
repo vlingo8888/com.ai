@@ -9,6 +9,7 @@ import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { existsSync, readFileSync, writeFileSync } from "fs";
 import { join } from "path";
 import { copyToTemp, findEngine, repoRoot, sleep, startDev, type DevServer } from "./compat/lib/harness";
+import { packagesDir } from "../src/store";
 
 const engine = (() => {
   try {
@@ -20,7 +21,8 @@ const engine = (() => {
 const run = engine && existsSync(engine) ? describe : describe.skip;
 
 async function flightClient(dir: string) {
-  return await import(join(dir, "node_modules/react-server-dom-webpack/client.edge.js"));
+  // node_modules, or the project's links into the shared store
+  return await import(join(packagesDir(dir), "react-server-dom-webpack/client.edge.js"));
 }
 
 /** The root row of a Flight payload (`0:{...}`), references left as `$` strings */

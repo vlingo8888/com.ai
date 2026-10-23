@@ -8,7 +8,7 @@
 //!   responses are compressed on the fly.
 //! - `/_nata/health`, graceful shutdown on SIGINT / SIGTERM (requests in flight finish).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -93,6 +93,17 @@ pub struct Encoded {
 }
 
 impl Encoded {
+    /// From a body and its `.gz` / `.br` copies made by the build (an empty copy is not offered)
+    fn precompressed(identity: Bytes, gzip: Bytes, br: Bytes) -> Self {
+        let etag = format!("\"{}\"", &blake3::hash(&identity).to_hex()[..20]);
+        Self { identity, gzip, br, etag }
+    }
+
+    /// What it costs to keep in memory
+    fn size(&self) -> usize {
+        self.identity.len() + self.gzip.len() + self.br.len()
+    }
+
     pub fn new(body: Bytes, quality: u32) -> Self {
         let etag = format!("\"{}\"", &blake3::hash(&body).to_hex()[..20]);
         let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::new(quality.min(9)));
@@ -143,6 +154,27 @@ fn static_files() -> &'static RwLock<HashMap<String, Arc<Encoded>>> {
     F.get_or_init(Default::default)
 }
 
+/// `file.<ext>` (a copy precompressed by the build), empty when missing
+fn read_sibling(file: &Path, ext: &str) -> Bytes {
+    std::fs::read(format!("{}.{ext}", file.display())).map(Bytes::from).unwrap_or_default()
+}
+
+/// A memory budget in bytes, from an environment variable in MB
+fn cache_limit(var: &str, default_mb: usize) -> usize {
+    std::env::var(var).ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(default_mb) * 1024 * 1024
+}
+
+/// Writes a prerendered page with `.gz` and `.br` copies, so `com start` loads them instead of
+/// compressing every page again at each boot
+pub fn write_precompressed(file: &Path, body: &[u8]) -> Result<(), String> {
+    let encoded = Encoded::new(Bytes::copy_from_slice(body), PRERENDER_QUALITY);
+    std::fs::write(file, body).map_err(|e| e.to_string())?;
+    for (ext, copy) in [("gz", &encoded.gzip), ("br", &encoded.br)] {
+        std::fs::write(format!("{}.{ext}", file.display()), copy).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 fn content_type(path: &str) -> &'static str {
     match path.rsplit('.').next().unwrap_or("") {
         "js" | "mjs" => "application/javascript; charset=utf-8",
@@ -171,10 +203,14 @@ fn load_static(root: &Path, path: &str) -> Option<Arc<Encoded>> {
     }
     let file = manifest::build_dir(root).join("static").join(path);
     let identity = Bytes::from(std::fs::read(&file).ok()?);
-    let read = |ext: &str| std::fs::read(format!("{}.{ext}", file.display())).map(Bytes::from).unwrap_or_default();
-    let etag = format!("\"{}\"", &blake3::hash(&identity).to_hex()[..20]);
-    let encoded = Arc::new(Encoded { gzip: read("gz"), br: read("br"), identity, etag });
-    static_files().write().unwrap_or_else(|e| e.into_inner()).insert(path.to_string(), encoded.clone());
+    let encoded = Arc::new(Encoded::precompressed(identity, read_sibling(&file, "gz"), read_sibling(&file, "br")));
+    // Up to `COM_STATIC_CACHE_MB` (default 32) in memory; past it files are read from disk, where the
+    // OS page cache keeps the hot ones anyway
+    let mut files = static_files().write().unwrap_or_else(|e| e.into_inner());
+    let used: usize = files.values().map(|f| f.size()).sum();
+    if used + encoded.size() <= cache_limit("COM_STATIC_CACHE_MB", 32) {
+        files.insert(path.to_string(), encoded.clone());
+    }
     Some(encoded)
 }
 
@@ -225,9 +261,19 @@ impl CachedPage {
     }
 }
 
+impl CachedPage {
+    fn size(&self) -> usize {
+        self.html.body.size() + self.flight.as_ref().map_or(0, |f| f.body.size())
+    }
+}
+
 #[derive(Default)]
 struct PageCache {
     pages: HashMap<String, Arc<CachedPage>>,
+    /// Paths in the order they were cached and the bytes they hold: pages rendered at runtime (params
+    /// outside generateStaticParams) would otherwise grow the cache without limit
+    order: VecDeque<String>,
+    bytes: usize,
     /// Routes found dynamic at runtime (a page of a static route used a request-time API)
     dynamic_routes: HashSet<String>,
 }
@@ -237,8 +283,35 @@ fn cache() -> &'static RwLock<PageCache> {
     C.get_or_init(Default::default)
 }
 
-/// Compression level of pages rendered while serving (prerendered ones get the maximum)
+/// Compression level of pages rendered while serving
 const RUNTIME_QUALITY: u32 = 5;
+/// Compression level of prerendered pages (done once, by `com build`)
+const PRERENDER_QUALITY: u32 = 9;
+
+impl PageCache {
+    fn insert(&mut self, path: String, page: Arc<CachedPage>) {
+        self.bytes += page.size();
+        match self.pages.insert(path.clone(), page) {
+            Some(old) => self.bytes -= old.size(),
+            None => self.order.push_back(path),
+        }
+        // Over `COM_PAGE_CACHE_MB` (default 64): drop the oldest, rendered again on their next request
+        let limit = cache_limit("COM_PAGE_CACHE_MB", 64);
+        while self.bytes > limit && self.pages.len() > 1 {
+            let Some(oldest) = self.order.pop_front() else { break };
+            if let Some(old) = self.pages.remove(&oldest) {
+                self.bytes -= old.size();
+            }
+        }
+    }
+
+    fn retain(&mut self, keep: impl Fn(&CachedPage) -> bool) {
+        self.pages.retain(|_, page| keep(page));
+        let pages = &self.pages;
+        self.order.retain(|p| pages.contains_key(p));
+        self.bytes = self.pages.values().map(|p| p.size()).sum();
+    }
+}
 
 fn variant(body: Vec<u8>, headers: Vec<(String, String)>, quality: u32) -> Variant {
     let headers = headers.into_iter().filter(|(k, _)| !k.eq_ignore_ascii_case("content-length") && !k.eq_ignore_ascii_case("cache-control")).collect();
@@ -249,19 +322,30 @@ fn load_pages(root: &Path, manifest: &BuildManifest) {
     let dir = manifest::build_dir(root);
     let mut cache = cache().write().unwrap_or_else(|e| e.into_inner());
     for (path, page) in &manifest.pages {
-        let Ok(html) = std::fs::read(dir.join(&page.html)) else { continue };
-        let flight = page.flight.as_ref().and_then(|f| std::fs::read(dir.join(f)).ok());
+        let Some(html) = load_variant(&dir.join(&page.html), vec![("content-type".into(), "text/html; charset=utf-8".into())]) else { continue };
+        let flight_headers = vec![("content-type".into(), "text/x-component".into()), ("vary".into(), "RSC, Nata-Router-State".into())];
+        let flight = page.flight.as_ref().and_then(|f| load_variant(&dir.join(f), flight_headers));
         let entry = CachedPage {
             status: StatusCode::from_u16(page.status).unwrap_or(StatusCode::OK),
-            html: variant(html, vec![("content-type".into(), "text/html; charset=utf-8".into())], 9),
-            flight: flight.map(|f| variant(f, vec![("content-type".into(), "text/x-component".into()), ("vary".into(), "RSC, Nata-Router-State".into())], 9)),
+            html,
+            flight,
             rendered: Instant::now(),
             revalidate: page.revalidate,
             tags: page.tags.clone(),
             regenerating: AtomicBool::new(false),
         };
-        cache.pages.insert(path.clone(), Arc::new(entry));
+        cache.insert(path.clone(), Arc::new(entry));
     }
+}
+
+/// A prerendered file with the build's compressed copies; builds older than those are compressed here
+fn load_variant(file: &Path, headers: Vec<(String, String)>) -> Option<Variant> {
+    let body = std::fs::read(file).ok()?;
+    let (gzip, br) = (read_sibling(file, "gz"), read_sibling(file, "br"));
+    if gzip.is_empty() || br.is_empty() {
+        return Some(variant(body, headers, PRERENDER_QUALITY));
+    }
+    Some(Variant { body: Encoded::precompressed(Bytes::from(body), gzip, br), headers })
 }
 
 /// `revalidatePath()` / `revalidateTag()`: drops the pages carrying one of `tags`
@@ -270,7 +354,7 @@ pub fn invalidate_tags(tags: &[String]) {
         return;
     }
     let mut cache = cache().write().unwrap_or_else(|e| e.into_inner());
-    cache.pages.retain(|_, page| !page.tags.iter().any(|t| tags.iter().any(|p| crate::cache_store::tag_matches(p, t))));
+    cache.retain(|page| !page.tags.iter().any(|t| tags.iter().any(|p| crate::cache_store::tag_matches(p, t))));
 }
 
 fn cache_control(page: &CachedPage) -> String {
@@ -303,7 +387,7 @@ async fn render_page(state: &AppState, path: &str, route: &RouteEntry) -> Result
                 rendered: Instant::now(),
                 regenerating: AtomicBool::new(false),
             });
-            cache().write().unwrap_or_else(|e| e.into_inner()).pages.insert(path.to_string(), page.clone());
+            cache().write().unwrap_or_else(|e| e.into_inner()).insert(path.to_string(), page.clone());
             Ok(Some(page))
         }
         Err(reason) => {

@@ -11,6 +11,8 @@
     "bin/com.js",
     "src",
     "compiler-rs/src",
+    "compiler-rs/tailwind/src",
+    "compiler-rs/tailwind/Cargo.toml",
     "compiler-rs/Cargo.toml",
     "compiler-rs/Cargo.lock",
     "compiler-rs/README.md",

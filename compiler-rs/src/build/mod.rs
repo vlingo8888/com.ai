@@ -339,7 +339,7 @@ pub async fn prerender(state: &AppState, path: &str, route: &RouteEntry) -> Resu
         let router = state.router.read().await;
         router.match_route(path).map(|(_, p)| p).unwrap_or_default()
     };
-    let stylesheet = crate::css_compiler::stylesheet::project_stylesheet(root).await.head_tags();
+    let stylesheet = crate::css_compiler::stylesheet::project_head_tags(root).await;
     let html = crate::rsc::render_collect(root, &state.target, &stylesheet, page_request(path, route, params.clone(), crate::rsc::Mode::Html)).await?;
     if !html.is_static() {
         return Ok(Err(html.dynamic.unwrap_or_else(|| format!("status {}", html.status))));
@@ -393,8 +393,9 @@ async fn build_route(state: &AppState, root: &Path, route: &RouteEntry) -> Resul
         if let Some(parent) = pages_dir.join(format!("{name}.html")).parent() {
             std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
         }
-        std::fs::write(manifest::build_dir(root).join(&html_file), &html.body).map_err(|e| e.to_string())?;
-        std::fs::write(manifest::build_dir(root).join(&flight_file), &flight.body).map_err(|e| e.to_string())?;
+        for (file, body) in [(&html_file, &html.body), (&flight_file, &flight.body)] {
+            crate::prod::write_precompressed(&manifest::build_dir(root).join(file), body)?;
+        }
         let revalidate = match (html.revalidate, flight.revalidate) {
             (Some(a), Some(b)) => Some(a.min(b)),
             (a, b) => a.or(b),

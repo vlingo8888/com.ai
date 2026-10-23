@@ -26,6 +26,7 @@ pub mod route_handler;
 pub mod rsc;
 pub mod router;
 pub mod rpc;
+pub mod store;
 pub mod server;
 pub mod ssr;
 pub mod swc_compiler;

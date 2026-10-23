@@ -56,8 +56,8 @@ impl RpcExecutor {
         nata_dir.join("core.ts").is_file()
             && nata_dir.join("next/request.ts").is_file()
             && nata_dir.join("next-intl-server.ts").is_file()
-            && (crate::project::project_core(root).is_some() || root.join("node_modules/core/index.js").is_file())
-            && (crate::project::has_real_next(root) || root.join("node_modules/next/package.json").is_file())
+            && (crate::project::project_core(root).is_some() || crate::store::packages_dir(root).join("core/index.js").is_file())
+            && (crate::project::has_real_next(root) || crate::store::packages_dir(root).join("next/package.json").is_file())
     }
 
     /// Ensures that the project has the canonical NATA runtime files (.nata/core.ts, node_modules/core, etc.)
@@ -115,6 +115,11 @@ export class HttpError extends Error {
   getStatusCode(): number { return this.statusCode; }
 }
 
+// The dev panel lists each query with a sample of its rows: keeping every row of every query made big
+// results travel to the engine and stay in its log. Not collected under `com start` unless COM_QUERY_LOG=1
+const QUERY_LOG_ROWS = 20;
+const QUERY_LOG = process.env.NODE_ENV !== "production" || process.env.COM_QUERY_LOG === "1";
+
 class LoggingConnection implements DatabaseConnection {
   constructor(private readonly inner: DatabaseConnection) {}
 
@@ -132,7 +137,7 @@ class LoggingConnection implements DatabaseConnection {
         type: "sql",
         sql: sqlStr,
         parameters: parameters || [],
-        response: rows,
+        response: Array.isArray(rows) && rows.length > QUERY_LOG_ROWS ? rows.slice(0, QUERY_LOG_ROWS) : rows,
         rowCount: rowCount,
         duration_ms: duration,
         status: "success",
@@ -140,7 +145,7 @@ class LoggingConnection implements DatabaseConnection {
         timestamp: new Date().toISOString()
       };
       const logStore = (globalThis as any).__NATA_QUERY_LOGS__ || ((globalThis as any).__NATA_QUERY_LOGS__ = []);
-      logStore.push(queryLog);
+      if (QUERY_LOG) logStore.push(queryLog);
 
       if (process.env.DEBUG_SQL === "true" || process.env.DEBUG_SQL === "1") {
         const paramStr = parameters && parameters.length > 0 ? ` [${parameters.map(p => JSON.stringify(p)).join(", ")}]` : "";
@@ -180,7 +185,7 @@ class LoggingConnection implements DatabaseConnection {
         timestamp: new Date().toISOString()
       };
       const logStore = (globalThis as any).__NATA_QUERY_LOGS__ || ((globalThis as any).__NATA_QUERY_LOGS__ = []);
-      logStore.push(queryLog);
+      if (QUERY_LOG) logStore.push(queryLog);
 
       if (process.env.COM_DEV_QUERY_LOG !== "1") {
         console.error(`\x1b[31m✖ [SQL Error]\x1b[0m \x1b[1m${sqlStr}\x1b[0m\x1b[90m${paramStr} (${duration}ms)\x1b[0m`);
@@ -653,17 +658,16 @@ export default {
         let _ = std::fs::write(nata_dir.join("next-intl-server.ts"), include_str!("next/intl-server.ts"));
 
         // 4. Ensure node_modules/core has canonical NATA package files (overriding any broken ancient core package)
-        if !own_core {
-            let nm_core = root.join("node_modules").join("core");
+        let packages = crate::store::packages_dir(root);
+        let nata_rel = crate::store::nata_from_package(root);
+        if !own_core && !crate::store::is_shared(&packages.join("core")) {
+            let nm_core = packages.join("core");
             let _ = std::fs::create_dir_all(&nm_core);
             let _ = std::fs::write(
                 nm_core.join("package.json"),
-                r#"{"name":"core","version":"1.0.0","main":"../../.nata/core.ts","module":"../../.nata/core.ts","types":"../../.nata/core.ts"}"#,
+                format!(r#"{{"name":"core","version":"1.0.0","main":"{nata_rel}/core.ts","module":"{nata_rel}/core.ts","types":"{nata_rel}/core.ts"}}"#),
             );
-            let _ = std::fs::write(
-                nm_core.join("index.js"),
-                r#"module.exports = require("../../.nata/core.ts");"#,
-            );
+            let _ = std::fs::write(nm_core.join("index.js"), format!(r#"module.exports = require("{nata_rel}/core.ts");"#));
         }
 
         // 5. The stub `next` package (headers, server, navigation, font mocks): only when the project
@@ -742,11 +746,12 @@ export default {
             let _ = std::fs::write(&tsconfig_path, serde_json::to_string_pretty(&standard_tsconfig).unwrap());
         }
 
-        let nm_next_intl = root.join("node_modules").join("next-intl");
-        if nm_next_intl.exists() && !real_next {
+        // Not for the store's next-intl (shared by every project): the resolvers alias `next-intl/server`
+        let nm_next_intl = crate::store::packages_dir(root).join("next-intl");
+        if nm_next_intl.exists() && !real_next && !crate::store::is_shared(&nm_next_intl) {
             let _ = std::fs::write(
                 nm_next_intl.join("server.js"),
-                r#"module.exports = require("../../.nata/next-intl-server.ts");"#,
+                format!(r#"module.exports = require("{}/next-intl-server.ts");"#, crate::store::nata_from_package(root)),
             );
         }
 
@@ -969,7 +974,10 @@ setTimeout(() => process.exit(code), 10);
 
 /// A stand-in `next` package in node_modules for projects that do not install Next.js
 fn write_stub_next_package(root: &Path) {
-    let nm_next = root.join("node_modules").join("next");
+    let nm_next = crate::store::packages_dir(root).join("next");
+    if crate::store::is_shared(&nm_next) {
+        return;
+    }
     let _ = std::fs::create_dir_all(&nm_next);
     let _ = std::fs::write(
         nm_next.join("package.json"),
@@ -1263,6 +1271,8 @@ mod tests {
     #[test]
     fn sets_up_a_plain_project() {
         let root = project("plain");
+        // A project with its own node_modules (not the shared store)
+        std::fs::create_dir_all(root.join("node_modules")).unwrap();
         std::fs::write(root.join("tsconfig.json"), r#"{"compilerOptions":{}}"#).unwrap();
 
         RpcExecutor::ensure_runtime_env(&root);
@@ -1278,8 +1288,35 @@ mod tests {
     }
 
     #[test]
+    fn sets_up_a_project_on_the_shared_store() {
+        let root = project("store");
+        RpcExecutor::ensure_runtime_env(&root);
+        assert!(!root.join("node_modules").exists());
+        let packages = root.join(".nata/modules/node_modules");
+        // `require` paths from the package to .nata/ point at real files
+        let core = std::fs::read_to_string(packages.join("core/index.js")).unwrap();
+        let target = core.split('"').nth(1).unwrap();
+        assert!(packages.join("core").join(target).is_file(), "{core}");
+        let headers = std::fs::read_to_string(packages.join("next/headers.js")).unwrap();
+        let target = headers.split('"').nth(1).unwrap();
+        assert!(packages.join("next").join(target).is_file(), "{headers}");
+
+        // A package linked from the store is never written into
+        #[cfg(unix)]
+        {
+            let store_pkg = root.join("store-next-intl");
+            std::fs::create_dir_all(&store_pkg).unwrap();
+            std::os::unix::fs::symlink(&store_pkg, packages.join("next-intl")).unwrap();
+            RpcExecutor::ensure_runtime_env(&root);
+            assert!(!store_pkg.join("server.js").exists());
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn restores_runtime_files_deleted_after_startup() {
         let root = project("restore");
+        std::fs::create_dir_all(root.join("node_modules")).unwrap();
         RpcExecutor::ensure_runtime_env(&root);
         assert!(root.join(".nata/next/request.ts").is_file());
 

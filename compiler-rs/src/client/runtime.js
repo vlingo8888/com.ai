@@ -25,7 +25,7 @@ function parseLocation(url) {
 
 function readInitialZaloPath() {
   const hash = window.location.hash || "";
-  return hash.startsWith("#/") ? hash.slice(1) : "/";
+  return hash.startsWith("#/") ? hash.slice(1) : NATA_CONFIG.start || "/";
 }
 
 window.__NATA_LOCATION__ = IS_ZALO
@@ -60,8 +60,47 @@ async function loadModule(specifier, timestamp = null) {
     moduleCache.set(normKey, mod);
     return mod;
   } catch (err) {
-    throw err;
+    return recoverModule(targetUrl, err);
   }
+}
+
+// A module that fails to load is usually the dev server mid-rebuild (a plugin install changes files in several
+// waves and restarts the worker). The browser remembers the failure for this document, so wait until the server
+// serves the module AND has been quiet for 3s (`/_nata/hmr_version` unchanged), then reload — at most 3 times a
+// minute, so a real error still reaches the overlay.
+const CHUNK_RELOAD_KEY = "nata:chunk-reload";
+function recoverModule(url, err) {
+  let state = {};
+  try {
+    state = JSON.parse(sessionStorage.getItem(CHUNK_RELOAD_KEY) || "{}") || {};
+  } catch {}
+  if (!state.t || Date.now() - state.t > 60000) state = { n: 0, t: Date.now() };
+  // Zalo mini app: a reload restarts the app, keep the overlay instead
+  if (IS_ZALO || state.n >= 3) return Promise.reject(err);
+  return new Promise((_, reject) => {
+    let tries = 0;
+    let last = null;
+    let since = 0;
+    const poll = () =>
+      Promise.all([fetch(url, { cache: "no-store" }), fetch(ORIGIN + "/_nata/hmr_version", { cache: "no-store" }).then((r) => r.json())])
+        .then(([res, hmr]) => {
+          if (!res.ok) throw new Error(String(res.status));
+          const version = hmr && hmr.version;
+          if (version !== last) {
+            last = version;
+            since = Date.now();
+            throw new Error("changing");
+          }
+          if (Date.now() - since < 3000) throw new Error("settling");
+          state.n += 1;
+          try {
+            sessionStorage.setItem(CHUNK_RELOAD_KEY, JSON.stringify(state));
+          } catch {}
+          location.reload();
+        })
+        .catch(() => (++tries > 120 ? reject(err) : setTimeout(poll, 1000)));
+    poll();
+  });
 }
 
 let currentRoot = null;
@@ -616,6 +655,22 @@ async function navigateTo(targetUrl, options = {}) {
 }
 
 window.__NATA_NAVIGATE__ = navigateTo;
+
+// Zalo: the container owns the page URL, so a full page load leaves the mini app (the tunnel's web server answers).
+// Plain <a href="/x"> links (website sections, rich text, plugin views) navigate inside the app instead; <Link>
+// already handles its own clicks (defaultPrevented), other sites / tel: / mailto: / new tabs keep the default.
+function interceptZaloLinks(go) {
+  document.addEventListener("click", (e) => {
+    if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+    const a = e.target instanceof Element ? e.target.closest("a[href]") : null;
+    if (!a || a.hasAttribute("download") || (a.getAttribute("target") && a.getAttribute("target") !== "_self")) return;
+    const href = a.getAttribute("href") || "";
+    if (!href || href.startsWith("#") || href.startsWith("//") || /^[a-z][a-z0-9+.-]*:/i.test(href)) return;
+    e.preventDefault();
+    go(href);
+  });
+}
+if (IS_ZALO) interceptZaloLinks((href) => navigateTo(href));
 
 window.addEventListener('popstate', (e) => {
   const currentPath = IS_ZALO

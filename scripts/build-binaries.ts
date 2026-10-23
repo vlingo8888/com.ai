@@ -53,7 +53,9 @@ function buildTarget(target: Target): boolean {
 
   if (!run(["rustup", "target", "add", rust])) return false;
 
-  const common = ["--release", "--bin", "com-compiler"];
+  // `dist`: fat LTO and one codegen unit (Cargo.toml). A smaller binary that maps fewer pages and runs
+  // faster than `--release`, which stays tuned for quick local rebuilds
+  const common = ["--profile", "dist", "--bin", "com-compiler"];
   const cmd =
     tool === "cargo"
       ? ["cargo", "build", "--target", rust, ...common]
@@ -63,7 +65,7 @@ function buildTarget(target: Target): boolean {
   if (!run(cmd)) return false;
 
   const binName = exeName("com-compiler", target.split("-")[0] as NodeJS.Platform);
-  const built = join(COMPILER_DIR, "target", rust, "release", binName);
+  const built = join(COMPILER_DIR, "target", rust, "dist", binName);
   if (!existsSync(built)) {
     console.error(`\x1b[31m✗ Expected ${built} after build\x1b[0m`);
     return false;

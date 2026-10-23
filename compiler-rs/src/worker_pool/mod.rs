@@ -164,6 +164,8 @@ fn env_number(name: &str, default: u64) -> u64 {
 
 /// Same environment the per-request runners received: PATH with Bun locations, project `.env*` files
 pub fn apply_runner_env(cmd: &mut Command, root: &Path) {
+    // Packages from the shared store (store.rs)
+    cmd.envs(crate::store::env(root));
     if let Ok(curr_path) = std::env::var("PATH") {
         let mut paths = vec![];
         if let Some(userprofile) = std::env::var_os("USERPROFILE") {
@@ -295,6 +297,7 @@ async fn spawn(root: &Path) -> Result<Arc<Handle>, String> {
     crate::module_graph::for_root(root).write().unwrap_or_else(|e| e.into_inner()).reset_server_layers();
 
     let mut cmd = Command::new(crate::rpc::find_bun_bin());
+    cmd.args(crate::store::bun_args(root));
     // --smol: a more aggressive GC and smaller heap; dev traffic is light, memory matters more
     if !matches!(std::env::var("COM_WORKER_SMOL").as_deref(), Ok("0") | Ok("false")) {
         cmd.arg("--smol");
@@ -619,7 +622,7 @@ fn ensure_idle_reaper() {
 pub async fn spawn_once(root: &Path, script: &str) -> Result<ScriptOutput, String> {
     let _ = write_runtime_files(root);
     let mut cmd = Command::new(crate::rpc::find_bun_bin());
-    cmd.arg("-e").arg(script).current_dir(root);
+    cmd.args(crate::store::bun_args(root)).arg("-e").arg(script).current_dir(root);
     apply_runner_env(&mut cmd, root);
     let output = match cmd.output().await {
         Ok(out) => out,

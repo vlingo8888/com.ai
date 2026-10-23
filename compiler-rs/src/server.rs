@@ -413,6 +413,7 @@ async fn rpc_handler(
         }
     }
 
+    let dev_panel = !crate::mode::is_production();
     match RpcExecutor::execute_full(&state.root_dir, payload.clone()).await {
         Ok(output) => {
             let rpc_duration = (rpc_start.elapsed().as_secs_f64() * 1000.0 * 100.0).round() / 100.0;
@@ -433,7 +434,8 @@ async fn rpc_handler(
             });
 
             // Store logs into ring buffer
-            {
+            // The dev panel's log: not kept (nor broadcast) under `com start`
+            if dev_panel {
                 let mut logs = state.query_logs.write().await;
                 for q in &output.queries {
                     if logs.len() >= 500 {
@@ -453,7 +455,9 @@ async fn rpc_handler(
                 "log": rpc_log,
                 "queries": output.queries
             });
-            let _ = state.hmr_tx.send(ws_event.to_string());
+            if dev_panel {
+                let _ = state.hmr_tx.send(ws_event.to_string());
+            }
 
             let mut res_headers = HeaderMap::new();
             res_headers.insert(header::CONTENT_TYPE, "application/json; charset=utf-8".parse().unwrap());
@@ -507,7 +511,8 @@ async fn rpc_handler(
                 "queries": []
             });
 
-            {
+            // The dev panel's log: not kept (nor broadcast) under `com start`
+            if dev_panel {
                 let mut logs = state.query_logs.write().await;
                 if logs.len() >= 500 {
                     logs.pop_front();
@@ -520,7 +525,9 @@ async fn rpc_handler(
                 "log": rpc_log,
                 "queries": []
             });
-            let _ = state.hmr_tx.send(ws_event.to_string());
+            if dev_panel {
+                let _ = state.hmr_tx.send(ws_event.to_string());
+            }
 
             // The failure itself was already printed by the RPC log block (`dev_log::render_rpc`)
             (
@@ -948,10 +955,12 @@ fn zmp_bootstrap_js(backend_url: &str, tailwind_in_browser: bool) -> String {
   if (backendOrigin && !window.__nata_fetch_hooked) {
     window.__nata_fetch_hooked = true;
     var originalFetch = window.fetch;
+    // "//host/x" is another site without its scheme (zmp-sdk logs to //h5.zalo.me/log/…), not a path of the app
+    var appPath = function(u) { return u.charAt(0) === "/" && u.charAt(1) !== "/"; };
     window.fetch = function(input, init) {
-      if (typeof input === "string" && input.startsWith("/")) {
+      if (typeof input === "string" && appPath(input)) {
         input = backendOrigin + input;
-      } else if (input && typeof input.url === "string" && input.url.startsWith("/")) {
+      } else if (input && typeof input.url === "string" && appPath(input.url)) {
         input = new Request(backendOrigin + input.url, input);
       }
       return originalFetch.call(this, input, init);
@@ -1037,7 +1046,7 @@ fn zmp_bootstrap_js(backend_url: &str, tailwind_in_browser: bool) -> String {
       document.body.appendChild(container);
     }
     var rsc = __COM_RSC__;
-    window.__NATA_CONFIG__ = { mode: "zalo", ssr: false, rsc: rsc, origin: serverOrigin, initial: null };
+    window.__NATA_CONFIG__ = { mode: "zalo", ssr: false, rsc: rsc, origin: serverOrigin, initial: null, start: __COM_ZALO_START__ };
     if (rsc) {
       // React Server Components router: client references are module URLs on the dev server
       var modules = self.__nata_modules = new Map();
@@ -1074,6 +1083,11 @@ fn zmp_bootstrap_js(backend_url: &str, tailwind_in_browser: bool) -> String {
         .replace("__COM_TAILWIND_BROWSER__", if tailwind_in_browser { "true" } else { "false" })
         .replace("__COM_ERUDA__", if std::env::var("COM_ERUDA").is_ok_and(|v| v == "1" || v == "true") { "true" } else { "false" })
         .replace("__COM_RSC__", if crate::module_graph::rsc_enabled() { "true" } else { "false" })
+        // `com dev --target zalo --start /staff`: the page the mini app opens on (one project, several mini apps)
+        .replace(
+            "__COM_ZALO_START__",
+            &serde_json::to_string(&std::env::var("COM_ZALO_START").ok().filter(|p| p.starts_with('/')).unwrap_or_else(|| "/".into())).unwrap_or_else(|_| "\"/\"".into()),
+        )
 }
 
 async fn shims_handler(
@@ -1990,7 +2004,7 @@ async fn route_request(state: AppState, req: axum::extract::Request) -> impl Int
             }
         }
 
-        let stylesheet_tags = crate::css_compiler::stylesheet::project_stylesheet(&state.root_dir).await.head_tags();
+        let stylesheet_tags = crate::css_compiler::stylesheet::project_head_tags(&state.root_dir).await;
 
         if crate::module_graph::rsc_enabled() {
             // Zalo Mini Apps render on the device: the browser preview gets the Mini App document,
@@ -2144,7 +2158,7 @@ async fn route_request(state: AppState, req: axum::extract::Request) -> impl Int
     if crate::module_graph::rsc_enabled() && (state.target != "zalo" || req.headers().get("rsc").is_some()) {
         let root_segment: Vec<_> = router_guard.routes.iter().find_map(|r| r.segments_files.first().cloned()).into_iter().collect();
         drop(router_guard);
-        let stylesheet_tags = crate::css_compiler::stylesheet::project_stylesheet(&state.root_dir).await.head_tags();
+        let stylesheet_tags = crate::css_compiler::stylesheet::project_head_tags(&state.root_dir).await;
         let query = req.uri().query().unwrap_or("").to_string();
         let page_req = rsc_page_request(req, &path, &query, None, Default::default(), root_segment).await;
         return crate::rsc::handle(&state.root_dir, &state.target, &stylesheet_tags, page_req).await;
@@ -2156,7 +2170,7 @@ async fn route_request(state: AppState, req: axum::extract::Request) -> impl Int
     });
 
     if let Some(not_found_file) = not_found_opt {
-        let stylesheet_tags = crate::css_compiler::stylesheet::project_stylesheet(&state.root_dir).await.head_tags();
+        let stylesheet_tags = crate::css_compiler::stylesheet::project_head_tags(&state.root_dir).await;
         let layout_files = root_layout_files(&router_guard);
         let ssr_req = SsrRequest {
             path: path.to_string(),

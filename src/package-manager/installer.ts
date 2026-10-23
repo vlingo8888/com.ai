@@ -1,4 +1,6 @@
 import { logger, colors } from "../core/logger";
+import { usesStore } from "../store";
+import { ensurePackages } from "../store/ensure";
 
 export interface InstallOptions {
   cwd: string;
@@ -6,6 +8,10 @@ export interface InstallOptions {
 }
 
 export async function installDependencies(options: InstallOptions): Promise<boolean> {
+  // A project without node_modules gets its packages from the shared store (src/store)
+  if (usesStore(options.cwd)) {
+    return (await ensurePackages(options.cwd, { quiet: options.silent })) === "store";
+  }
   const spinner = !options.silent ? logger.spinner("Installing project dependencies with Bun...") : null;
 
   try {

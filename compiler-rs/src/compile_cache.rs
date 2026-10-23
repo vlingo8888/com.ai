@@ -14,7 +14,7 @@ use redb::{Database, Durability, ReadableTableMetadata, TableDefinition};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::sync::{Arc, Condvar, Mutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
 const TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("compiled_modules");
@@ -42,6 +42,8 @@ pub struct CompileCache {
     /// Writes committed without fsync since the last durable commit
     pending: AtomicU64,
     last_write: Mutex<Instant>,
+    /// Wakes the flusher after a write, so it sleeps for good while nothing is written
+    wrote: Condvar,
 }
 
 fn caches() -> &'static Mutex<HashMap<PathBuf, Option<Arc<CompileCache>>>> {
@@ -89,7 +91,7 @@ impl CompileCache {
             let _ = std::fs::remove_file(&path);
         }
         let db = open_database(&path)?;
-        Some(CompileCache { db, pending: AtomicU64::new(0), last_write: Mutex::new(Instant::now()) })
+        Some(CompileCache { db, pending: AtomicU64::new(0), last_write: Mutex::new(Instant::now()), wrote: Condvar::new() })
     }
 
     /// Cache key for one module; any change to the inputs produces a new key
@@ -119,8 +121,11 @@ impl CompileCache {
         if txn.commit().is_err() {
             return;
         }
+        // Counted before the flusher can look (under `last_write`), so its wakeup is never lost
+        let pending = self.pending.fetch_add(1, Ordering::SeqCst) + 1;
         *self.last_write.lock().unwrap_or_else(|e| e.into_inner()) = Instant::now();
-        if self.pending.fetch_add(1, Ordering::SeqCst) + 1 >= FLUSH_EVERY {
+        self.wrote.notify_one();
+        if pending >= FLUSH_EVERY {
             self.flush();
         }
     }
@@ -151,14 +156,25 @@ impl CompileCache {
     }
 }
 
-/// Flushes `cache` whenever writes pause, until it is dropped
+/// Flushes `cache` whenever writes pause, until it is dropped. Blocks while nothing is pending
+/// instead of polling, so an idle `com dev` has no thread waking up several times a second.
 fn spawn_flusher(cache: Weak<CompileCache>) {
+    /// Wait between checks that the cache still exists, when no write comes
+    const IDLE_CHECK: Duration = Duration::from_secs(60);
     let _ = std::thread::Builder::new().name("compile-cache-flush".into()).spawn(move || loop {
-        std::thread::sleep(FLUSH_IDLE / 2);
         let Some(cache) = cache.upgrade() else { return };
-        let idle = cache.last_write.lock().unwrap_or_else(|e| e.into_inner()).elapsed() >= FLUSH_IDLE;
-        if idle && cache.pending.load(Ordering::SeqCst) > 0 {
+        let last_write = cache.last_write.lock().unwrap_or_else(|e| e.into_inner());
+        if cache.pending.load(Ordering::SeqCst) == 0 {
+            drop(cache.wrote.wait_timeout(last_write, IDLE_CHECK));
+            continue;
+        }
+        let quiet = last_write.elapsed();
+        drop(last_write);
+        if quiet >= FLUSH_IDLE {
             cache.flush();
+        } else {
+            drop(cache);
+            std::thread::sleep(FLUSH_IDLE - quiet);
         }
     });
 }
@@ -169,14 +185,55 @@ pub fn tsconfig_fingerprint(root: &Path) -> String {
     blake3::hash(&content).to_hex().to_string()
 }
 
-/// Fingerprint of everything module resolution depends on besides the file itself: tsconfig,
-/// `package.json` and the installed packages (lockfile size and mtime, cheap to stat)
-pub fn resolution_fingerprint(root: &Path) -> String {
+/// Files `resolution_fingerprint` depends on, by name in the root
+const RESOLUTION_FILES: [&str; 3] = ["tsconfig.json", "jsconfig.json", "package.json"];
+const LOCKFILES: [&str; 5] = ["bun.lock", "bun.lockb", "package-lock.json", "pnpm-lock.yaml", "yarn.lock"];
+const NEXT_CONFIGS: [&str; 5] = ["next.config.js", "next.config.mjs", "next.config.ts", "next.config.cjs", "next.config.mts"];
+
+/// Size and mtime of every file the fingerprint reads, plus the loaded next.config `env`: the same
+/// signature means the same fingerprint. About 20 `stat` calls instead of reading and parsing the
+/// configs and `.env` files for every compiled module.
+fn resolution_signature(root: &Path) -> [u8; 32] {
     let mut hasher = blake3::Hasher::new();
-    for name in ["tsconfig.json", "jsconfig.json", "package.json"] {
+    let files = RESOLUTION_FILES.iter().chain(&LOCKFILES).chain(&NEXT_CONFIGS).chain(&crate::env::FILES);
+    for name in files {
+        hasher.update(name.as_bytes());
+        if let Ok(meta) = std::fs::metadata(root.join(name)) {
+            let mtime = meta.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_nanos());
+            hasher.update(&meta.len().to_le_bytes());
+            hasher.update(&mtime.to_le_bytes());
+        }
+    }
+    hasher.update(&[crate::framework_react::installed() as u8]);
+    if let Some(config) = crate::next_config::for_root(root) {
+        hasher.update(config["env"].to_string().as_bytes());
+    }
+    *hasher.finalize().as_bytes()
+}
+
+/// Fingerprint of everything module resolution depends on besides the file itself: tsconfig,
+/// `package.json` and the installed packages (lockfile size and mtime, cheap to stat). Remembered per
+/// root until one of those files changes.
+pub fn resolution_fingerprint(root: &Path) -> String {
+    static MEMO: OnceLock<Mutex<HashMap<PathBuf, ([u8; 32], String)>>> = OnceLock::new();
+    let signature = resolution_signature(root);
+    let memo = MEMO.get_or_init(Default::default);
+    if let Some((sig, fingerprint)) = memo.lock().unwrap_or_else(|e| e.into_inner()).get(root) {
+        if *sig == signature {
+            return fingerprint.clone();
+        }
+    }
+    let fingerprint = compute_resolution_fingerprint(root);
+    memo.lock().unwrap_or_else(|e| e.into_inner()).insert(root.to_path_buf(), (signature, fingerprint.clone()));
+    fingerprint
+}
+
+fn compute_resolution_fingerprint(root: &Path) -> String {
+    let mut hasher = blake3::Hasher::new();
+    for name in RESOLUTION_FILES {
         hasher.update(&std::fs::read(root.join(name)).unwrap_or_default());
     }
-    for name in ["bun.lock", "bun.lockb", "package-lock.json", "pnpm-lock.yaml", "yarn.lock"] {
+    for name in LOCKFILES {
         if let Ok(meta) = std::fs::metadata(root.join(name)) {
             let mtime = meta.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_nanos());
             hasher.update(name.as_bytes());

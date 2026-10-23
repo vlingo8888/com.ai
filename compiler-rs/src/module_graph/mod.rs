@@ -254,23 +254,46 @@ pub fn server_module_specifier(root: &Path, file: impl AsRef<Path>) -> Option<St
     Some(for_root(root).read().unwrap_or_else(|e| e.into_inner()).specifier(&file, Layer::Rsc))
 }
 
+/// `root` canonicalized, remembered: `compile` runs for every module of a page
+fn canonical_root(root: &Path) -> PathBuf {
+    static ROOTS: OnceLock<Mutex<HashMap<PathBuf, PathBuf>>> = OnceLock::new();
+    let mut roots = ROOTS.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner());
+    roots.entry(root.to_path_buf()).or_insert_with(|| root.canonicalize().unwrap_or_else(|_| root.to_path_buf())).clone()
+}
+
+/// Whether `react-refresh` is installed, checked again only when the resolution fingerprint changes
+/// (installs change the lockfile)
+fn react_refresh_installed(root: &Path, fingerprint: &str) -> bool {
+    static INSTALLED: OnceLock<Mutex<HashMap<PathBuf, (String, bool)>>> = OnceLock::new();
+    let memo = INSTALLED.get_or_init(Default::default);
+    if let Some((fp, installed)) = memo.lock().unwrap_or_else(|e| e.into_inner()).get(root) {
+        if fp == fingerprint {
+            return *installed;
+        }
+    }
+    let installed = crate::framework_react::package_version(root, "react-refresh").is_some();
+    memo.lock().unwrap_or_else(|e| e.into_inner()).insert(root.to_path_buf(), (fingerprint.to_string(), installed));
+    installed
+}
+
 /// Compiles `file` for `layer` (through the persistent cache) and records it in the graph.
 /// The returned code still has unversioned server specifiers; see `ModuleGraph::versioned_code`.
 pub fn compile(root: &Path, file: &Path, layer: Layer, source: &str) -> Result<CompiledModule, CompileError> {
-    let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let root = canonical_root(root);
     let graph = for_root(&root);
     let package_specifier = graph.read().unwrap().package_specifier(file).map(|s| s.to_string());
     let rel = crate::swc_compiler::module::relative(&root, file);
     let hash = *blake3::hash(source.as_bytes()).as_bytes();
 
     let cache = CompileCache::for_root(&root);
-    let refresh = layer == Layer::Client && !rel.contains("node_modules/") && refresh_enabled() && crate::framework_react::package_version(&root, "react-refresh").is_some();
+    let fingerprint = resolution_fingerprint(&root);
+    let refresh = layer == Layer::Client && !rel.contains("node_modules/") && refresh_enabled() && react_refresh_installed(&root, &fingerprint);
     // Browser modules use the production JSX runtime with production dependencies
     let development = !crate::mode::is_production() && (layer != Layer::Client || crate::deps::deps_node_env() == "development");
     let cache_key = CompileCache::key(
         &format!("{}#{}#{}#{}#{}", rel, layer.as_str(), package_specifier.as_deref().unwrap_or(""), refresh, development),
         source,
-        &resolution_fingerprint(&root),
+        &fingerprint,
     );
     let cached = cache
         .as_ref()

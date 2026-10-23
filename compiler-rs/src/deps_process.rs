@@ -91,12 +91,16 @@ pub async fn bundle(root: &Path, input: &serde_json::Value) -> Result<(), Bundle
 
 async fn spawn(root: &Path) -> Result<BundlerProcess, String> {
     crate::worker_pool::write_runtime_files(root).map_err(|e| e.to_string())?;
+    // The bundler (~50MB) exits after `COM_DEPS_IDLE` seconds without work (default 5): a cold page asks
+    // for its packages within a second or two, and a later request starts it again
+    let idle_ms = std::env::var("COM_DEPS_IDLE").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(5) * 1000;
     let script = format!(
-        "import {{ serveBundler }} from {};\nawait serveBundler();\n",
+        "import {{ serveBundler }} from {};\nawait serveBundler({{ idleMs: {idle_ms} }});\n",
         serde_json::to_string(&crate::rpc::clean_path(root.join(".nata/deps_bundler.ts"))).unwrap_or_default()
     );
     let mut cmd = Command::new(crate::rpc::find_bun_bin());
-    cmd.arg("-e")
+    cmd.args(crate::store::bun_args(root))
+        .arg("-e")
         .arg(script)
         .current_dir(root)
         .stdin(Stdio::piped())

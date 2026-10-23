@@ -3,7 +3,6 @@ import { join } from "path";
 import { homedir } from "os";
 import { exeName } from "../core/binaries";
 import { logger, colors } from "../core/logger";
-import qrcode from "qrcode-terminal";
 
 export interface TunnelOptions {
   port?: number | string;
@@ -23,6 +22,8 @@ export interface TunnelHandle {
 
 export function printTunnelQrCode(url: string, title = "QUÉT MÃ QR BẰNG ZALO HOẶC CAMERA ĐỂ MỞ TRÊN ĐIỆN THOẠI") {
   try {
+    // Loaded here: only tunnel and Zalo sessions print a QR code
+    const qrcode: typeof import("qrcode-terminal") = require("qrcode-terminal");
     qrcode.generate(url, { small: true }, (qr: string) => {
       console.log(`\n  ${colors.bold}${colors.cyan}📱 ${title}:${colors.reset}\n`);
       for (const line of qr.split("\n")) {

@@ -1,3 +1,4 @@
+import { installDependencies } from "../package-manager/installer";
 import { existsSync, mkdirSync, readdirSync, writeFileSync } from "fs";
 import { join, resolve, relative, dirname } from "path";
 import { logger, colors } from "../core/logger";
@@ -1381,14 +1382,8 @@ export async function createProject(
 
   // Optional dependency installation
   if (options.install) {
-    const installSpinner = logger.spinner("Installing project dependencies with Bun...");
-    try {
-      const proc = Bun.spawn([process.execPath, "install"], { cwd: targetDir });
-      await proc.exited;
-      installSpinner.stop(true, "Dependencies installed successfully");
-    } catch {
-      installSpinner.stop(false, "Failed to run bun install; using ESM Zero-Install runtime");
-    }
+    // The shared store (no node_modules) unless COM_STORE=0
+    await installDependencies({ cwd: targetDir });
   }
 
   // Summary Card

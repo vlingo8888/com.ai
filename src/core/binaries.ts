@@ -1,6 +1,7 @@
 import { existsSync } from "fs";
 import { createRequire } from "module";
 import { dirname, join } from "path";
+import { storeEnv } from "../store";
 
 /** Platforms that get a prebuilt `@com.ai.vn/compiler-<platform>-<arch>` package on npm. */
 export const SUPPORTED_COMPILER_TARGETS = [
@@ -61,8 +62,17 @@ export function resolveWorkerBun(fromDir: string = __dirname): string | null {
   return null;
 }
 
-/** Environment for engine processes: `COM_BUN` unless the user set it */
-export function engineEnv(): Record<string, string> {
+/**
+ * Environment for engine processes: `COM_BUN` unless the user set it, `COM_CLI` (the engine runs
+ * `com pkg add` for packages a project imports before installing them), and for a project on the
+ * shared store, where its packages are (`NODE_PATH`, inherited by the worker and the bundler)
+ */
+export function engineEnv(projectDir?: string): Record<string, string> {
+  const env = { COM_CLI: join(__dirname, "../../bin/cli.ts"), ...(projectDir ? storeEnv(projectDir) : {}) };
+  return { ...env, ...workerBunEnv() };
+}
+
+function workerBunEnv(): Record<string, string> {
   if (process.env.COM_BUN) return {};
   const bun = resolveWorkerBun();
   return bun ? { COM_BUN: bun } : {};

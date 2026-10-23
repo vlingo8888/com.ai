@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 /// `next` is installed from npm (not the stub package earlier engine versions wrote)
 pub fn has_real_next(root: &Path) -> bool {
-    root.join("node_modules/next/dist").is_dir()
+    crate::store::packages_dir(root).join("next/dist").is_dir()
 }
 
 /// The project's own `core` module, which `import ... from "core"` resolves to instead of `.nata/core.ts`

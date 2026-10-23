@@ -5,6 +5,7 @@ import { findEngineBinary, isZaloMiniAppProject } from "./dev";
 import { engineEnv } from "../core/binaries";
 import { prerenderPayloads } from "../zalominiapp/prerender";
 import { execReplace } from "../core/exec";
+import { ensurePackages } from "../store/ensure";
 
 export interface BuildOptions {
   dir?: string;
@@ -111,7 +112,8 @@ export async function buildCommand(options: BuildOptions = {}) {
       if (!engine) throw new Error("Engine binary not found: reinstall @com.ai.vn/cli or set COM_COMPILER_PATH");
       // The engine prints the route table; output goes to .nata/build (and `output` of next.config)
       const args = ["build", "--dir", projectDir, "--target", "web"];
-      const env = { ...process.env, ...engineEnv(), COM_MANAGED: "1", COM_BUILD_NEXT_STEPS: "1" };
+      await ensurePackages(projectDir, { quiet: true });
+      const env = { ...process.env, ...engineEnv(projectDir), COM_MANAGED: "1", COM_BUILD_NEXT_STEPS: "1" };
       // Nothing is left to do here once the engine runs: let it take over this process
       execReplace(engine, args, env);
       const proc = Bun.spawn([engine, ...args], {

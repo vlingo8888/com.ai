@@ -238,6 +238,7 @@ pub async fn bundle(root: &Path, app: &Router, base: &str, entries: &[String]) -
         .arg(&config_file)
         .current_dir(root)
         .env("NODE_ENV", "production")
+        .envs(crate::store::env(root))
         .output()
         .await
         .map_err(|e| format!("Could not run Bun: {e}"))?;

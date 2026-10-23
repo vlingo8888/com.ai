@@ -4,7 +4,7 @@
 //   bun -e 'import { bundleDependency } from ".nata/deps_bundler.ts"; ...'
 
 import { copyFileSync, existsSync, linkSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from "fs";
-import { basename, dirname, join, relative, sep } from "path";
+import { basename, dirname, join, relative, resolve, sep } from "path";
 
 const nataDir = join(process.cwd(), ".nata");
 
@@ -100,12 +100,27 @@ async function resolveForBrowser(spec: string, probe: string): Promise<string | 
   return resolved;
 }
 
+/**
+ * Where the packages of `resolveDir` are: its node_modules, or for a project on the shared store
+ * (no node_modules) the links `COM_PACKAGES_DIR` names (store.rs)
+ */
+/** The project whose sources import the package: `resolveDir`, or the project of `<project>/.nata/modules` */
+function projectOf(resolveDir: string): string {
+  return basename(resolveDir) === "modules" && basename(dirname(resolveDir)) === ".nata" ? dirname(dirname(resolveDir)) : resolveDir;
+}
+
+export function modulesDir(resolveDir: string): string {
+  const own = join(resolveDir, "node_modules");
+  const store = process.env.COM_PACKAGES_DIR;
+  return store && !existsSync(own) && resolve(resolveDir) === resolve(process.cwd()) ? store : own;
+}
+
 /** `<package>/<path to a file>` read from node_modules, whatever the package's `exports` say */
 export function packageFile(spec: string, resolveDir: string): string | null {
   const [first, second] = spec.split("/");
   const depth = first.startsWith("@") ? 2 : 1;
   if (spec.split("/").length <= depth || spec.split("/").includes("..") || (depth === 2 && !second)) return null;
-  const base = join(resolveDir, "node_modules", spec);
+  const base = join(modulesDir(resolveDir), spec);
   for (const file of [base, base + ".js", base + ".mjs", base + ".cjs", join(base, "index.js")]) {
     try {
       if (statSync(file).isFile()) return file;
@@ -171,7 +186,7 @@ export function packageEntries(spec: string, resolveDir: string, nodeEnv: string
   let pkgDir: string;
   let exports: unknown;
   try {
-    pkgDir = realpathSync(join(resolveDir, "node_modules", name));
+    pkgDir = realpathSync(join(modulesDir(resolveDir), name));
     exports = JSON.parse(readFileSync(join(pkgDir, "package.json"), "utf-8")).exports;
   } catch {
     return entries;
@@ -239,17 +254,17 @@ function sourceFiles(dir: string, out: string[], limit: number, skip: Set<string
  */
 function importedSubpaths(name: string, resolveDir: string): Set<string> {
   const files: string[] = [];
-  sourceFiles(resolveDir, files, 20_000, SKIPPED_DIRS);
-  const modulesDir = join(resolveDir, "node_modules");
+  sourceFiles(projectOf(resolveDir), files, 20_000, SKIPPED_DIRS);
+  const packagesDir = modulesDir(resolveDir);
   let packages: string[] = [];
   try {
-    packages = readdirSync(modulesDir).flatMap((p) => (p.startsWith("@") ? readdirSync(join(modulesDir, p)).map((s) => `${p}/${s}`) : [p]));
+    packages = readdirSync(packagesDir).flatMap((p) => (p.startsWith("@") ? readdirSync(join(packagesDir, p)).map((s) => `${p}/${s}`) : [p]));
   } catch {}
   for (const pkg of packages) {
     try {
-      const json = JSON.parse(readFileSync(join(modulesDir, pkg, "package.json"), "utf-8"));
+      const json = JSON.parse(readFileSync(join(packagesDir, pkg, "package.json"), "utf-8"));
       const deps = { ...json.dependencies, ...json.peerDependencies, ...json.optionalDependencies };
-      if (pkg !== name && name in deps) sourceFiles(realpathSync(join(modulesDir, pkg)), files, files.length + 5_000, new Set(["node_modules"]));
+      if (pkg !== name && name in deps) sourceFiles(realpathSync(join(packagesDir, pkg)), files, files.length + 5_000, new Set(["node_modules"]));
     } catch {}
   }
   const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");

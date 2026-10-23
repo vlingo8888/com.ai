@@ -44,8 +44,14 @@ function parseCookies(header: string): Map<string, string> {
 
 // lifecycle.ts `onInstalled(db)` runs once per process for each lifecycle file
 const lifecycleDone = new Set<string>();
+// Modules whose lifecycle candidates were already looked up: the outcome cannot change while this
+// worker lives (adding a lifecycle file restarts it), so later calls skip the four `existsSync`
+const lifecycleChecked = new Set<string>();
 
 async function runLifecycle(input: RpcInput) {
+  const key = `${input.tsPath}\0${input.cleanMod}`;
+  if (lifecycleChecked.has(key)) return;
+  lifecycleChecked.add(key);
   const fs = await import("fs");
   const path = await import("path");
   const modDir = path.dirname(input.tsPath);

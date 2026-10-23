@@ -122,6 +122,22 @@ Synchronizes the entire project environment in one command:
 com sync
 ```
 
+### 7. `com pkg <action>`: shared package store (no `node_modules`)
+A project without `node_modules` gets its packages from one store shared by every project on the machine (`~/.com/store/v1`). Bun still resolves versions into `bun.lock`; each package version is stored once (per set of dependency versions) and the project only holds links in `.nata/modules/node_modules`, plus `node_modules` as a single link to them (no files of its own: it lets Bun, `tsc` and editors find packages the standard way). `com dev`, `com build` and `com test` prepare it automatically. A project that has a real `node_modules` keeps using it; `COM_STORE=0` turns the store off.
+
+```bash
+com pkg install            # link the project's packages from the store
+com pkg add zod            # add to package.json + bun.lock, then link (-D for devDependencies)
+com pkg remove zod
+com pkg search react       # versions in the store, projects using them, latest on npm (--offline)
+com pkg ls                 # what the store holds
+com pkg why postcss        # which dependencies pull a package in
+com pkg gc --dry-run       # what no project uses any more (drop --dry-run to delete)
+com pkg link               # recreate the node_modules link if it was deleted
+```
+
+Install scripts (`postinstall`…) are not run for store packages; projects with git, `file:` or URL dependencies fall back to `bun install`.
+
 ---
 
 ## 🧪 Testing

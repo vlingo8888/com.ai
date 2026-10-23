@@ -42,7 +42,7 @@ pub fn is_valid_specifier(spec: &str) -> bool {
 }
 
 pub fn installed_version(root: &Path, name: &str) -> Option<String> {
-    let manifest = std::fs::read_to_string(root.join("node_modules").join(name).join("package.json")).ok()?;
+    let manifest = std::fs::read_to_string(crate::store::packages_dir(root).join(name).join("package.json")).ok()?;
     let json: serde_json::Value = serde_json::from_str(&manifest).ok()?;
     json.get("version")?.as_str().map(|v| v.to_string())
 }
@@ -124,8 +124,14 @@ async fn install(root: &Path, name: &str, restart_worker: bool) -> Option<String
 
     crate::term::event(&format!("Installing {name}..."));
     let started = std::time::Instant::now();
-    let mut cmd = tokio::process::Command::new(crate::rpc::find_bun_bin());
-    cmd.arg("add").arg(name).current_dir(root).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::piped());
+    let Some(mut cmd) = add_command(root, &[name], false) else {
+        crate::term::warn(&format!("Could not install {name} into the shared store (run `com pkg add {name}`), loading it from esm.sh instead"));
+        if let Ok(mut failed) = failed_installs().lock() {
+            failed.insert(name.to_string());
+        }
+        return None;
+    };
+    cmd.current_dir(root).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::piped());
     crate::worker_pool::apply_runner_env(&mut cmd, root);
     let result = cmd.output().await;
 
@@ -156,6 +162,21 @@ async fn install(root: &Path, name: &str, restart_worker: bool) -> Option<String
     }
 }
 
+/// `bun add` (`node_modules`), or `com pkg add` for a project on the shared store; `None` when the
+/// project is on the store and the CLI is unknown
+fn add_command(root: &Path, specs: &[&str], dev: bool) -> Option<tokio::process::Command> {
+    if crate::store::uses_store(root) {
+        return crate::store::add_command(root, specs, dev);
+    }
+    let mut cmd = tokio::process::Command::new(crate::rpc::find_bun_bin());
+    cmd.arg("add");
+    if dev {
+        cmd.arg("-d");
+    }
+    cmd.args(specs);
+    Some(cmd)
+}
+
 /// Installs `name@version` unless exactly that version is present (packages that must match another
 /// package's version, like `react-server-dom-webpack` and `react`)
 pub async fn ensure_version(root: &Path, name: &str, version: &str) -> bool {
@@ -173,8 +194,8 @@ pub async fn ensure_version(root: &Path, name: &str, version: &str) -> bool {
     }
     crate::term::event(&format!("Installing {key}..."));
     let started = std::time::Instant::now();
-    let mut cmd = tokio::process::Command::new(crate::rpc::find_bun_bin());
-    cmd.arg("add").arg(&key).current_dir(root).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::piped());
+    let Some(mut cmd) = add_command(root, &[&key], false) else { return false };
+    cmd.current_dir(root).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::piped());
     crate::worker_pool::apply_runner_env(&mut cmd, root);
     let ok = matches!(cmd.output().await, Ok(out) if out.status.success()) && installed_version(root, name).as_deref() == Some(version);
     if ok {
@@ -208,8 +229,8 @@ pub async fn ensure_dev_packages(root: &Path, names: &[&str]) -> bool {
 
     crate::term::event(&format!("Installing {}...", missing.join(", ")));
     let started = std::time::Instant::now();
-    let mut cmd = tokio::process::Command::new(crate::rpc::find_bun_bin());
-    cmd.arg("add").arg("-d").args(&missing).current_dir(root).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::piped());
+    let Some(mut cmd) = add_command(root, &missing, true) else { return false };
+    cmd.current_dir(root).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::piped());
     crate::worker_pool::apply_runner_env(&mut cmd, root);
     let ok = matches!(cmd.output().await, Ok(out) if out.status.success()) && names.iter().all(|n| installed_version(root, n).is_some());
     if ok {
@@ -280,6 +301,10 @@ pub async fn resolve(root: &Path, spec: &str) -> DepResult {
     let mut input = serde_json::json!({ "spec": spec, "outFile": out_file, "sharedFile": shared_file, "nodeEnv": node_env });
     if let Some(dir) = framework_dir.as_ref().and_then(|d| d.parent()) {
         input["resolveDir"] = serde_json::json!(dir);
+    } else if crate::store::uses_store(root) {
+        // Bun finds the store links as `node_modules` of this folder, with package `exports` (a
+        // NODE_PATH lookup only reads `main`)
+        input["resolveDir"] = serde_json::json!(crate::store::resolve_dir(root));
     }
     if let Some(module) = crate::deps_process::rolldown_module().await {
         input["rolldown"] = serde_json::json!(module);

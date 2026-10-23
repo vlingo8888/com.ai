@@ -88,7 +88,24 @@ function main() {
   }
 
   const cliEntry = join(__dirname, "cli.ts");
-  const child = spawn(bunPath, [cliEntry, ...process.argv.slice(2)], {
+  const args = process.argv.slice(2);
+
+  // Already in Bun (`bunx`): run the CLI in this process instead of starting a second runtime
+  if (process.versions && process.versions.bun && bunPath === process.execPath) {
+    process.argv = [process.argv[0], cliEntry, ...args];
+    import(cliEntry);
+    return;
+  }
+
+  // Replace this Node process with Bun (Node 22.15+ / 23.11+), so no idle Node runtime (~45MB) waits
+  // next to `com dev` for the whole session. Returns only on failure: fall back to a child process
+  if (!isWindows && typeof process.execve === "function" && !process.env.COM_NO_EXEC) {
+    try {
+      process.execve(bunPath, [bunPath, cliEntry, ...args], process.env);
+    } catch {}
+  }
+
+  const child = spawn(bunPath, [cliEntry, ...args], {
     stdio: "inherit",
     windowsHide: false,
   });

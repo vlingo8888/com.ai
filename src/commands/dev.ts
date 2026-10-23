@@ -1,4 +1,5 @@
 import { execReplace } from "../core/exec";
+import { ensurePackages } from "../store/ensure";
 import { existsSync, readFileSync, readdirSync, writeFileSync, mkdirSync } from "fs";
 import { join, relative, resolve } from "path";
 import { createConnection, createServer } from "net";
@@ -58,6 +59,8 @@ export interface DevOptions {
   server?: string;
   /** Load the Eruda mobile console in the Zalo bootstrap */
   eruda?: boolean;
+  /** Zalo: page the mini app opens on ("/staff" for a staff mini app); default "/" */
+  start?: string;
   /** Install the fake `window.ZMP` bridge in the browser preview instead of relying on the real zmp-sdk */
   zmpMock?: boolean;
 }
@@ -265,37 +268,7 @@ function commentOutDatabaseUrlInEnv(envFilePath: string) {
 
 import { getLocalNetworkIp, generateZaloDeepLink, printZaloDevQrCode, resolveOrPromptAppId, setupAdbReverse, ensureHrConfigFile } from "../zalominiapp/dev";
 
-/** Dependencies declared in package.json that are not present in node_modules */
-export function missingDependencies(projectDir: string): string[] {
-  const pkgPath = join(projectDir, "package.json");
-  if (!existsSync(pkgPath)) return [];
-  try {
-    const pkg = JSON.parse(readFileSync(pkgPath, "utf-8"));
-    const names = Object.keys({ ...pkg.dependencies, ...pkg.devDependencies });
-    return names.filter((name) => !existsSync(join(projectDir, "node_modules", name, "package.json")));
-  } catch {
-    return [];
-  }
-}
-
-/**
- * Client and server modules are both served from node_modules (no CDN), so install what is missing
- * before the engine starts. Bun's global cache keeps this fast and usually offline-capable.
- */
-async function ensureDependenciesInstalled(projectDir: string) {
-  const missing = missingDependencies(projectDir);
-  if (missing.length === 0) return;
-  const spinner = logger.spinner(`Installing ${missing.length} missing ${missing.length === 1 ? "dependency" : "dependencies"} (bun install)...`);
-  const proc = Bun.spawn([process.execPath, "install"], { cwd: projectDir, stdout: "ignore", stderr: "pipe" });
-  const stderr = await new Response(proc.stderr).text();
-  if ((await proc.exited) === 0) {
-    spinner.stop(true, "Dependencies installed");
-  } else {
-    spinner.stop(false, "bun install failed; missing packages will be loaded from esm.sh");
-    const detail = stderr.trim().split("\n").slice(-5).join("\n");
-    if (detail) console.log(`   ${colors.dim}${detail}${colors.reset}`);
-  }
-}
+export { missingDependencies } from "../store/ensure";
 
 function listEnvFiles(projectDir: string): string[] {
   return [".env.local", ".env.development", ".env"].filter((f) => existsSync(join(projectDir, f)));
@@ -420,7 +393,8 @@ export async function devCommand(options: DevOptions = {}) {
     }
   }
 
-  await ensureDependenciesInstalled(projectDir);
+  // The shared store when the project has no node_modules (src/store), else bun install
+  await ensurePackages(projectDir);
 
   let dbStatus = await detectDatabaseStatus(projectDir);
 
@@ -545,11 +519,12 @@ export async function devCommand(options: DevOptions = {}) {
   const engineArgs = ["dev", "--dir", projectDir, "--port", String(port), "--target", target];
   const env = {
     ...process.env,
-    ...engineEnv(),
+    ...engineEnv(projectDir),
     COM_MANAGED: "1",
     COM_START_TIME: String(Math.round(performance.timeOrigin)),
     COM_BACKEND_URL: effectiveBackendUrl,
     ...(options.eruda ? { COM_ERUDA: "1" } : {}),
+    ...(options.start && options.start.startsWith("/") ? { COM_ZALO_START: options.start } : {}),
     ...(options.zmpMock ? { COM_ZMP_MOCK: "1" } : {}),
     NEXT_PUBLIC_API_URL: effectiveBackendUrl,
   };

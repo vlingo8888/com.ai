@@ -1,5 +1,6 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
-import { join } from "path";
+import { existsSync, lstatSync, mkdirSync, readFileSync, writeFileSync } from "fs";
+import { join, relative, sep } from "path";
+import { packagesDir } from "../store";
 
 /**
  * Generates the .nata/core.ts source code with automatic in-memory mockDB
@@ -45,6 +46,11 @@ export class HttpError extends Error {
   getStatusCode(): number { return this.statusCode; }
 }
 
+// The dev panel lists each query with a sample of its rows: keeping every row of every query made big
+// results travel to the engine and stay in its log. Not collected under \`com start\` unless COM_QUERY_LOG=1
+const QUERY_LOG_ROWS = 20;
+const QUERY_LOG = process.env.NODE_ENV !== "production" || process.env.COM_QUERY_LOG === "1";
+
 class LoggingConnection implements DatabaseConnection {
   constructor(private readonly inner: DatabaseConnection) {}
 
@@ -62,7 +68,7 @@ class LoggingConnection implements DatabaseConnection {
         type: "sql",
         sql: sqlStr,
         parameters: parameters || [],
-        response: rows,
+        response: Array.isArray(rows) && rows.length > QUERY_LOG_ROWS ? rows.slice(0, QUERY_LOG_ROWS) : rows,
         rowCount: rowCount,
         duration_ms: duration,
         status: "success",
@@ -70,7 +76,7 @@ class LoggingConnection implements DatabaseConnection {
         timestamp: new Date().toISOString()
       };
       const logStore = (globalThis as any).__NATA_QUERY_LOGS__ || ((globalThis as any).__NATA_QUERY_LOGS__ = []);
-      logStore.push(queryLog);
+      if (QUERY_LOG) logStore.push(queryLog);
 
       if (process.env.DEBUG_SQL === "true" || process.env.DEBUG_SQL === "1") {
         const paramStr = parameters && parameters.length > 0 ? \` [\${parameters.map(p => JSON.stringify(p)).join(", ")}]\` : "";
@@ -94,7 +100,7 @@ class LoggingConnection implements DatabaseConnection {
         timestamp: new Date().toISOString()
       };
       const logStore = (globalThis as any).__NATA_QUERY_LOGS__ || ((globalThis as any).__NATA_QUERY_LOGS__ = []);
-      logStore.push(queryLog);
+      if (QUERY_LOG) logStore.push(queryLog);
 
       if (process.env.COM_DEV_QUERY_LOG !== "1") {
         console.error(\`\\x1b[31m✖ [SQL Error]\\x1b[0m \\x1b[1m\${sqlStr}\\x1b[0m\\x1b[90m\${paramStr} (\${duration}ms)\\x1b[0m\`);
@@ -448,24 +454,30 @@ export async function draftMode() { return { isEnabled: false, enable() {}, disa
 `;
   writeFileSync(join(nataDir, "headers.ts"), headersTs);
 
-  // 3. Write node_modules/core, unless the project has its own core/ (comx builds map it in tsconfig)
+  // 3. Write the `core` package (node_modules/core, or among the store links), unless the project has
+  // its own core/ (comx builds map it in tsconfig)
   if (["index.ts", "index.tsx", "index.js"].some((f) => existsSync(join(projectDir, "core", f)))) return;
-  const nmCore = join(projectDir, "node_modules", "core");
+  const nmCore = join(packagesDir(projectDir), "core");
+  // Never write through a link into the shared store
+  try {
+    if (lstatSync(nmCore).isSymbolicLink()) return;
+  } catch {}
   if (!existsSync(nmCore)) {
     mkdirSync(nmCore, { recursive: true });
   }
+  const coreTs = relative(nmCore, coreTsPath).split(sep).join("/");
   writeFileSync(
     join(nmCore, "package.json"),
     JSON.stringify({
       name: "core",
       version: "1.0.0",
-      main: "../../.nata/core.ts",
-      module: "../../.nata/core.ts",
-      types: "../../.nata/core.ts",
+      main: coreTs,
+      module: coreTs,
+      types: coreTs,
     }, null, 2)
   );
   writeFileSync(
     join(nmCore, "index.js"),
-    `module.exports = require("../../.nata/core.ts");\n`
+    `module.exports = require(${JSON.stringify(coreTs)});\n`
   );
 }

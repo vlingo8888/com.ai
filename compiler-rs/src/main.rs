@@ -72,8 +72,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Before any thread starts: the worker and every module compiled inherit it
         compiler_rs::mode::set_production();
     }
+    let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
+    // Rayon (Tailwind class scanning) starts one thread per core by default and keeps them for good: a
+    // scan in `com dev` touches a few files at a time, so four are enough there
+    let _ = rayon::ThreadPoolBuilder::new()
+        .num_threads(if production { cores } else { cores.min(4) })
+        .thread_name(|i| format!("rayon-{i}"))
+        .build_global();
     tokio::runtime::Builder::new_multi_thread()
         .worker_threads(runtime_threads(production))
+        // Blocking work (file reads, SWC, compression) is bounded by the cores anyway; tokio's default
+        // of 512 threads lets a cold page burst spawn dozens, each with its own stack
+        .max_blocking_threads(if production { (cores * 4).max(16) } else { 16 })
         .enable_all()
         .build()?
         .block_on(run(cli))

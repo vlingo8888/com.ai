@@ -100,10 +100,16 @@ impl LayerResolvers {
             ],
             fallback: default_aliases,
             main_files: vec!["index".into()],
-            // The framework's React first when the project's is too old (see framework_react.rs)
+            // The framework's React first when the project's is too old (see framework_react.rs), then
+            // `node_modules` folders, then the project's links into the shared store (store.rs): an
+            // absolute folder is searched from every file, so packages also find what they import
+            // without declaring it, as in a hoisted node_modules
             modules: crate::framework_react::active_modules_dir(root)
-                .map(|dir| vec![dir.to_string_lossy().to_string(), "node_modules".into()])
-                .unwrap_or_else(|| vec!["node_modules".into()]),
+                .map(|dir| dir.to_string_lossy().to_string())
+                .into_iter()
+                .chain(["node_modules".to_string()])
+                .chain(crate::store::uses_store(root).then(|| crate::store::farm_dir(root).to_string_lossy().to_string()))
+                .collect(),
             builtin_modules: true,
             symlinks: true,
             ..ResolveOptions::default()

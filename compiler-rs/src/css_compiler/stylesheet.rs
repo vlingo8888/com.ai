@@ -113,6 +113,24 @@ fn warn_once(root: &Path, message: &str) {
     }
 }
 
+/// `<head>` tags of the project stylesheet. Under `com start` they are built once per build, not
+/// copied (and escaped) again for every rendered page.
+pub async fn project_head_tags(root: &Path) -> std::sync::Arc<str> {
+    static BUILT: Mutex<Option<(std::sync::Arc<str>, std::sync::Arc<str>)>> = Mutex::new(None);
+    let Some(css) = crate::build::manifest::styles(root) else {
+        return project_stylesheet(root).await.head_tags().into();
+    };
+    let mut built = BUILT.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((source, tags)) = built.as_ref() {
+        if std::sync::Arc::ptr_eq(source, &css) {
+            return tags.clone();
+        }
+    }
+    let tags: std::sync::Arc<str> = Stylesheet::Compiled(css.to_string()).head_tags().into();
+    *built = Some((css, tags.clone()));
+    tags
+}
+
 /// The compiled project stylesheet (or the browser fallback)
 pub async fn project_stylesheet(root: &Path) -> Stylesheet {
     // `com start`: compiled (and minified) by `com build`, Tailwind is not needed at runtime
@@ -167,10 +185,15 @@ pub async fn project_stylesheet(root: &Path) -> Stylesheet {
 /// `<head>`; CSS Modules also export their local -> hashed class name map. The global Tailwind entry is
 /// already in the page, so importing it (e.g. `import "./globals.css"` in a layout) is a no-op.
 pub fn css_module_js(root: &Path, rel_path: &str) -> Result<String, String> {
-    let path = root.join(rel_path);
+    // Package stylesheets (`/_nata/css/node_modules/<package>/x.css`) come from wherever the project's
+    // packages are: node_modules, or the shared store
+    let path = match rel_path.strip_prefix("node_modules/") {
+        Some(rest) if !rest.split('/').any(|s| s == "..") => crate::store::packages_dir(root).join(rest),
+        _ => root.join(rel_path),
+    };
     let canonical = path.canonicalize().map_err(|_| format!("CSS file not found: {rel_path}"))?;
     let root_canonical = root.canonicalize().map_err(|e| e.to_string())?;
-    if !canonical.starts_with(&root_canonical) {
+    if !canonical.starts_with(&root_canonical) && !(rel_path.starts_with("node_modules/") && crate::store::in_store(&canonical)) {
         return Err(format!("CSS file outside the project: {rel_path}"));
     }
     let source = std::fs::read_to_string(&canonical).map_err(|e| e.to_string())?;

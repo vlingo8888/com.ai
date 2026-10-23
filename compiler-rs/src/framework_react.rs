@@ -34,7 +34,7 @@ pub fn modules_dir() -> PathBuf {
     install_dir().join("node_modules")
 }
 
-fn installed() -> bool {
+pub fn installed() -> bool {
     PACKAGES.iter().all(|p| modules_dir().join(p).join("package.json").is_file())
 }
 

@@ -7,7 +7,7 @@
 //! wrote it) and its revalidate time; a stale entry is still returned (marked `stale`) so the worker
 //! serves it while recomputing, like Next.js.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -34,8 +34,11 @@ impl Entry {
 }
 
 pub struct DataCache {
-    entries: HashMap<String, Entry>,
-    order: VecDeque<String>,
+    /// Each entry with the tick of its last use
+    entries: HashMap<String, (Entry, u64)>,
+    /// Keys by last use, oldest first: O(log n) per access instead of scanning a queue
+    order: BTreeMap<u64, String>,
+    tick: u64,
     bytes: usize,
     max_bytes: usize,
     db: Option<Database>,
@@ -59,7 +62,7 @@ impl DataCache {
             std::fs::create_dir_all(p.parent()?).ok()?;
             crate::compile_cache::open_database(p)
         });
-        let mut cache = Self { entries: HashMap::new(), order: VecDeque::new(), bytes: 0, max_bytes, db };
+        let mut cache = Self { entries: HashMap::new(), order: BTreeMap::new(), tick: 0, bytes: 0, max_bytes, db };
         cache.load();
         cache
     }
@@ -80,17 +83,23 @@ impl DataCache {
         }
     }
 
+    fn next_tick(&mut self) -> u64 {
+        self.tick += 1;
+        self.tick
+    }
+
     fn insert_memory(&mut self, key: String, entry: Entry) {
-        if let Some(old) = self.entries.remove(&key) {
+        if let Some((old, used)) = self.entries.remove(&key) {
             self.bytes -= old.value.len() + key.len();
-            self.order.retain(|k| k != &key);
+            self.order.remove(&used);
         }
         self.bytes += entry.value.len() + key.len();
-        self.order.push_back(key.clone());
-        self.entries.insert(key, entry);
+        let tick = self.next_tick();
+        self.order.insert(tick, key.clone());
+        self.entries.insert(key, (entry, tick));
         while self.bytes > self.max_bytes {
-            let Some(oldest) = self.order.pop_front() else { break };
-            if let Some(old) = self.entries.remove(&oldest) {
+            let Some((_, oldest)) = self.order.pop_first() else { break };
+            if let Some((old, _)) = self.entries.remove(&oldest) {
                 self.bytes -= old.value.len() + oldest.len();
                 self.persist_delete(&[oldest]);
             }
@@ -110,10 +119,14 @@ impl DataCache {
     }
 
     pub fn get(&mut self, key: &str) -> Option<(Entry, bool)> {
-        let entry = self.entries.get(key)?.clone();
+        let tick = self.next_tick();
+        let (entry, used) = self.entries.get_mut(key)?;
         // Recently used: keep it longer
-        self.order.retain(|k| k != key);
-        self.order.push_back(key.to_string());
+        let previous = std::mem::replace(used, tick);
+        let entry = entry.clone();
+        if let Some(k) = self.order.remove(&previous) {
+            self.order.insert(tick, k);
+        }
         let stale = entry.is_stale(now());
         Some((entry, stale))
     }
@@ -136,7 +149,7 @@ impl DataCache {
         let keys: Vec<String> = self
             .entries
             .iter()
-            .filter(|(_, e)| e.tags.iter().any(|t| tags.iter().any(|p| tag_matches(p, t))))
+            .filter(|(_, (e, _))| e.tags.iter().any(|t| tags.iter().any(|p| tag_matches(p, t))))
             .map(|(k, _)| k.clone())
             .collect();
         self.remove(&keys)
@@ -155,11 +168,11 @@ impl DataCache {
 
     fn remove(&mut self, keys: &[String]) -> usize {
         for key in keys {
-            if let Some(old) = self.entries.remove(key) {
+            if let Some((old, used)) = self.entries.remove(key) {
                 self.bytes -= old.value.len() + key.len();
+                self.order.remove(&used);
             }
         }
-        self.order.retain(|k| !keys.contains(k));
         self.persist_delete(keys);
         keys.len()
     }
@@ -180,7 +193,16 @@ fn registry() -> &'static Mutex<HashMap<PathBuf, Arc<Mutex<DataCache>>>> {
 
 /// The data cache of a project root
 pub fn for_root(root: &Path) -> Arc<Mutex<DataCache>> {
-    let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    // Looked up by the root as given first: `canonicalize` is a syscall per path component
+    if let Some(cache) = registry().lock().unwrap().get(root) {
+        return cache.clone();
+    }
+    let canonical = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    if let Some(cache) = registry().lock().unwrap().get(&canonical).cloned() {
+        registry().lock().unwrap().insert(root.to_path_buf(), cache.clone());
+        return cache;
+    }
+    let root = canonical;
     let max = std::env::var("COM_DATA_CACHE_MB").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(64) * 1024 * 1024;
     registry()
         .lock()

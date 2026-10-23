@@ -230,7 +230,13 @@ pub fn route_input(root: &Path, req: &PageRequest) -> Value {
 
 /// Module loading for Flight in the browser: client reference ids are module URLs, each its own chunk.
 /// Defined before any module runs (the Flight client reads them when it loads).
-const WEBPACK_GLOBALS: &str = "(function(){var m=self.__nata_modules=new Map();self.__webpack_chunk_load__=function(id){return import(id).then(function(x){m.set(id,x)})};self.__webpack_require__=function(id){return m.get(id)};self.__webpack_require__.u=function(c){return c};self.__webpack_get_script_filename__=function(c){return c}})();";
+///
+/// A chunk that fails to load in development is usually the dev server mid-rebuild (a plugin install
+/// changes files in several waves and restarts the worker). The browser remembers a failed module for the
+/// life of the document, so retrying `import` can't help: wait until the server serves the module AND has
+/// been quiet for 3s (`/_nata/hmr_version` unchanged), then reload — at most 3 times a minute, so a real
+/// error still shows in the overlay.
+const WEBPACK_GLOBALS: &str = "(function(){var m=self.__nata_modules=new Map();var K='nata:chunk-reload';function recover(id,e){var s={};try{s=JSON.parse(sessionStorage.getItem(K)||'{}')||{}}catch(_){}if(!s.t||Date.now()-s.t>60000)s={n:0,t:Date.now()};if(s.n>=3)return Promise.reject(e);var tries=0,last=null,since=0;return new Promise(function(_,reject){(function poll(){Promise.all([fetch(id,{cache:'no-store'}),fetch('/_nata/hmr_version',{cache:'no-store'}).then(function(r){return r.json()})]).then(function(a){if(!a[0].ok)throw 0;var v=a[1]&&a[1].version;if(v!==last){last=v;since=Date.now();throw 0}if(Date.now()-since<3000)throw 0;s.n++;try{sessionStorage.setItem(K,JSON.stringify(s))}catch(_){}location.reload()}).catch(function(){if(++tries>120)reject(e);else setTimeout(poll,1000)})})()})}self.__webpack_chunk_load__=function(id){return import(id).then(function(x){m.set(id,x)},function(e){return recover(id,e)})};self.__webpack_require__=function(id){return m.get(id)};self.__webpack_require__.u=function(c){return c};self.__webpack_get_script_filename__=function(c){return c}})();";
 
 /// Everything the document needs before the page's own `<head>` content: styles, import map, config
 /// next/image settings shared by the server render and the browser (same srcset on both sides)
@@ -560,7 +566,7 @@ pub fn client_reference_specifier(root: &Path, id: &str) -> Result<String, Strin
             let path = crate::resolver::oxc::resolvers(&root)
                 .resolve(Layer::Ssr, &root.join("package.json"), spec)
                 .map(|r| r.path)
-                .or_else(|| Some(root.join("node_modules").join(spec)).filter(|f| !spec.split('/').any(|s| s == "..") && f.is_file()))
+                .or_else(|| Some(crate::store::packages_dir(&root).join(spec)).filter(|f| !spec.split('/').any(|s| s == "..") && f.is_file()))
                 .ok_or_else(|| format!("cannot resolve {spec}"))?;
             let graph = crate::module_graph::for_root(&root);
             return Ok(graph.read().unwrap_or_else(|e| e.into_inner()).specifier(&path, Layer::Ssr));

@@ -1,6 +1,7 @@
 import { existsSync } from "fs";
 import { join, resolve } from "path";
 import { logger } from "../core/logger";
+import { packagesDir, usesStore } from "../store";
 
 // Pinned so `com lint` behaves the same on every machine; fetched once by bunx (zero-install).
 // TypeScript stays on 5.x: 7.x rejects `target: "es5"` / `moduleResolution: "node"`, still common in Next projects
@@ -32,7 +33,11 @@ export function oxlintArgs(projectDir: string, options: LintOptions): string[] {
 /** The project's TypeScript if installed, else the pinned one */
 export function tscCommand(projectDir: string): string[] {
   const local = join(projectDir, "node_modules/.bin/tsc");
-  return existsSync(local) ? [local] : ["bunx", `typescript@${TYPESCRIPT_VERSION}`];
+  if (existsSync(local)) return [local];
+  // Store packages have no `.bin`: run the package's own script
+  const fromStore = join(packagesDir(projectDir), "typescript/bin/tsc");
+  if (usesStore(projectDir) && existsSync(fromStore)) return [process.execPath, fromStore];
+  return ["bunx", `typescript@${TYPESCRIPT_VERSION}`];
 }
 
 async function run(cmd: string[], cwd: string): Promise<number> {

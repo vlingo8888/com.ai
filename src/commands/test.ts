@@ -71,6 +71,7 @@ export function buildBunTestArgs(pattern?: string, options: TestOptions = {}): s
 }
 
 import { ensureRuntimeEnvironment } from "../core/runtime";
+import { ensurePackages } from "../store/ensure";
 
 /**
  * Executes project tests using Bun's native high-performance test runner
@@ -78,7 +79,9 @@ import { ensureRuntimeEnvironment } from "../core/runtime";
 export async function testCommand(rawArgs: string[] = [], options: TestOptions = {}): Promise<number> {
   const projectDir = resolve(process.cwd(), options.dir || ".");
 
-  // Automatically provision runtime files (.nata/core.ts & node_modules/core) for testing
+  // Packages (from the shared store when there is no node_modules), then the runtime files
+  // (.nata/core.ts & the `core` package) for testing
+  await ensurePackages(projectDir, { quiet: true });
   try {
     ensureRuntimeEnvironment(projectDir);
   } catch {}

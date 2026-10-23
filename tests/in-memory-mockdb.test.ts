@@ -1,7 +1,8 @@
 import { describe, expect, it, beforeEach } from "bun:test";
 import { ensureRuntimeEnvironment } from "../src/core/runtime";
-import { existsSync, mkdirSync, rmSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
+import { packagesDir } from "../src/store";
 
 describe("Com Test - Zero-Mock In-Memory Database Engine", () => {
   const sandboxDir = join(process.cwd(), ".test-mockdb-sandbox");
@@ -13,12 +14,18 @@ describe("Com Test - Zero-Mock In-Memory Database Engine", () => {
     mkdirSync(sandboxDir, { recursive: true });
   });
 
-  it("provisions .nata/core.ts and node_modules/core in project directory", () => {
+  it("provisions .nata/core.ts and the core package (among the shared store links) in project directory", () => {
     ensureRuntimeEnvironment(sandboxDir);
 
     expect(existsSync(join(sandboxDir, ".nata", "core.ts"))).toBe(true);
     expect(existsSync(join(sandboxDir, ".nata", "headers.ts"))).toBe(true);
-    expect(existsSync(join(sandboxDir, "node_modules", "core", "package.json"))).toBe(true);
+    // No node_modules: the project is on the shared store
+    expect(existsSync(join(sandboxDir, "node_modules"))).toBe(false);
+    const core = join(packagesDir(sandboxDir), "core");
+    expect(existsSync(join(core, "package.json"))).toBe(true);
+    // Its require path reaches .nata/core.ts from where it is
+    const main = JSON.parse(readFileSync(join(core, "package.json"), "utf-8")).main;
+    expect(existsSync(join(core, main))).toBe(true);
   });
 
   it("auto-executes schema.sql and runs real Kysely queries (insert/select/delete) in memory", async () => {

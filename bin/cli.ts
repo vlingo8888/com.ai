@@ -1,25 +1,5 @@
 #!/usr/bin/env bun
-import { cloneView } from "../src/commands/clone";
-import { createProject } from "../src/commands/create";
-import { devCommand } from "../src/commands/dev";
-import { tunnelCommand } from "../src/commands/tunnel";
-import { buildCommand } from "../src/commands/build";
-import { testCommand } from "../src/commands/test";
-import { syncCommand } from "../src/commands/sync";
-import {
-  dbPullCommand,
-  dbMigrateCommand,
-  dbListCommand,
-  dbDescribeCommand,
-  dbSearchCommand,
-} from "../src/commands/db";
-import { loginCommand, logoutCommand, whoamiCommand } from "../src/commands/login";
-import { saveCommand } from "../src/commands/save";
-import { publishCommand } from "../src/commands/publish";
-import { lintCommand, typecheck } from "../src/commands/lint";
-import { doctorCommand, infoCommand } from "../src/commands/doctor";
-import { startCommand } from "../src/commands/start";
-import { cacheCommand } from "../src/commands/cache";
+// Commands are imported on demand: `com start` should not parse `create`, `db` or `qrcode-terminal`
 import { resolve } from "path";
 import { logger, colors } from "../src/core/logger";
 import packageJson from "../package.json";
@@ -45,6 +25,7 @@ function printHelp() {
     ${colors.green}doctor${colors.reset}                Check Bun, engine, port, env and unsupported config
     ${colors.green}info${colors.reset}                  Print system and project versions (for bug reports)
     ${colors.green}cache${colors.reset}  ${colors.sky}[clean]${colors.reset}        Show or delete cached dependency builds (--global, --project)
+    ${colors.green}pkg${colors.reset}  ${colors.sky}<action>${colors.reset}         Shared package store, no node_modules: install | add | remove | search | ls | why | gc | link
     ${colors.green}test | t${colors.reset}  ${colors.sky}[pattern]${colors.reset}   Run unit, integration & component tests with Bun Test
     ${colors.green}sync | pull${colors.reset}             Sync database schema, types/db.d.ts, AGENTS.md & dependencies
     ${colors.green}db pull | db sync${colors.reset}     Introspect database schema & generate types/db.d.ts for AI
@@ -67,6 +48,7 @@ function printHelp() {
     ${colors.yellow}--provider, -P${colors.reset} ${colors.darkGray}<123c|rs>${colors.reset} Tunnel provider (default: 123c for Zalo, rs for Web)
     ${colors.yellow}--subdomain, -s${colors.reset} ${colors.darkGray}<name>${colors.reset}   Custom subdomain for tunnel
     ${colors.yellow}--eruda${colors.reset}                       Load the Eruda mobile console in the Zalo app (or open with ?eruda)
+    ${colors.yellow}--start${colors.reset} ${colors.darkGray}<path>${colors.reset}                Zalo: page the mini app opens on (e.g. /staff for a staff mini app)
     ${colors.yellow}--zmp-mock${colors.reset}                    Fake Zalo bridge (window.ZMP) in the browser preview; default is the real zmp-sdk
     ${colors.yellow}--dir${colors.reset}        ${colors.darkGray}<path>${colors.reset}     Target directory (default: current directory)
     ${colors.yellow}--port, -p${colors.reset}   ${colors.darkGray}<port>${colors.reset}     Port to listen on in dev mode (default: 3000)
@@ -192,7 +174,7 @@ async function main() {
         }
       }
 
-      await createProject(projectName, { dir, force, install, template });
+      await (await import("../src/commands/create")).createProject(projectName, { dir, force, install, template });
       break;
     }
 
@@ -205,17 +187,17 @@ async function main() {
         if (args[i] === "--api" && args[i + 1]) api = args[++i];
         if (args[i] === "--auth-url" && args[i + 1]) authUrl = args[++i];
       }
-      await loginCommand({ token, api, authUrl });
+      await (await import("../src/commands/login")).loginCommand({ token, api, authUrl });
       break;
     }
 
     case "logout": {
-      logoutCommand();
+      (await import("../src/commands/login")).logoutCommand();
       break;
     }
 
     case "whoami": {
-      whoamiCommand();
+      (await import("../src/commands/login")).whoamiCommand();
       break;
     }
 
@@ -247,7 +229,7 @@ async function main() {
         }
       }
 
-      await cloneView(viewId, { dir, api, token, force, install });
+      await (await import("../src/commands/clone")).cloneView(viewId, { dir, api, token, force, install });
       break;
     }
 
@@ -260,7 +242,7 @@ async function main() {
         else if (args[i] === "--dir" && args[i + 1]) dir = args[++i];
         else if ((args[i] === "--hostname" || args[i] === "-H") && args[i + 1]) hostname = args[++i];
       }
-      await startCommand({ dir, port, hostname });
+      await (await import("../src/commands/start")).startCommand({ dir, port, hostname });
       break;
     }
 
@@ -275,6 +257,7 @@ async function main() {
       let server: string | undefined;
       let eruda = false;
       let zmpMock = false;
+      let start: string | undefined;
       for (let i = 1; i < args.length; i++) {
         if ((args[i] === "--port" || args[i] === "-p") && args[i + 1]) {
           port = args[++i];
@@ -301,9 +284,11 @@ async function main() {
           eruda = true;
         } else if (args[i] === "--zmp-mock") {
           zmpMock = true;
+        } else if (args[i] === "--start" && args[i + 1]) {
+          start = args[++i];
         }
       }
-      await devCommand({ port, dir, engine, target, tunnel, subdomain, server, provider, eruda, zmpMock });
+      await (await import("../src/commands/dev")).devCommand({ port, dir, engine, target, tunnel, subdomain, server, provider, eruda, zmpMock, start });
       break;
     }
 
@@ -327,7 +312,7 @@ async function main() {
           showQr = false;
         }
       }
-      await tunnelCommand({ port, subdomain, server, showQr, provider });
+      await (await import("../src/commands/tunnel")).tunnelCommand({ port, subdomain, server, showQr, provider });
       break;
     }
 
@@ -345,7 +330,7 @@ async function main() {
           outDir = args[++i];
         }
       }
-      await buildCommand({ dir, target, outDir });
+      await (await import("../src/commands/build")).buildCommand({ dir, target, outDir });
       break;
     }
 
@@ -358,9 +343,28 @@ async function main() {
         if (args[i] === "--dir" && args[i + 1]) dir = args[++i];
         else if ((args[i] === "--port" || args[i] === "-p") && args[i + 1]) port = parseInt(args[++i], 10);
       }
-      if (command === "doctor") await doctorCommand({ dir, json, port });
-      else await infoCommand({ dir, json });
+      if (command === "doctor") await (await import("../src/commands/doctor")).doctorCommand({ dir, json, port });
+      else await (await import("../src/commands/doctor")).infoCommand({ dir, json });
       break;
+    }
+
+    case "pkg":
+    case "store": {
+      let dir: string | undefined;
+      const rest: string[] = [];
+      for (let i = 1; i < args.length; i++) {
+        if (args[i] === "--dir" && args[i + 1]) dir = args[++i];
+        else if (!args[i].startsWith("-")) rest.push(args[i]);
+      }
+      const [action, ...positional] = rest;
+      const code = await (await import("../src/commands/pkg")).pkgCommand(action, positional, {
+        dir,
+        dev: args.includes("-D") || args.includes("-d") || args.includes("--dev"),
+        dryRun: args.includes("--dry-run"),
+        offline: args.includes("--offline"),
+        json: args.includes("--json"),
+      });
+      process.exit(code);
     }
 
     case "cache": {
@@ -369,7 +373,7 @@ async function main() {
         if (args[i] === "--dir" && args[i + 1]) dir = args[++i];
       }
       const action = args.slice(1).find((a, i, all) => !a.startsWith("-") && all[i - 1] !== "--dir");
-      await cacheCommand({ action, dir, global: args.includes("--global"), project: args.includes("--project"), json: args.includes("--json") });
+      await (await import("../src/commands/cache")).cacheCommand({ action, dir, global: args.includes("--global"), project: args.includes("--project"), json: args.includes("--json") });
       break;
     }
 
@@ -388,10 +392,10 @@ async function main() {
         else if (!args[i].startsWith("-")) paths.push(args[i]);
       }
       if (command === "typecheck") {
-        const code = await typecheck(resolve(process.cwd(), dir || "."));
+        const code = await (await import("../src/commands/lint")).typecheck(resolve(process.cwd(), dir || "."));
         if (code !== 0) process.exit(code);
       } else {
-        await lintCommand({ dir, paths, fix, json, types });
+        await (await import("../src/commands/lint")).lintCommand({ dir, paths, fix, json, types });
       }
       break;
     }
@@ -444,7 +448,7 @@ async function main() {
         }
       }
 
-      const exitCode = await testCommand(passthroughArgs, {
+      const exitCode = await (await import("../src/commands/test")).testCommand(passthroughArgs, {
         dir,
         pattern,
         filter,
@@ -485,20 +489,20 @@ async function main() {
       }
 
       if (subCommand === "pull" || subCommand === "sync" || subCommand === "introspect") {
-        await dbPullCommand({ dir, env, dbUrl });
+        await (await import("../src/commands/db")).dbPullCommand({ dir, env, dbUrl });
       } else if (subCommand === "list" || subCommand === "tables" || subCommand === "ls") {
-        await dbListCommand({ dir, env, dbUrl, json });
+        await (await import("../src/commands/db")).dbListCommand({ dir, env, dbUrl, json });
       } else if (subCommand === "describe" || subCommand === "show" || subCommand === "info" || subCommand === "desc") {
         const tableName = args[2];
-        await dbDescribeCommand(tableName, { dir, env, dbUrl, json });
+        await (await import("../src/commands/db")).dbDescribeCommand(tableName, { dir, env, dbUrl, json });
       } else if (subCommand === "search" || subCommand === "find" || subCommand === "grep") {
         const query = args[2];
-        await dbSearchCommand(query, { dir, env, dbUrl, json });
+        await (await import("../src/commands/db")).dbSearchCommand(query, { dir, env, dbUrl, json });
       } else if (subCommand === "migrate") {
         const sqlOrFile = args[2];
-        await dbMigrateCommand(sqlOrFile, { dir, env, dbUrl });
+        await (await import("../src/commands/db")).dbMigrateCommand(sqlOrFile, { dir, env, dbUrl });
       } else if (subCommand.startsWith("-")) {
-        await dbPullCommand({ dir, env, dbUrl });
+        await (await import("../src/commands/db")).dbPullCommand({ dir, env, dbUrl });
       } else {
         logger.error(
           `Unknown db subcommand: "${subCommand}"`,
@@ -525,7 +529,7 @@ async function main() {
         }
       }
 
-      await dbMigrateCommand(sqlOrFile, { dir, env, dbUrl });
+      await (await import("../src/commands/db")).dbMigrateCommand(sqlOrFile, { dir, env, dbUrl });
       break;
     }
 
@@ -551,7 +555,7 @@ async function main() {
         }
       }
 
-      await syncCommand({ dir, env, dbUrl, install, json });
+      await (await import("../src/commands/sync")).syncCommand({ dir, env, dbUrl, install, json });
       break;
     }
 
@@ -580,7 +584,7 @@ async function main() {
         }
       }
 
-      await saveCommand({ dir, api, token, viewId, dryRun, force });
+      await (await import("../src/commands/save")).saveCommand({ dir, api, token, viewId, dryRun, force });
       break;
     }
 
@@ -608,7 +612,7 @@ async function main() {
         }
       }
 
-      await publishCommand({ dir, api, token, viewId, domain, skipSave });
+      await (await import("../src/commands/publish")).publishCommand({ dir, api, token, viewId, domain, skipSave });
       break;
     }
 

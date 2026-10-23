@@ -75,17 +75,21 @@ pub fn write(root: &Path) {
 /// `node_modules/next/<name>.js` pointing at `.nata/next/`: for projects without the real `next`
 /// package (packages Bun loads natively import `next/*` from there)
 pub fn write_node_modules(root: &Path) {
-    let nm_next = root.join("node_modules").join("next");
+    let nm_next = crate::store::packages_dir(root).join("next");
+    if crate::store::is_shared(&nm_next) {
+        return;
+    }
+    let nata = crate::store::nata_from_package(root);
     let _ = std::fs::create_dir_all(&nm_next);
     for (entry, file) in ENTRIES {
-        write_if_changed(&nm_next.join(format!("{entry}.js")), &format!("module.exports = require(\"../../.nata/next/{file}\");\n"));
+        write_if_changed(&nm_next.join(format!("{entry}.js")), &format!("module.exports = require(\"{nata}/next/{file}\");\n"));
     }
     // Components: CommonJS `require("next/image")` gets the component, `import Image` its default
     for (entry, file) in [("dynamic", "dynamic.js"), ("script", "script.js"), ("image", "image.js")] {
         write_if_changed(
             &nm_next.join(format!("{entry}.js")),
             &format!(
-                "const m = require(\"../../.nata/next/{file}\");\nmodule.exports = Object.assign(m.default, m, {{ default: m.default, __esModule: true }});\n"
+                "const m = require(\"{nata}/next/{file}\");\nmodule.exports = Object.assign(m.default, m, {{ default: m.default, __esModule: true }});\n"
             ),
         );
     }
