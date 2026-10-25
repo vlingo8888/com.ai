@@ -247,7 +247,7 @@ Các giai đoạn P0–P5 là để *trở nên* nhẹ. Phần này là các k�
 - [x] **`bun --smol`** ở dev (P0.8): GC tích cực hơn, heap nhỏ hơn.
 - [x] **Một instance React và một PGlite cho mỗi worker**, nạp lười (P0.8).
 - [x] **Không còn file tạm cho mỗi request** (P0.2): hiện worker ghi runner script ra `.nata/worker-scripts/` rồi import. Chuyển sang gửi lệnh có cấu trúc (`{kind: "ssr", input}`) cho các hàm đã nạp sẵn.
-- [ ] **Giới hạn bộ nhớ và tự tái chế:** worker vượt ngưỡng RSS (vd 300MB) thì được thay bằng worker mới sau khi xử lý xong request đang chạy, chống rò rỉ bộ nhớ từ code người dùng (P3.2).
+- [x] **Giới hạn bộ nhớ và tự tái chế (dev):** worker rảnh 30s mà RSS vượt `COM_WORKER_MAX_RSS_MB` (mặc định 200, `0` = tắt) thì được thay bằng worker mới ở request kế tiếp (~0,1s), chống rò rỉ từ code người dùng và các phiên bản module do sửa file để lại. Đo bằng `COM_WORKER_MEMLOG=1`: heap JS phẳng qua 500 request, RSS tăng là do JIT/allocator. Production (P3.2) vẫn cần thay worker khi đang có tải mà không rơi request.
 
 ### G4. Client (trình duyệt và Zalo WebView)
 - [x] **Runtime router < 10KB gzip** (P1.6): ~4KB. Overlay và debug drawer chỉ có ở dev; markup drawer thêm sau hydrate (`client/debug.js`), chưa tải lười.

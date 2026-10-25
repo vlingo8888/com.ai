@@ -623,12 +623,28 @@ function scheduleIdleGc() {
   const wait = Math.max(1000, lastGcAt + GC_MIN_INTERVAL - Date.now());
   idleGcTimer = setTimeout(() => {
     idleGcTimer = null;
-    if (process.env.COM_WORKER_GC !== "full" && process.memoryUsage().heapUsed - heapAfterGc < GC_MIN_GROWTH) return;
+    const memlog = !!process.env.COM_WORKER_MEMLOG;
+    if (!memlog && process.env.COM_WORKER_GC !== "full" && process.memoryUsage().heapUsed - heapAfterGc < GC_MIN_GROWTH) return;
     Bun.gc(true);
     lastGcAt = Date.now();
     heapAfterGc = process.memoryUsage().heapUsed;
+    if (memlog) logMemory();
   }, wait);
   (idleGcTimer as any).unref?.();
+}
+
+/** `COM_WORKER_MEMLOG=1`: memory after each idle collection, with the most numerous object types */
+function logMemory() {
+  const { heapStats } = require("bun:jsc");
+  const stats = heapStats();
+  const mb = (n: number) => `${(n / 1048576).toFixed(1)}MB`;
+  const top = Object.entries(stats.objectTypeCounts as Record<string, number>)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 12)
+    .map(([type, count]) => `${type}=${count}`)
+    .join(" ");
+  const usage = process.memoryUsage();
+  process.stderr.write(`[memlog] rss=${mb(usage.rss)} heap=${mb(stats.heapSize)} objects=${stats.objectCount} extra=${mb(stats.extraMemorySize)} external=${mb(usage.external)} arrayBuffers=${mb(usage.arrayBuffers)} | ${top}\n`);
 }
 
 // ---------- framing ----------

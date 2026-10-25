@@ -580,17 +580,25 @@ pub fn prewarm(root: &Path) {
     });
 }
 
-/// Stops workers that have been idle longer than `COM_WORKER_IDLE` seconds
+/// How long a worker is idle before its memory is checked against `COM_WORKER_MAX_RSS_MB`
+const RECYCLE_CHECK_AFTER: Duration = Duration::from_secs(30);
+const REAPER_TICK: Duration = Duration::from_secs(15);
+
+/// Stops workers that have been idle longer than `COM_WORKER_IDLE` seconds, and replaces a worker
+/// whose memory grew past `COM_WORKER_MAX_RSS_MB` (default 200, `0` = never) once it is idle: the
+/// JavaScript heap of a dev worker stays small, but native memory (JIT code, the allocator, leaks in
+/// application code, module versions left by edits) only grows. The next request starts a fresh one.
 fn ensure_idle_reaper() {
     static STARTED: OnceLock<()> = OnceLock::new();
     let idle_secs = env_number("COM_WORKER_IDLE", 600);
-    if idle_secs == 0 || STARTED.set(()).is_err() {
+    let max_rss_mb = env_number("COM_WORKER_MAX_RSS_MB", 200);
+    if (idle_secs == 0 && max_rss_mb == 0) || STARTED.set(()).is_err() {
         return;
     }
-    let idle = Duration::from_secs(idle_secs);
+    let idle = if idle_secs == 0 { Duration::MAX } else { Duration::from_secs(idle_secs) };
     tokio::spawn(async move {
         loop {
-            tokio::time::sleep(Duration::from_secs(15).min(idle)).await;
+            tokio::time::sleep(REAPER_TICK.min(idle)).await;
             // instrumentation.ts `register()` may start servers that live as long as the app (the RPC
             // backend of comx builds): such workers stay up
             let all: Vec<Slot> = slots()
@@ -602,11 +610,27 @@ fn ensure_idle_reaper() {
                 .collect();
             for slot in all {
                 let Ok(mut guard) = slot.try_lock() else { continue };
-                let expired = guard.as_ref().is_some_and(|h| {
-                    h.inflight.load(Ordering::SeqCst) == 0
-                        && h.last_used.lock().map(|t| t.elapsed() >= idle).unwrap_or(false)
-                });
-                if expired {
+                let Some(handle) = guard.as_ref() else { continue };
+                let idle_for = handle.last_used.lock().map(|t| t.elapsed()).unwrap_or_default();
+                let quiet = handle.inflight.load(Ordering::SeqCst) == 0;
+                let expired = quiet && idle_for >= idle;
+                // One check per idle stretch: the first tick after RECYCLE_CHECK_AFTER
+                let oversized = quiet
+                    && !expired
+                    && max_rss_mb > 0
+                    && idle_for >= RECYCLE_CHECK_AFTER
+                    && idle_for < RECYCLE_CHECK_AFTER + REAPER_TICK
+                    && match handle.child.lock().await.id() {
+                        Some(pid) => rss_mb(pid).await.is_some_and(|rss| {
+                            let over = rss > max_rss_mb;
+                            if over {
+                                crate::term::event(&format!("Restarting the server worker to free memory ({rss}MB, limit {max_rss_mb}MB: COM_WORKER_MAX_RSS_MB)"));
+                            }
+                            over
+                        }),
+                        None => false,
+                    };
+                if expired || oversized {
                     if let Some(handle) = guard.take() {
                         shutdown(handle).await;
                     }
@@ -614,6 +638,16 @@ fn ensure_idle_reaper() {
             }
         }
     });
+}
+
+/// Resident memory of a process in MB (`ps`, available on macOS and Linux; `None` elsewhere)
+async fn rss_mb(pid: u32) -> Option<u64> {
+    if cfg!(windows) {
+        return None;
+    }
+    let out = Command::new("ps").args(["-o", "rss=", "-p", &pid.to_string()]).output().await.ok()?;
+    let kb: u64 = String::from_utf8_lossy(&out.stdout).trim().parse().ok()?;
+    Some(kb / 1024)
 }
 
 // ---------- runner scripts (tests, fallback) ----------
