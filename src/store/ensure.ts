@@ -57,7 +57,7 @@ export async function ensurePackages(projectDir: string, options: EnsureOptions 
   const likelyCurrent = lockfileCurrent(projectDir) && readProjectState(projectDir) !== null;
   const spinner = options.quiet || likelyCurrent ? null : logger.spinner("Linking packages from the shared store...");
   try {
-    const result = await installProject(projectDir, storeBun());
+    const result = await installProject(projectDir, storeBun(), (step) => spinner?.update(step));
     if (!result.upToDate) {
       const detail = `${result.packages} packages, ${result.created} new in the store${result.downloaded ? `, ${result.downloaded} downloaded` : ""}`;
       if (spinner) spinner.stop(true, `Packages ready (${detail}) in ${Math.round(result.ms)}ms`);

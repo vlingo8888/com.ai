@@ -116,11 +116,26 @@ export function lockfileCurrent(projectDir: string): boolean {
   }
 }
 
-async function run(bun: string, args: string[], cwd: string): Promise<void> {
+/** `bun install --lockfile-only` resolves versions over the network: never wait on it forever */
+const RESOLVE_TIMEOUT_MS = 120_000;
+/** The prefetch only speeds the install up: what it has not fetched by then is downloaded below */
+const PREFETCH_TIMEOUT_MS = 90_000;
+const DOWNLOAD_TIMEOUT_MS = 60_000;
+
+async function run(bun: string, args: string[], cwd: string, timeoutMs: number): Promise<void> {
   const proc = Bun.spawn([bun, ...args], { cwd, stdout: "ignore", stderr: "pipe", env: { ...process.env, COM_STORE: "0" } });
-  const stderr = await new Response(proc.stderr).text();
-  if ((await proc.exited) !== 0) {
-    throw new Error(`bun ${args.join(" ")} failed:\n${stderr.trim().split("\n").slice(-8).join("\n")}`);
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    proc.kill();
+  }, timeoutMs);
+  try {
+    const stderr = await new Response(proc.stderr).text();
+    const code = await proc.exited;
+    if (timedOut) throw new Error(`bun ${args.join(" ")} did not finish in ${timeoutMs / 1000}s (network?)`);
+    if (code !== 0) throw new Error(`bun ${args.join(" ")} failed:\n${stderr.trim().split("\n").slice(-8).join("\n")}`);
+  } finally {
+    clearTimeout(timer);
   }
 }
 
@@ -129,13 +144,13 @@ export async function ensureLockfile(projectDir: string, bun: string): Promise<b
   if (lockfileCurrent(projectDir)) return false;
   const args = ["install", "--lockfile-only"];
   if (existsSync(join(projectDir, "bun.lockb"))) args.push("--save-text-lockfile");
-  await run(bun, args, projectDir);
+  await run(bun, args, projectDir, RESOLVE_TIMEOUT_MS);
   return true;
 }
 
 /** `bun add` / `bun remove` that only update package.json and bun.lock */
 export async function editDependencies(projectDir: string, bun: string, command: "add" | "remove", args: string[]): Promise<void> {
-  await run(bun, [command, "--lockfile-only", ...args], projectDir);
+  await run(bun, [command, "--lockfile-only", ...args], projectDir, RESOLVE_TIMEOUT_MS);
 }
 
 // ---------- store entries ----------
@@ -156,6 +171,26 @@ function verify(bytes: Uint8Array, integrity: string | undefined, name: string) 
 
 function tmpName(dir: string, name: string): string {
   return join(dir, ".tmp", `${name}-${process.pid}-${Math.random().toString(36).slice(2)}`);
+}
+
+/** Removes what interrupted installs left in `.tmp/` (their process, named in the folder, is gone) */
+function removeAbandonedTmp() {
+  const tmp = join(storeRoot(), ".tmp");
+  let names: string[] = [];
+  try {
+    names = readdirSync(tmp);
+  } catch {
+    return;
+  }
+  for (const name of names) {
+    const pid = Number(/-(\d+)-[a-z0-9]+$/.exec(name)?.[1]);
+    if (!pid || pid === process.pid) continue;
+    try {
+      process.kill(pid, 0);
+    } catch (error: any) {
+      if (error?.code === "ESRCH") rmSync(join(tmp, name), { recursive: true, force: true });
+    }
+  }
 }
 
 /** Moves a finished directory into place; another process may have finished it first */
@@ -226,9 +261,18 @@ function linkTree(src: string, dest: string) {
 /** Downloads the package from its registry into `dest` (when Bun's cache does not have it) */
 async function download(pkg: LockPackage, dest: string) {
   const url = registryUrl(pkg);
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`${pkg.name}@${pkg.version}: ${url} answered ${res.status}`);
-  const bytes = new Uint8Array(await res.arrayBuffer());
+  let bytes: Uint8Array | undefined;
+  for (let attempt = 1; !bytes; attempt++) {
+    try {
+      const res = await fetch(url, { signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS) });
+      if (!res.ok) throw new Error(`${pkg.name}@${pkg.version}: ${url} answered ${res.status}`);
+      bytes = new Uint8Array(await res.arrayBuffer());
+    } catch (error: any) {
+      if (attempt === 3 || /answered 4\d\d/.test(error?.message ?? "")) {
+        throw error?.name === "TimeoutError" ? new Error(`${pkg.name}@${pkg.version}: ${url} did not answer in ${DOWNLOAD_TIMEOUT_MS / 1000}s`) : error;
+      }
+    }
+  }
   verify(bytes, pkg.integrity, `${pkg.name}@${pkg.version}`);
   mkdirSync(dest, { recursive: true });
   extractTgz(bytes, dest);
@@ -245,7 +289,7 @@ async function prefetch(projectDir: string, bun: string) {
     for (const file of ["package.json", "bun.lock", ".npmrc", "bunfig.toml"]) {
       if (existsSync(join(projectDir, file))) copyFileSync(join(projectDir, file), join(scratch, file));
     }
-    await run(bun, ["install", "--frozen-lockfile", "--ignore-scripts"], scratch);
+    await run(bun, ["install", "--frozen-lockfile", "--ignore-scripts"], scratch, PREFETCH_TIMEOUT_MS);
   } finally {
     rmSync(scratch, { recursive: true, force: true });
   }
@@ -405,11 +449,12 @@ export interface InstallResult {
  * Makes every package of the project's `bun.lock` available from the store and links them into
  * `.nata/modules/node_modules`. Fast when nothing changed (a hash and a few `stat`s).
  */
-export async function installProject(projectDir: string, bun: string): Promise<InstallResult> {
+export async function installProject(projectDir: string, bun: string, progress: (step: string) => void = () => {}): Promise<InstallResult> {
   const started = performance.now();
   if (!existsSync(join(projectDir, "package.json"))) {
     return { upToDate: true, packages: 0, downloaded: 0, created: 0, skippedScripts: [], ms: 0 };
   }
+  if (!lockfileCurrent(projectDir)) progress("Resolving package versions (bun install --lockfile-only)...");
   await ensureLockfile(projectDir, bun);
   const text = readFileSync(join(projectDir, "bun.lock"), "utf-8");
   const hash = lockHash(text);
@@ -423,18 +468,24 @@ export async function installProject(projectDir: string, bun: string): Promise<I
     throw new StoreUnsupportedError(`the store only installs registry packages (not ${lock.unsupported.slice(0, 3).join(", ")})`);
   }
   const graph = resolveGraph(lock);
+  removeAbandonedTmp();
   mkdirSync(join(storeRoot(), ".tmp"), { recursive: true });
   const missing = [...graph.nodes.keys()].filter((p) => !entryComplete(graph.entries.get(p)!) && !bunCacheDir(graph.nodes.get(p)!));
   // Many packages to fetch: Bun downloads them faster (and with the project's registry settings);
   // what it could not fetch is downloaded below
-  if (missing.length > 3) await prefetch(projectDir, bun).catch(() => {});
+  if (missing.length > 3) {
+    progress(`Downloading ${missing.length} packages...`);
+    await prefetch(projectDir, bun).catch(() => {});
+  }
 
   let downloaded = 0;
   let created = 0;
   const skippedScripts: string[] = [];
+  let done = 0;
   await pool([...graph.nodes.keys()], DOWNLOADS, async (path) => {
     const fresh = !entryComplete(graph.entries.get(path)!);
     const result = await ensureEntry(graph, path);
+    progress(`Linking packages from the shared store (${++done}/${graph.nodes.size})...`);
     if (fresh) created++;
     if (result.downloaded) downloaded++;
     if (result.scripts) skippedScripts.push(graph.nodes.get(path)!.name);

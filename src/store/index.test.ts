@@ -101,6 +101,23 @@ describe("shared package store", () => {
     expect(again.upToDate).toBe(true);
   });
 
+  it("removes the temporary folders of installs whose process is gone, keeping running ones'", async () => {
+    const tmp = join(process.env.COM_HOME!, "store", "v1", ".tmp");
+    // A pid no process has (above every system's pid limit) and this process's own
+    const abandoned = join(tmp, "prefetch-99999999-abc123");
+    const running = join(tmp, `prefetch-${process.pid}-def456`);
+    mkdirSync(join(abandoned, "node_modules"), { recursive: true });
+    mkdirSync(running, { recursive: true });
+    const dir = project("three");
+    rmSync(join(dir, ".nata"), { recursive: true, force: true });
+    await installProject(dir, "bun-is-not-needed");
+    expect(existsSync(abandoned)).toBe(false);
+    expect(existsSync(running)).toBe(true);
+    rmSync(running, { recursive: true, force: true });
+    // The gc test below counts the projects that use the entries
+    rmSync(dir, { recursive: true, force: true });
+  });
+
   it("explains why a package is installed", () => {
     const chains = why(join(base, "one"), "b").map((c) => c.join(">"));
     expect(chains.sort()).toEqual(["a>b", "c>b"]);
