@@ -21,7 +21,7 @@ use swc_core::ecma::{
         react::{react, Options as ReactOptions, RefreshOptions, Runtime},
         typescript::typescript,
     },
-    visit::{VisitMut, VisitMutWith},
+    visit::{Visit, VisitMut, VisitMutWith, VisitWith},
 };
 
 use super::barrel;
@@ -735,6 +735,135 @@ const CLIENT_ONLY_REACT_APIS: &[&str] = &[
     "startTransition",
 ];
 
+/// Exports that only a Server Component (or a route segment) may have: a module with one stays on the
+/// server, and a client-only API in it is the error below
+const SERVER_ONLY_EXPORTS: &[&str] = &[
+    "metadata",
+    "generateMetadata",
+    "viewport",
+    "generateViewport",
+    "generateStaticParams",
+    "revalidate",
+    "dynamic",
+    "dynamicParams",
+    "fetchCache",
+    "runtime",
+    "preferredRegion",
+    "maxDuration",
+];
+
+/// Imports that cannot reach the browser
+fn server_only_import(specifier: &str) -> bool {
+    const PACKAGES: &[&str] = &["server-only", "core", "next/headers", "next/cache", "fs", "path", "os", "crypto", "child_process", "net", "worker_threads"];
+    specifier.starts_with("node:") || specifier.starts_with("bun:") || PACKAGES.contains(&specifier) || specifier.starts_with("fs/")
+}
+
+/// What makes an app module without a directive a Client Component: a client-only React API (named,
+/// or through `React.`), a hook of the app or of `next/navigation`, or an event handler in its JSX
+#[derive(Default)]
+struct ClientNeeds {
+    react: Vec<String>,
+    hooks: Vec<String>,
+    reason: Option<String>,
+}
+
+impl Visit for ClientNeeds {
+    fn visit_member_expr(&mut self, member: &MemberExpr) {
+        if self.reason.is_none() {
+            if let (Expr::Ident(obj), MemberProp::Ident(prop)) = (&*member.obj, &member.prop) {
+                if self.react.iter().any(|r| r.as_str() == obj.sym.as_ref()) && CLIENT_ONLY_REACT_APIS.contains(&prop.sym.as_ref()) {
+                    self.reason = Some(format!("`{}.{}`", obj.sym, prop.sym));
+                }
+            }
+        }
+        member.visit_children_with(self);
+    }
+
+    fn visit_call_expr(&mut self, call: &CallExpr) {
+        if self.reason.is_none() {
+            if let Callee::Expr(callee) = &call.callee {
+                if let Expr::Ident(id) = &**callee {
+                    if self.hooks.iter().any(|h| h.as_str() == id.sym.as_ref()) {
+                        self.reason = Some(format!("the hook `{}`", id.sym));
+                    }
+                }
+            }
+        }
+        call.visit_children_with(self);
+    }
+
+    fn visit_jsx_attr(&mut self, attr: &JSXAttr) {
+        if self.reason.is_none() {
+            if let (JSXAttrName::Ident(name), Some(JSXAttrValue::JSXExprContainer(_))) = (&attr.name, &attr.value) {
+                let name = name.sym.as_ref();
+                if name.len() > 2 && name.starts_with("on") && name.as_bytes()[2].is_ascii_uppercase() {
+                    self.reason = Some(format!("the event handler `{name}`"));
+                }
+            }
+        }
+        attr.visit_children_with(self);
+    }
+}
+
+fn is_async_export(item: &ModuleItem) -> bool {
+    let async_expr = |expr: &Expr| match expr {
+        Expr::Arrow(arrow) => arrow.is_async,
+        Expr::Fn(f) => f.function.is_async,
+        _ => false,
+    };
+    match item {
+        ModuleItem::ModuleDecl(ModuleDecl::ExportDefaultDecl(ExportDefaultDecl { decl: DefaultDecl::Fn(f), .. })) => f.function.is_async,
+        ModuleItem::ModuleDecl(ModuleDecl::ExportDefaultExpr(e)) => async_expr(&e.expr),
+        ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(ExportDecl { decl: Decl::Fn(f), .. })) => f.function.is_async,
+        ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(ExportDecl { decl: Decl::Var(var), .. })) => {
+            var.decls.iter().any(|d| d.init.as_deref().is_some_and(async_expr))
+        }
+        _ => false,
+    }
+}
+
+/// Next.js rejects an app module without "use client" that needs the browser. com renders it as a
+/// Client Component instead, as if it had the directive, unless it can only be a Server Component
+/// (route segment exports, async components, server-only imports): returns what needs the client
+fn inferred_client(program: &Program, exports: &[String]) -> Option<String> {
+    let Program::Module(module) = program else { return None };
+    if exports.iter().any(|e| SERVER_ONLY_EXPORTS.contains(&e.as_str())) || module.body.iter().any(is_async_export) {
+        return None;
+    }
+    let mut needs = ClientNeeds::default();
+    for item in &module.body {
+        let ModuleItem::ModuleDecl(ModuleDecl::Import(import)) = item else { continue };
+        let specifier = import.src.value.to_string_lossy();
+        if server_only_import(&specifier) {
+            return None;
+        }
+        if import.type_only {
+            continue;
+        }
+        let app_hooks = specifier.starts_with('.') || specifier.starts_with("@/") || specifier.starts_with("~/") || specifier == "next/navigation";
+        for spec in &import.specifiers {
+            match spec {
+                ImportSpecifier::Named(named) if !named.is_type_only => {
+                    let local = named.local.sym.to_string();
+                    let imported = named.imported.as_ref().map(export_name).unwrap_or_else(|| local.clone());
+                    if specifier == "react" && CLIENT_ONLY_REACT_APIS.contains(&imported.as_str()) {
+                        needs.reason.get_or_insert(format!("`{imported}`"));
+                    } else if app_hooks && local.len() > 3 && local.starts_with("use") && local.as_bytes()[3].is_ascii_uppercase() {
+                        needs.hooks.push(local);
+                    }
+                }
+                ImportSpecifier::Default(d) if specifier == "react" => needs.react.push(d.local.sym.to_string()),
+                ImportSpecifier::Namespace(n) if specifier == "react" => needs.react.push(n.local.sym.to_string()),
+                _ => {}
+            }
+        }
+    }
+    if needs.reason.is_none() {
+        module.visit_with(&mut needs);
+    }
+    needs.reason
+}
+
 /// Like Next.js: a Server Component (a module without "use client") importing a client-only React API
 /// is a compile error at that import, which names the API and the fix
 fn check_server_react_imports(cm: &Lrc<SourceMap>, program: &Program, source: &str, file_name: &str) -> Result<(), CompileError> {
@@ -813,8 +942,19 @@ pub fn compile_module(source: &str, opts: &ModuleCompileOptions) -> Result<Compi
     let file_name = rel.clone();
     let mut program = parse(&cm, source, &file_name)?;
 
-    let directive = module_directive(&program);
     let (exports, has_star_export) = module_exports(&program);
+    // Only the app's own files: packages are checked by whoever publishes them
+    let is_app_file = !rel.starts_with("node_modules/") && !rel.contains("/node_modules/") && !rel.starts_with(".nata/");
+    let mut directive = module_directive(&program);
+    if directive.is_none() && is_app_file {
+        if let Some(reason) = inferred_client(&program, &exports) {
+            crate::term::warn_once(
+                &format!("inferred-client:{rel}"),
+                &format!("{rel} uses {reason} without \"use client\": it runs as a Client Component. Add \"use client\" at the top of the file to say so."),
+            );
+            directive = Some(Directive::UseClient);
+        }
+    }
     let mut out = CompiledModule { directive, exports: exports.clone(), has_star_export, ..Default::default() };
 
     // React Server Components never execute client modules: they reference them
@@ -831,8 +971,6 @@ pub fn compile_module(source: &str, opts: &ModuleCompileOptions) -> Result<Compi
         return Ok(out);
     }
 
-    // Only the app's own files: packages are checked by whoever publishes them
-    let is_app_file = !rel.starts_with("node_modules/") && !rel.contains("/node_modules/") && !rel.starts_with(".nata/");
     if opts.layer == Layer::Rsc && is_app_file {
         check_server_react_imports(&cm, &program, source, &file_name)?;
     }

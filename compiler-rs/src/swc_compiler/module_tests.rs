@@ -259,7 +259,10 @@ fn mod_client_only_react_import_in_server_component_is_a_compile_error() {
     let root = project(
         "server_react_imports",
         &[
-            ("components/counter.tsx", "import { useMemo, useState } from \"react\";\nexport function Counter() { const [n] = useState(0); return <b>{n}</b>; }\n"),
+            // Server-only: a route segment export, an async component, a server-only import
+            ("app/page.tsx", "import { useMemo, useState } from \"react\";\nexport const metadata = { title: \"x\" };\nexport default function Page() { const [n] = useState(0); return <b>{n}</b>; }\n"),
+            ("components/async.tsx", "import { useState } from \"react\";\nexport default async function A() { return null; }\n"),
+            ("components/db.tsx", "import { useState } from \"react\";\nimport { db } from \"core\";\nexport function D() { useState(0); return null; }\n"),
             ("components/client.tsx", "\"use client\";\nimport { useState } from \"react\";\nexport function C() { useState(0); return null; }\n"),
             ("components/types.tsx", "import type { Dispatch } from \"react\";\nimport { type SetStateAction, useMemo, cache } from \"react\";\nexport const f = cache(() => 1);\n"),
             ("node_modules/lib/index.js", "import { useState } from \"react\";\nexport const x = 1;\n"),
@@ -271,18 +274,48 @@ fn mod_client_only_react_import_in_server_component_is_a_compile_error() {
         compile_module(&source, &ModuleCompileOptions { root: &root, file: &file, layer, development: true, refresh: false, package_specifier: None }).err()
     };
 
-    let err = compile_err("components/counter.tsx", Layer::Rsc).expect("useState in a Server Component is rejected");
+    let err = compile_err("app/page.tsx", Layer::Rsc).expect("useState in a module that must be a Server Component is rejected");
     assert!(err.message.starts_with("You're importing a component that needs `useState`. This React Hook only works in a Client Component."), "{}", err.message);
     assert!(err.message.contains("https://nextjs.org/docs/app/api-reference/directives/use-client"), "{}", err.message);
-    assert_eq!((err.file.as_str(), err.line, err.column), ("components/counter.tsx", Some(1), Some(19)));
+    assert_eq!((err.file.as_str(), err.line, err.column), ("app/page.tsx", Some(1), Some(19)));
     assert!(err.frame.contains("import { useMemo, useState }"), "{}", err.frame);
+    assert!(compile_err("components/async.tsx", Layer::Rsc).is_some());
+    assert!(compile_err("components/db.tsx", Layer::Rsc).is_some());
 
     // The same file is fine where React has every API, and so are client modules, type imports,
     // server-safe APIs and packages
-    assert!(compile_err("components/counter.tsx", Layer::Ssr).is_none());
+    assert!(compile_err("app/page.tsx", Layer::Ssr).is_none());
     assert!(compile_err("components/client.tsx", Layer::Rsc).is_none());
     assert!(compile_err("components/types.tsx", Layer::Rsc).is_none());
     assert!(compile_err("node_modules/lib/index.js", Layer::Rsc).is_none());
+}
+
+#[test]
+fn mod_app_module_that_needs_the_browser_runs_as_a_client_component() {
+    let root = project(
+        "inferred_client",
+        &[
+            ("node_modules/react-server-dom-webpack/package.json", "{\"name\":\"react-server-dom-webpack\",\"exports\":{\"./server.edge\":\"./server.edge.js\"}}"),
+            ("node_modules/react-server-dom-webpack/server.edge.js", "export function registerClientReference() {}\n"),
+            ("components/counter.tsx", "import { useState } from \"react\";\nexport function Counter() { const [n] = useState(0); return <b>{n}</b>; }\n"),
+            ("components/theme.tsx", "import * as React from \"react\";\nconst Ctx = React.createContext(null);\nexport function Theme({ children }: any) { return <Ctx.Provider value={null}>{children}</Ctx.Provider>; }\n"),
+            ("components/button.tsx", "export default function Buy() { return <button onClick={() => alert(1)}>Buy</button>; }\n"),
+            ("hooks/use-mobile.ts", "export function useIsMobile() { return false; }\n"),
+            ("components/nav.tsx", "import { useIsMobile } from \"@/hooks/use-mobile\";\nexport function Nav() { return useIsMobile() ? null : <nav />; }\n"),
+            ("components/static.tsx", "import { useMemo } from \"react\";\nexport function S() { return <a href=\"/\" className=\"x\">home</a>; }\n"),
+            ("tsconfig.json", "{\"compilerOptions\":{\"paths\":{\"@/*\":[\"./*\"]}}}"),
+        ],
+    );
+    for rel in ["components/counter.tsx", "components/theme.tsx", "components/button.tsx", "components/nav.tsx"] {
+        let out = compile(&root, rel, Layer::Rsc);
+        assert_eq!(out.directive, Some(Directive::UseClient), "{rel}");
+        assert!(out.is_reference_stub, "{rel}: {}", out.code);
+        // The other layers see the same directive (client entries of `com build`, Fast Refresh)
+        assert_eq!(compile(&root, rel, Layer::Client).directive, Some(Directive::UseClient), "{rel}");
+    }
+    let out = compile(&root, "components/static.tsx", Layer::Rsc);
+    assert_eq!(out.directive, None);
+    assert!(!out.is_reference_stub);
 }
 
 #[test]
