@@ -1,0 +1,8 @@
+#!/bin/sh
+# The .pkg installs the CLI into /usr/local/com; put its commands on the default PATH (/etc/paths)
+set -e
+mkdir -p /usr/local/bin
+for name in com cai aivn; do
+  ln -sf /usr/local/com/com "/usr/local/bin/$name"
+done
+exit 0

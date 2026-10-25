@@ -37,6 +37,7 @@
     "npm:pub": "npm publish --access public",
     "build:platform-packages": "bun ./scripts/build-platform-packages.ts",
     "build:binaries": "bun ./scripts/build-binaries.ts",
+    "build:installers": "bun ./scripts/build-installers.ts",
     "build:local": "bun run build:rust && bun run build:cli",
     "compat": "bun tests/compat/run.ts",
     "bench": "bun scripts/bench.ts"

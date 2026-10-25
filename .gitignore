@@ -94,3 +94,6 @@ test.db.rwal
 # Assembled per-platform npm packages
 dist-npm/
 binaries/
+
+# Installers (scripts/build-installers.ts)
+release/

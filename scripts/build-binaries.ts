@@ -15,7 +15,7 @@
  * Afterwards `bun run release` packages these binaries and publishes everything.
  */
 
-import { copyFileSync, existsSync, mkdirSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readdirSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { SUPPORTED_COMPILER_TARGETS, exeName } from "../src/core/binaries";
 
@@ -25,7 +25,7 @@ export const BINARIES_DIR = join(PROJECT_ROOT, "binaries");
 
 type Target = (typeof SUPPORTED_COMPILER_TARGETS)[number];
 
-const TARGETS: Record<Target, { rust: string; tool: "cargo" | "zigbuild" | "xwin"; zigSuffix?: string }> = {
+export const TARGETS: Record<Target, { rust: string; tool: "cargo" | "zigbuild" | "xwin"; zigSuffix?: string }> = {
   "darwin-arm64": { rust: "aarch64-apple-darwin", tool: "cargo" },
   "darwin-x64": { rust: "x86_64-apple-darwin", tool: "cargo" },
   // Pin glibc 2.28 so the binary runs on older distros (Debian 10, RHEL 8, Ubuntu 18.10+)
@@ -34,9 +34,9 @@ const TARGETS: Record<Target, { rust: string; tool: "cargo" | "zigbuild" | "xwin
   "win32-x64": { rust: "x86_64-pc-windows-msvc", tool: "xwin" },
 };
 
-function run(cmd: string[], cwd = COMPILER_DIR): boolean {
+function run(cmd: string[], cwd = COMPILER_DIR, env: Record<string, string | undefined> = process.env): boolean {
   console.log(`\x1b[90m$ ${cmd.join(" ")}\x1b[0m`);
-  const proc = Bun.spawnSync(cmd, { cwd, stdout: "inherit", stderr: "inherit" });
+  const proc = Bun.spawnSync(cmd, { cwd, env, stdout: "inherit", stderr: "inherit" });
   return proc.exitCode === 0;
 }
 
@@ -45,6 +45,22 @@ function requireTool(bin: string, hint: string) {
     console.error(`\x1b[31m✗ Missing '${bin}'. Install with: ${hint}\x1b[0m`);
     process.exit(1);
   }
+}
+
+/**
+ * The MSVC headers cargo-xwin downloads require clang-cl 19+, which Xcode does not have: use the newest
+ * Homebrew LLVM (brew install llvm) when there is one. Unlike MSVC, clang-cl only compiles libwebp's
+ * SSE4.1 files with the feature on; Bun for Windows x64 already requires AVX2
+ */
+function xwinEnv(): Record<string, string | undefined> {
+  const opt = "/opt/homebrew/opt";
+  const llvm = existsSync(opt)
+    ? readdirSync(opt)
+        .filter((name) => /^llvm(@\d+)?$/.test(name) && existsSync(join(opt, name, "bin/clang-cl")))
+        .sort((a, b) => (parseInt(b.split("@")[1] ?? "999") || 0) - (parseInt(a.split("@")[1] ?? "999") || 0))[0]
+    : undefined;
+  const env = { ...process.env, CFLAGS: `${process.env.CFLAGS ?? ""} -msse4.1`.trim() };
+  return llvm ? { ...env, PATH: `${join(opt, llvm, "bin")}:${process.env.PATH}` } : env;
 }
 
 function buildTarget(target: Target): boolean {
@@ -62,7 +78,7 @@ function buildTarget(target: Target): boolean {
       : tool === "zigbuild"
         ? ["cargo", "zigbuild", "--target", `${rust}${zigSuffix}`, ...common]
         : ["cargo", "xwin", "build", "--target", rust, ...common];
-  if (!run(cmd)) return false;
+  if (!run(cmd, COMPILER_DIR, tool === "xwin" ? xwinEnv() : process.env)) return false;
 
   const binName = exeName("com-compiler", target.split("-")[0] as NodeJS.Platform);
   const built = join(COMPILER_DIR, "target", rust, "dist", binName);
@@ -96,7 +112,7 @@ if (import.meta.main) {
     requireTool("cargo-zigbuild", "cargo install cargo-zigbuild");
   }
   if (targets.some((t) => TARGETS[t].tool === "xwin")) {
-    requireTool("cargo-xwin", "cargo install cargo-xwin");
+    requireTool("cargo-xwin", "cargo install cargo-xwin && brew install llvm");
   }
 
   const failed = targets.filter((t) => !buildTarget(t));
