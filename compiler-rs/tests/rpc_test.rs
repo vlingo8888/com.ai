@@ -1,4 +1,5 @@
 use compiler_rs::rpc::{format_module_path, RpcExecutor, RpcPayload, RpcResponse};
+use compiler_rs::store::packages_dir;
 use std::fs;
 use std::path::PathBuf;
 
@@ -668,14 +669,17 @@ fn test_141_to_160_ensure_runtime_env() {
     let headers_ts = tmp.join(".nata/headers.ts");
     assert!(headers_ts.exists(), "Testcase #142: .nata/headers.ts must exist");
 
-    let nm_core_pkg = tmp.join("node_modules/core/package.json");
-    assert!(nm_core_pkg.exists(), "Testcase #143: node_modules/core/package.json must exist");
+    // Without its own node_modules, the project gets `core` and `next` in the shared store's folder
+    let packages = packages_dir(&tmp);
 
-    let nm_core_idx = tmp.join("node_modules/core/index.js");
-    assert!(nm_core_idx.exists(), "Testcase #144: node_modules/core/index.js must exist");
+    let nm_core_pkg = packages.join("core/package.json");
+    assert!(nm_core_pkg.exists(), "Testcase #143: core/package.json must exist");
 
-    let nm_next_headers = tmp.join("node_modules/next/headers.js");
-    assert!(nm_next_headers.exists(), "Testcase #145: node_modules/next/headers.js must exist");
+    let nm_core_idx = packages.join("core/index.js");
+    assert!(nm_core_idx.exists(), "Testcase #144: core/index.js must exist");
+
+    let nm_next_headers = packages.join("next/headers.js");
+    assert!(nm_next_headers.exists(), "Testcase #145: next/headers.js must exist");
 
     let tsconfig = tmp.join("tsconfig.json");
     assert!(tsconfig.exists(), "Testcase #146: tsconfig.json must exist");
