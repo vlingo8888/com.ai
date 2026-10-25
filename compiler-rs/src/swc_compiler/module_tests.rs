@@ -352,3 +352,58 @@ fn mod_015_server_imports_of_packages_that_are_not_installed_are_listed() {
     let dep = compile(&root, "node_modules/lib-with-optional/index.js", Layer::Rsc);
     assert!(dep.missing_packages.is_empty(), "{:?}", dep.missing_packages);
 }
+
+#[test]
+fn mod_016_server_layers_import_package_barrels_module_by_module() {
+    let page = "import { Star as S, Moon, helper, icons } from \"icons\";\nimport { Plain } from \"plain\";\nimport { Boundary } from \"client-kit\";\nimport { Impure } from \"impure\";\nimport { Sealed } from \"sealed\";\nexport default function Page() { return [S, Moon, helper, icons, Plain, Boundary, Impure, Sealed]; }\n";
+    let root = project(
+        "barrels",
+        &[
+            ("app/page.tsx", page),
+            ("node_modules/icons/package.json", r#"{"name":"icons","module":"./index.mjs","sideEffects":false}"#),
+            (
+                "node_modules/icons/index.mjs",
+                "\"use strict\";\nimport * as all from './icons/index.mjs';\nexport { all as icons };\nexport { default as Star, default as StarIcon } from './icons/star.mjs';\nexport { default as Moon } from './icons/moon.mjs';\nexport * from './extra.mjs';\n",
+            ),
+            ("node_modules/icons/icons/index.mjs", "export { default as Star } from './star.mjs';\n"),
+            ("node_modules/icons/icons/star.mjs", "export default function Star() { return null; }\n"),
+            ("node_modules/icons/icons/moon.mjs", "export default function Moon() { return null; }\n"),
+            ("node_modules/icons/extra.mjs", "export const helper = 1;\n"),
+            // Without "sideEffects": false the entry may do more than re-export
+            ("node_modules/plain/package.json", r#"{"name":"plain","module":"./index.mjs"}"#),
+            ("node_modules/plain/index.mjs", "export { Plain } from './plain.mjs';\n"),
+            ("node_modules/plain/plain.mjs", "export const Plain = 1;\n"),
+            // A client boundary must stay one
+            ("node_modules/client-kit/package.json", r#"{"name":"client-kit","module":"./index.mjs","sideEffects":false}"#),
+            ("node_modules/client-kit/index.mjs", "\"use client\";\nexport { Boundary } from './boundary.mjs';\n"),
+            ("node_modules/client-kit/boundary.mjs", "export const Boundary = 1;\n"),
+            // Code besides re-exports: not a barrel
+            ("node_modules/impure/package.json", r#"{"name":"impure","module":"./index.mjs","sideEffects":false}"#),
+            ("node_modules/impure/index.mjs", "export { Impure } from './impure.mjs';\nexport const version = 1;\n"),
+            ("node_modules/impure/impure.mjs", "export const Impure = 1;\n"),
+            // An `exports` map hides the files from the browser's package subpaths
+            ("node_modules/sealed/package.json", r#"{"name":"sealed","sideEffects":false,"exports":{".":"./index.mjs"}}"#),
+            ("node_modules/sealed/index.mjs", "export { Sealed } from './sealed.mjs';\n"),
+            ("node_modules/sealed/sealed.mjs", "export const Sealed = 1;\n"),
+        ],
+    );
+    let pkg = |rel: &str| root.join("node_modules").join(rel).to_string_lossy().replace('\\', "/");
+    let rsc = compile(&root, "app/page.tsx", Layer::Rsc).code;
+    for (file, binding) in [("icons/icons/star.mjs", "import S from"), ("icons/icons/moon.mjs", "import Moon from"), ("icons/extra.mjs", "import { helper } from")] {
+        assert!(rsc.contains(&format!("{binding} \"rsc:{}\"", pkg(file))), "{file}: {rsc}");
+    }
+    // A namespace stays with the entry, and so do the other packages
+    for file in ["icons/index.mjs", "plain/index.mjs", "impure/index.mjs"] {
+        assert!(rsc.contains(&format!("\"rsc:{}\"", pkg(file))), "{file}: {rsc}");
+    }
+    assert!(!rsc.contains(&pkg("plain/plain.mjs")) && !rsc.contains(&pkg("impure/impure.mjs")) && !rsc.contains(&pkg("client-kit/boundary.mjs")), "{rsc}");
+    // SSR (the project's own React: packages load natively, by path)
+    let ssr = compile(&root, "app/page.tsx", Layer::Ssr).code;
+    assert!(ssr.contains(&format!("import S from \"{}\"", pkg("icons/icons/star.mjs"))), "{ssr}");
+    assert!(rsc.contains(&format!("\"rsc:{}\"", pkg("sealed/sealed.mjs"))), "{rsc}");
+    // The browser imports the files by package subpath, unless `exports` hides them
+    let client = compile(&root, "app/page.tsx", Layer::Client).code;
+    assert!(client.contains("import S from \"/_nata/deps/icons/icons/star.mjs\""), "{client}");
+    assert!(client.contains("import { helper } from \"/_nata/deps/icons/extra.mjs\""), "{client}");
+    assert!(client.contains("from \"/_nata/deps/icons\"") && client.contains("from \"/_nata/deps/sealed\""), "{client}");
+}

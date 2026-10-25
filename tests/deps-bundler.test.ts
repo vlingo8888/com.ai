@@ -191,4 +191,30 @@ describe.each(BUNDLERS)("deps bundler: bundleDependency (%s)", (_name, bundler) 
     expect(readdirSync(join(dir, "shared/kv@1.0.0"))).toHaveLength(2);
     expect(readFileSync(join(dir, "projectB/kv.js"), "utf-8")).toContain("Math.random");
   });
+
+  // lucide-react's shape: no `exports`, "sideEffects": false, icons built by a shared factory that reads
+  // a React context. The compiler imports icons by file (swc_compiler/barrel.rs): each is its own bundle
+  mkdirSync(join(dir, "node_modules/glyphs/dist/icons"), { recursive: true });
+  writeFileSync(join(dir, "node_modules/glyphs/package.json"), JSON.stringify({ name: "glyphs", module: "./dist/index.mjs", sideEffects: false }));
+  writeFileSync(join(dir, "node_modules/glyphs/dist/index.mjs"), "export { default as Star } from './icons/star.mjs';\nexport { Ctx } from './context.mjs';\n");
+  writeFileSync(join(dir, "node_modules/glyphs/dist/context.mjs"), "export const Ctx = { id: Math.random() };\n");
+  writeFileSync(join(dir, "node_modules/glyphs/dist/factory.mjs"), "import { Ctx } from './context.mjs';\nexport default (name) => ({ name, Ctx });\n");
+  writeFileSync(join(dir, "node_modules/glyphs/dist/icons/star.mjs"), "import make from '../factory.mjs';\nexport default make('star');\n");
+
+  it("keeps the files of a side-effect-free package without exports separate modules when one is imported by path", async () => {
+    const outFile = join(dir, "out/glyphs-star.js");
+    await bundleDependency({ spec: "glyphs/dist/icons/star.mjs", outFile, resolveDir: dir, ...bundler });
+    const star = readFileSync(outFile, "utf-8");
+    expect(star).toContain('from "/_nata/deps/glyphs/dist/factory.mjs"');
+    expect(star).not.toContain("Math.random");
+
+    const factory = join(dir, "out/glyphs-factory.js");
+    await bundleDependency({ spec: "glyphs/dist/factory.mjs", outFile: factory, resolveDir: dir, ...bundler });
+    expect(readFileSync(factory, "utf-8")).toContain('from "/_nata/deps/glyphs/dist/context.mjs"');
+
+    // The package entry is still one bundle
+    const entry = join(dir, "out/glyphs.js");
+    await bundleDependency({ spec: "glyphs", outFile: entry, resolveDir: dir, ...bundler });
+    expect(readFileSync(entry, "utf-8")).toContain("Math.random");
+  });
 });

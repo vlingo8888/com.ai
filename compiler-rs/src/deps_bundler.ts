@@ -130,6 +130,24 @@ export function packageFile(spec: string, resolveDir: string): string | null {
 }
 
 /**
+ * A package whose files are separate modules in the browser: `spec` names one of its files (a barrel
+ * import the compiler split, swc_compiler/barrel.rs), it declares `"sideEffects": false` and has no
+ * `exports` map. Its relative imports then stay `/_nata/deps/<package>/<file>` imports, so modules the
+ * package's files share (lucide-react's icon factory and context) exist once. `null` otherwise.
+ */
+export function perFilePackage(spec: string, file: string, resolveDir: string): { name: string; dir: string } | null {
+  const name = spec.split("/").slice(0, spec.startsWith("@") ? 2 : 1).join("/");
+  try {
+    const dir = realpathSync(join(modulesDir(resolveDir), name));
+    const manifest = JSON.parse(readFileSync(join(dir, "package.json"), "utf-8"));
+    if (manifest.sideEffects !== false || manifest.exports !== undefined) return null;
+    return realpathSync(file).startsWith(dir + sep) ? { name, dir } : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Whether `file` is an ES module. A file that only re-exports (`export * from "d3-shape"`, as
  * victory-vendor does) lists no named exports, so `import` statements count too: wrapping such a
  * file as CommonJS loses the re-exported namespace (`ReferenceError: Ae is not defined`).
@@ -356,9 +374,12 @@ export async function bundleDependency(input: {
     const esm = resolved !== null && isEsmModule(resolved);
     const target = resolved !== null && resolved === direct ? direct : spec;
     const siblings = esm ? packageEntries(spec, resolveDir, nodeEnv) : new Map<string, string>();
+    const perFile = esm && resolved === direct && direct !== null ? perFilePackage(spec, direct, resolveDir) : null;
 
-    // Another project already built this exact bundle: link to it
-    const shared = input.sharedFile ? sharedBundleFile(input.sharedFile, siblings) : null;
+    // Another project already built this exact bundle: link to it (a per-file build differs from one
+    // that inlines the package's other files)
+    const sharedName = input.sharedFile && perFile ? input.sharedFile.replace(/\.js$/, "~files.js") : input.sharedFile;
+    const shared = sharedName ? sharedBundleFile(sharedName, siblings) : null;
     if (shared && existsSync(shared)) {
       linkBundle(shared, outFile);
       return { bytes: statSync(shared).size, format: esm ? "esm" : "cjs", shared: true };
@@ -384,8 +405,9 @@ export async function bundleDependency(input: {
     const entry = esm ? resolved! : wrapper;
     const entryFile = esm ? realpathSync(resolved!) : "";
 
-    const build = { spec, entry, esm, wrapper, nodeEnv, siblings, entryFile };
-    const code = input.rolldown ? await buildWithRolldown(input.rolldown, build) : await buildWithBun(build);
+    const build = { spec, entry, esm, wrapper, nodeEnv, siblings, entryFile, perFile };
+    // Rolldown's sibling plugin only knows listed files: a per-file package goes through Bun.build
+    const code = input.rolldown && !perFile ? await buildWithRolldown(input.rolldown, build) : await buildWithBun(build);
     if (shared) {
       // Written under a temporary name and renamed, so a concurrent reader never sees half a file
       mkdirSync(dirname(shared), { recursive: true });
@@ -437,6 +459,8 @@ interface BuildInput {
   /** Files of the package exposed as other specifiers (see packageEntries) */
   siblings: Map<string, string>;
   entryFile: string;
+  /** Every file of this package is its own module (see perFilePackage) */
+  perFile?: { name: string; dir: string } | null;
 }
 
 /**
@@ -530,7 +554,7 @@ function siblingPlugin(b: BuildInput) {
 }
 
 async function buildWithBun(b: BuildInput): Promise<string> {
-  const { spec, entry, esm, wrapper, nodeEnv, siblings, entryFile } = b;
+  const { spec, entry, esm, wrapper, nodeEnv, siblings, entryFile, perFile } = b;
   const siblingImports = new Map<string, string>();
   const result = await Bun.build({
     entrypoints: [entry],
@@ -549,14 +573,16 @@ async function buildWithBun(b: BuildInput): Promise<string> {
           // external's original text, so the specifier is rewritten after the build (see
           // rewriteSiblingImports); one that would mean two different files stays bundled
           build.onResolve({ filter: /^\.\.?\// }, (args) => {
-            if (siblings.size === 0 || args.kind === "require-call") return undefined;
+            if ((siblings.size === 0 && !perFile) || args.kind === "require-call") return undefined;
             let file: string;
             try {
               file = realpathSync(Bun.resolveSync(args.path, dirname(args.importer)));
             } catch {
               return undefined;
             }
-            const sibling = siblings.get(file);
+            const sibling =
+              siblings.get(file) ??
+              (perFile && file.startsWith(perFile.dir + sep) ? perFile.name + "/" + relative(perFile.dir, file).split(sep).join("/") : undefined);
             if (!sibling || sibling === spec || file === entryFile) return undefined;
             const taken = siblingImports.get(args.path);
             if (taken !== undefined && taken !== sibling) return undefined;

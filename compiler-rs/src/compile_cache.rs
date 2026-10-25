@@ -248,6 +248,10 @@ fn compute_resolution_fingerprint(root: &Path) -> String {
     }
     // NEXT_PUBLIC_* values are compiled into browser modules
     hasher.update(crate::env::fingerprint(root).as_bytes());
+    // Barrel imports of these packages are rewritten in server modules (swc_compiler/barrel.rs)
+    if let Some(config) = crate::next_config::for_root(root) {
+        hasher.update(config["experimental"]["optimizePackageImports"].to_string().as_bytes());
+    }
     hasher.finalize().to_hex().to_string()
 }
 

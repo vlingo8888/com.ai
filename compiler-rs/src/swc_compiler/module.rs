@@ -24,6 +24,7 @@ use swc_core::ecma::{
     visit::{VisitMut, VisitMutWith},
 };
 
+use super::barrel;
 use super::engine::CompileError;
 use super::fonts;
 use super::server_actions;
@@ -226,7 +227,7 @@ fn pat_names(pat: &Pat, out: &mut Vec<String>) {
     }
 }
 
-fn export_name(name: &ModuleExportName) -> String {
+pub(crate) fn export_name(name: &ModuleExportName) -> String {
     match name {
         ModuleExportName::Ident(i) => i.sym.to_string(),
         ModuleExportName::Str(s) => s.value.to_string_lossy().to_string(),
@@ -865,6 +866,7 @@ pub fn compile_module(source: &str, opts: &ModuleCompileOptions) -> Result<Compi
             if opts.layer == Layer::Client {
                 proxy_legacy_rpc_imports(&cm, module, opts.file, &rel, opts.root);
             }
+            barrel::optimize_imports(module, opts.file, opts.root, opts.layer, &resolvers);
         }
 
         program.visit_mut_with(&mut resolver(unresolved_mark, top_level_mark, true));

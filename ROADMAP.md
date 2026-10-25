@@ -16,7 +16,7 @@
 | TTFB SSR khi đã ấm (dev) | < 10ms | 1.6ms median, 2.7ms p90 (RSC: Flight + SSR stream; P0 renderToString: 0.5ms) | `scripts/bench.ts` |
 | TTFB SSR production | < 3ms (tĩnh), < 15ms (động) | — | `oha` |
 | HMR: lưu file → thấy trên màn hình | < 50ms | 40–70ms component client (Fast Refresh, giữ state); ~105ms Server Component (refetch Flight) | `scripts/bench.ts` (`hmrMs`, `hmrServerMs`) |
-| RAM khi rảnh (dev, engine + worker) | < 80MB | ~92MB (engine ~46 + worker ~46, Tailwind native trong engine, CLI nhường process cho engine); bench tính mọi process nên còn cộng bundler deps (~50MB, tự tắt sau 30s) khi project gặp package mới; 0MB sau 10 phút rảnh | `scripts/bench.ts` |
+| RAM khi rảnh (dev, engine + worker) | < 80MB | ~92MB (engine ~46 + worker ~46, Tailwind native trong engine, CLI nhường process cho engine); bench tính mọi process nên còn cộng bundler deps (~50MB, tự tắt sau 30s) khi project gặp package mới; 0MB sau 10 phút rảnh. App dạng `com create` (React của framework, `lucide-react`): engine ~50 + worker ~65 sau trang đầu, nhờ import barrel theo module ở server (trước đó 90 + 99, trang cold 0,95s → 0,2–0,4s); heap JS của worker ~7–10MB, phần còn lại là code React dev ở 2 layer và JIT | `scripts/bench.ts`, `COM_WORKER_MEMLOG=1` |
 | RAM production (`com start`) | < 50MB | — | `ps -o rss` |
 | JS client trang hello world | < 70KB gzip | 89KB gzip (deps bản production `COM_DEPS_PROD=1`, không tính overlay/debug/Fast Refresh; react-dom chiếm 64KB); 830KB ở dev chưa nén | `scripts/bench.ts` (`clientJsGzipKb`) |
 | Binary engine | < 20MB | 15.9MB (profile `dist`, có Tailwind native; bản `release` hằng ngày 22MB vì không LTO) | `ls -l` |
@@ -248,6 +248,7 @@ Các giai đoạn P0–P5 là để *trở nên* nhẹ. Phần này là các k�
 - [x] **Một instance React và một PGlite cho mỗi worker**, nạp lười (P0.8).
 - [x] **Không còn file tạm cho mỗi request** (P0.2): hiện worker ghi runner script ra `.nata/worker-scripts/` rồi import. Chuyển sang gửi lệnh có cấu trúc (`{kind: "ssr", input}`) cho các hàm đã nạp sẵn.
 - [x] **Giới hạn bộ nhớ và tự tái chế (dev):** worker rảnh 30s mà RSS vượt `COM_WORKER_MAX_RSS_MB` (mặc định 200, `0` = tắt) thì được thay bằng worker mới ở request kế tiếp (~0,1s), chống rò rỉ từ code người dùng và các phiên bản module do sửa file để lại. Đo bằng `COM_WORKER_MEMLOG=1`: heap JS phẳng qua 500 request, RSS tăng là do JIT/allocator. Production (P3.2) vẫn cần thay worker khi đang có tải mà không rơi request.
+- [x] **Import barrel theo module** (`swc_compiler/barrel.rs`, như `optimizePackageImports` của Next.js): package `"sideEffects": false` (hoặc khai báo trong next.config) có entry chỉ re-export thì `import { X } from "pkg"` nạp thẳng module định nghĩa `X`. Server (RSC/SSR) nạp theo đường dẫn: `lucide-react` 1.917 → 21 module mỗi trang. Browser nạp theo subpath của package (chỉ khi package không có `exports`), deps bundler giữ mỗi file của package là một module riêng (`perFilePackage` trong `deps_bundler.ts`) nên code dùng chung (`context.mjs` của lucide) chỉ có một bản. App compat `scaffold`: JS client ở dev 416 → 221KB, bundle production 283 → 93KB gzip, RAM rảnh 175 → 86MB.
 
 ### G4. Client (trình duyệt và Zalo WebView)
 - [x] **Runtime router < 10KB gzip** (P1.6): ~4KB. Overlay và debug drawer chỉ có ở dev; markup drawer thêm sau hydrate (`client/debug.js`), chưa tải lười.
