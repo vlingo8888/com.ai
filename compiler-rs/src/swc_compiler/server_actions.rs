@@ -31,12 +31,19 @@ pub struct ReferenceStub {
 }
 
 /// `createServerReference` stubs standing in for a `"use server"` module outside the react-server layer
-pub fn reference_stub(root: &Path, _file: &Path, rel: &str, layer: Layer, exports: &[String]) -> ReferenceStub {
+pub fn reference_stub(root: &Path, _file: &Path, rel: &str, layer: Layer, exports: &[String]) -> Result<ReferenceStub, String> {
     let flight = match layer {
         Layer::Client => "/_nata/deps/react-server-dom-webpack/client.browser".to_string(),
+        // Like any SSR import of a package: native, unless React comes from the framework, which only
+        // the engine's resolution finds (the project has no react-server-dom-webpack of its own)
+        _ if crate::framework_react::active_modules_dir(root).is_some() => {
+            let resolved = crate::resolver::oxc::resolvers(root)
+                .resolve_from_root(Layer::Ssr, "react-server-dom-webpack/client.edge")
+                .ok_or_else(|| "react-server-dom-webpack is not installed".to_string())?;
+            super::module::server_specifier(Layer::Ssr, &resolved.path)
+        }
         _ => "react-server-dom-webpack/client.edge".to_string(),
     };
-    let _ = root;
     let mut code = format!(
         "import {{ createServerReference as __nata_server_ref }} from {};\n\
          const __nata_call = (id, args) => globalThis.__NATA_CALL_SERVER__ ? globalThis.__NATA_CALL_SERVER__(id, args) : Promise.reject(new Error(\"Server Actions cannot be called during server rendering\"));\n",
@@ -53,7 +60,7 @@ pub fn reference_stub(root: &Path, _file: &Path, rel: &str, layer: Layer, export
         }
         actions.push((id, name.clone()));
     }
-    ReferenceStub { code, actions, imports: Vec::new() }
+    Ok(ReferenceStub { code, actions, imports: Vec::new() })
 }
 
 fn has_use_server(body: &Option<FunctionBody>) -> bool {

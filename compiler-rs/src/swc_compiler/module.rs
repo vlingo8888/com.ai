@@ -838,7 +838,8 @@ pub fn compile_module(source: &str, opts: &ModuleCompileOptions) -> Result<Compi
 
     // Outside the react-server layer, a "use server" module is only a set of references
     if opts.layer != Layer::Rsc && directive == Some(Directive::UseServer) {
-        let refs = server_actions::reference_stub(opts.root, opts.file, &rel, opts.layer, &exports);
+        let refs = server_actions::reference_stub(opts.root, opts.file, &rel, opts.layer, &exports)
+            .map_err(|message| CompileError { file: file_name.clone(), message, line: None, column: None, frame: String::new() })?;
         out.code = refs.code;
         out.actions = refs.actions;
         out.imports = refs.imports;

@@ -1,0 +1,37 @@
+{
+  "checks": [
+    {
+      "name": "page renders on the server with framework React and a \"use server\" import in a client component",
+      "path": "/",
+      "status": 200,
+      "ssr": [
+        "Notes"
+      ],
+      "notInHtml": [
+        "self.__nata_csr=true"
+      ],
+      "noIssues": true
+    },
+    {
+      "name": "core db reads @pglite/core during server rendering",
+      "path": "/",
+      "ssr": [
+        "Seeded note from PGlite"
+      ]
+    },
+    {
+      "name": "client component calls a Server Action that writes to the database",
+      "path": "/",
+      "click": "#add",
+      "expectText": "Added by a Server Action"
+    },
+    {
+      "name": "lucide-react icons render on the server, from a Server Component and a client component",
+      "path": "/",
+      "ssr": [
+        "lucide-notebook-pen",
+        "lucide-plus"
+      ]
+    }
+  ]
+}

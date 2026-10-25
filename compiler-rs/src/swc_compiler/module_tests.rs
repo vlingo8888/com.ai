@@ -153,6 +153,9 @@ fn mod_006_use_server_module_is_only_references_in_the_browser() {
     }
     let browser = compile(&root, "app/actions.ts", Layer::Client);
     assert!(browser.code.contains("/_nata/deps/react-server-dom-webpack/client.browser"), "{}", browser.code);
+    // The project's own React: loaded natively, one instance with react-dom/server
+    let ssr = compile(&root, "app/actions.ts", Layer::Ssr);
+    assert!(ssr.code.contains("from \"react-server-dom-webpack/client.edge\""), "{}", ssr.code);
 }
 
 #[test]

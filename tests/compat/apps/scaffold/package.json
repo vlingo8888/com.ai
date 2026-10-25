@@ -1,0 +1,12 @@
+{
+  "name": "compat-scaffold",
+  "private": true,
+  "description": "The shape `com create` makes: React without react-server-dom-webpack (framework React), core db on @pglite/core, a client component calling a \"use server\" action, lucide-react icons (a barrel of ~2,000 modules)",
+  "dependencies": {
+    "@pglite/core": "^1.0.0",
+    "kysely": "^0.29.6",
+    "lucide-react": "^1.16.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  }
+}

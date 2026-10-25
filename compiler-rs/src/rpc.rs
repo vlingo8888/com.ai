@@ -268,7 +268,13 @@ function createDbInstance(): Kysely<any> {
       try { fs.mkdirSync(parentDir, { recursive: true }); } catch {}
     }
 
-    const { PGlite } = require("@electric-sql/pglite");
+    // @pglite/core (what `com create` installs) first, like the CLI's runtime, then @electric-sql/pglite
+    let PGlite: any = null;
+    try {
+      const native = require("@pglite/core");
+      PGlite = native.PGLite || native.PGLiteNative;
+    } catch {}
+    PGlite ??= require("@electric-sql/pglite").PGlite;
     // Created on the first query: loading PGlite's WASM costs tens of MB, and many requests never query
     let pgliteInstance: any = null;
     const getPglite = () => (pgliteInstance ??= new PGlite(dbPath));
@@ -385,7 +391,7 @@ function createDbInstance(): Kysely<any> {
       },
     });
   } catch (err: any) {
-    console.warn("\x1b[33m[NATA Core] Database driver initialization warning (PG/PGlite not available or DATABASE_URL not set). Falling back to mock driver.\x1b[0m", err?.message || err);
+    console.warn("\x1b[33m[NATA Core] No database driver: set DATABASE_URL (with pg installed) or install @pglite/core (bun add @pglite/core). Queries return no rows.\x1b[0m", err?.message || err);
     class MockDriver implements Driver {
       async init(): Promise<void> {}
       async acquireConnection(): Promise<DatabaseConnection> {
