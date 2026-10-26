@@ -1,7 +1,8 @@
-import { existsSync } from "fs";
+import { existsSync, statSync } from "fs";
 import { createRequire } from "module";
 import { dirname, join } from "path";
 import { storeEnv } from "../store";
+import { logger } from "./logger";
 
 /** Platforms that get a prebuilt `@com.ai.vn/compiler-<platform>-<arch>` package on npm. */
 export const SUPPORTED_COMPILER_TARGETS = [
@@ -54,7 +55,8 @@ export function resolveWorkerBun(fromDir: string = __dirname): string | null {
     const pkg = req.resolve("bun/package.json");
     for (const name of ["bin/bun.exe", "bin/bun"]) {
       const bin = join(dirname(pkg), name);
-      if (existsSync(bin)) return bin;
+      // The package ships a small placeholder its postinstall replaces (Bun skips untrusted postinstalls)
+      if (existsSync(bin) && statSync(bin).size > 1024 * 1024) return bin;
     }
   } catch {}
   const self = process.execPath;
@@ -75,5 +77,13 @@ export function engineEnv(projectDir?: string): Record<string, string> {
 function workerBunEnv(): Record<string, string> {
   if (process.env.COM_BUN) return {};
   const bun = resolveWorkerBun();
+  if (!bun) {
+    // The engine then runs the first Bun it finds (~/.bun/bin...), often this same old one: Bun 1.2
+    // crashes bundling React on Windows ("Internal assertion failure") and cannot load its production build
+    logger.warn(
+      `com is running on Bun ${Bun.version}; the engine needs Bun >= ${MIN_PRODUCTION_BUN.join(".")}. ` +
+        "Run `bun upgrade`, or set COM_BUN to a newer Bun."
+    );
+  }
   return bun ? { COM_BUN: bun } : {};
 }
