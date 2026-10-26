@@ -21,7 +21,7 @@ pub fn farm_dir(root: &Path) -> PathBuf {
 }
 
 fn same_file(a: &Path, b: &Path) -> bool {
-    matches!((a.canonicalize(), b.canonicalize()), (Ok(a), Ok(b)) if a == b)
+    matches!((crate::rpc::canonicalize(&a), crate::rpc::canonicalize(&b)), (Ok(a), Ok(b)) if a == b)
 }
 
 /// Whether the project gets its packages from the store
@@ -103,7 +103,7 @@ pub fn store_root() -> PathBuf {
 /// Whether `path` (canonical) is a file of the store: package CSS imported by a project is served from it
 pub fn in_store(path: &Path) -> bool {
     let root = store_root();
-    let root = root.canonicalize().unwrap_or(root);
+    let root = crate::rpc::canonicalize(&root).unwrap_or(root);
     path.starts_with(&root)
 }
 

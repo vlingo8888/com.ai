@@ -108,8 +108,8 @@ fn local_source(root: &Path, url: &str) -> Option<PathBuf> {
         Some(rel) => root.join(rel),
         None => root.join("public").join(path.trim_start_matches('/')),
     };
-    let canonical = candidate.canonicalize().ok()?;
-    let root = root.canonicalize().ok()?;
+    let canonical = crate::rpc::canonicalize(&candidate).ok()?;
+    let root = crate::rpc::canonicalize(&root).ok()?;
     (canonical.starts_with(&root) && canonical.is_file()).then_some(canonical)
 }
 
@@ -243,7 +243,7 @@ async fn fetch_remote(root: &Path, url: &str) -> Option<Vec<u8>> {
 /// `/_nata/media/<path>`: a statically imported image, as is
 pub async fn media(root: &Path, rel: &str) -> Response {
     let file = root.join(rel);
-    let ok = file.canonicalize().ok().zip(root.canonicalize().ok()).is_some_and(|(f, r)| f.starts_with(r)) && is_image(&file);
+    let ok = crate::rpc::canonicalize(&file).ok().zip(crate::rpc::canonicalize(&root).ok()).is_some_and(|(f, r)| f.starts_with(r)) && is_image(&file);
     match (ok, tokio::fs::read(&file).await) {
         (true, Ok(bytes)) => {
             let ext = file.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();

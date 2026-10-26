@@ -100,13 +100,13 @@ fn query_json(query: &str) -> Value {
 
 fn abs(root: &Path, p: &Path) -> PathBuf {
     let joined = if p.is_absolute() { p.to_path_buf() } else { root.join(p) };
-    joined.canonicalize().unwrap_or(joined)
+    crate::rpc::canonicalize(&joined).unwrap_or(joined)
 }
 
 /// The route as the worker's `buildModel` takes it: segment files as versioned `rsc:` specifiers,
 /// with the parallel slots of each layout and, for client navigations, intercepting routes applied
 pub fn route_input(root: &Path, req: &PageRequest) -> Value {
-    let root_c = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let root_c = crate::rpc::canonicalize(&root).unwrap_or_else(|_| root.to_path_buf());
     let app_dir = ["app", "src/app"].iter().map(|d| root_c.join(d)).find(|d| d.is_dir()).unwrap_or_else(|| root_c.join("app"));
     let graph = crate::module_graph::for_root(root);
     let graph = graph.read().unwrap_or_else(|e| e.into_inner());
@@ -356,7 +356,7 @@ fn print_reply_logs(reply: &crate::worker_pool::Reply) {
 
 /// Renders a page (or runs a Server Action) and streams the response
 pub async fn handle(root: &Path, target: &str, stylesheet_tags: &str, req: PageRequest<'_>) -> Response {
-    let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let root = crate::rpc::canonicalize(&root).unwrap_or_else(|_| root.to_path_buf());
     match page_command(&root, target, stylesheet_tags, req).await {
         Ok((cmd, input, body)) => stream_response(&root, cmd, input, body).await,
         Err(message) => error_page(StatusCode::INTERNAL_SERVER_ERROR, &message),
@@ -383,7 +383,7 @@ impl Rendered {
 
 /// Renders a page to the end instead of streaming it
 pub async fn render_collect(root: &Path, target: &str, stylesheet_tags: &str, req: PageRequest<'_>) -> Result<Rendered, String> {
-    let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let root = crate::rpc::canonicalize(&root).unwrap_or_else(|_| root.to_path_buf());
     let (cmd, input, body) = page_command(&root, target, stylesheet_tags, req).await?;
     let mut stream = crate::worker_pool::call_stream(&root, cmd, input, body).await.map_err(|e| match e {
         WorkerError::Unavailable(e) | WorkerError::Failed(e) => format!("The server worker is unavailable: {e}"),
@@ -543,7 +543,7 @@ pub fn client_reference_specifier(root: &Path, id: &str) -> Result<String, Strin
     let clean = id.split('?').next().unwrap_or(id);
     if let Some(rel) = clean.strip_prefix("/_bundle/") {
         let file = abs(root, Path::new(rel));
-        if !file.starts_with(root.canonicalize().unwrap_or_else(|_| root.to_path_buf())) || !file.is_file() {
+        if !file.starts_with(crate::rpc::canonicalize(&root).unwrap_or_else(|_| root.to_path_buf())) || !file.is_file() {
             return Err(format!("client module not found: {clean}"));
         }
         let graph = crate::module_graph::for_root(root);
@@ -552,7 +552,7 @@ pub fn client_reference_specifier(root: &Path, id: &str) -> Result<String, Strin
     }
     if clean == "/_nata/rsc/boundaries.js" {
         // The instance rsc_ssr.ts imports (both are loaded in the SSR layer)
-        let file = root.canonicalize().unwrap_or_else(|_| root.to_path_buf()).join(".nata/rsc_boundaries.js");
+        let file = crate::rpc::canonicalize(&root).unwrap_or_else(|_| root.to_path_buf()).join(".nata/rsc_boundaries.js");
         let graph = crate::module_graph::for_root(root);
         return Ok(graph.read().unwrap_or_else(|e| e.into_inner()).specifier(&file, Layer::Ssr));
     }
@@ -560,7 +560,7 @@ pub fn client_reference_specifier(root: &Path, id: &str) -> Result<String, Strin
         // Packages load natively in the SSR layer, unless React comes from the framework: then they
         // load through the engine, which resolves `react` to it. Framework shims are files in .nata.
         if clean.starts_with("/_nata/shims/") || crate::framework_react::active_modules_dir(root).is_some() {
-            let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+            let root = crate::rpc::canonicalize(&root).unwrap_or_else(|_| root.to_path_buf());
             // A client component inside a package is referenced by its file (client_reference_id), which
             // the package's `exports` may not expose (next-intl's NextIntlClientProvider)
             let path = crate::resolver::oxc::resolvers(&root)

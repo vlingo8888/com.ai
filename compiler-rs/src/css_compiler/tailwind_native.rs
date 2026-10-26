@@ -36,7 +36,7 @@ fn states() -> &'static Mutex<HashMap<PathBuf, Arc<Mutex<ProjectState>>>> {
 
 /// The watcher and the server may spell the root differently (symlinks such as macOS `/var`)
 fn key(root: &Path) -> PathBuf {
-    root.canonicalize().unwrap_or_else(|_| root.to_path_buf())
+    crate::rpc::canonicalize(&root).unwrap_or_else(|_| root.to_path_buf())
 }
 
 fn state(root: &Path) -> Arc<Mutex<ProjectState>> {

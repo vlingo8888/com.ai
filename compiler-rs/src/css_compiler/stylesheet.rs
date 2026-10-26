@@ -191,13 +191,13 @@ pub fn css_module_js(root: &Path, rel_path: &str) -> Result<String, String> {
         Some(rest) if !rest.split('/').any(|s| s == "..") => crate::store::packages_dir(root).join(rest),
         _ => root.join(rel_path),
     };
-    let canonical = path.canonicalize().map_err(|_| format!("CSS file not found: {rel_path}"))?;
-    let root_canonical = root.canonicalize().map_err(|e| e.to_string())?;
+    let canonical = crate::rpc::canonicalize(&path).map_err(|_| format!("CSS file not found: {rel_path}"))?;
+    let root_canonical = crate::rpc::canonicalize(&root).map_err(|e| e.to_string())?;
     if !canonical.starts_with(&root_canonical) && !(rel_path.starts_with("node_modules/") && crate::store::in_store(&canonical)) {
         return Err(format!("CSS file outside the project: {rel_path}"));
     }
     let source = std::fs::read_to_string(&canonical).map_err(|e| e.to_string())?;
-    let is_entry = find_entry(root).and_then(|e| e.canonicalize().ok()).as_deref() == Some(canonical.as_path());
+    let is_entry = find_entry(root).and_then(|e| crate::rpc::canonicalize(&e).ok()).as_deref() == Some(canonical.as_path());
     if is_entry || uses_tailwind_import(&source) {
         return Ok("export default {};\n".to_string());
     }

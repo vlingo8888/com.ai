@@ -197,7 +197,7 @@ pub fn for_root(root: &Path) -> Arc<Mutex<DataCache>> {
     if let Some(cache) = registry().lock().unwrap().get(root) {
         return cache.clone();
     }
-    let canonical = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let canonical = crate::rpc::canonicalize(&root).unwrap_or_else(|_| root.to_path_buf());
     if let Some(cache) = registry().lock().unwrap().get(&canonical).cloned() {
         registry().lock().unwrap().insert(root.to_path_buf(), cache.clone());
         return cache;

@@ -60,7 +60,7 @@ pub fn app_files(root: &Path) -> Vec<PathBuf> {
         for entry in walkdir::WalkDir::new(&dir).into_iter().filter_map(Result::ok) {
             let path = entry.path();
             if entry.file_type().is_file() && is_code(path) && !is_route_handler(path) {
-                files.push(path.canonicalize().unwrap_or_else(|_| path.to_path_buf()));
+                files.push(crate::rpc::canonicalize(&path).unwrap_or_else(|_| path.to_path_buf()));
             }
         }
     }

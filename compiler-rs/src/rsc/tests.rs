@@ -24,7 +24,7 @@ fn rsc_002_client_reference_ids_map_to_ssr_modules() {
     // Its own React 19 set: packages load natively, not through the framework's React
     std::fs::write(root.join("package.json"), r#"{"dependencies":{"react":"19.3.0","react-dom":"19.3.0","react-server-dom-webpack":"19.3.0"}}"#).unwrap();
     crate::next_shims::write(&root);
-    let root = root.canonicalize().unwrap();
+    let root = crate::rpc::canonicalize(&root).unwrap();
     let spec = client_reference_specifier(&root, "/_bundle/app/form.tsx").unwrap();
     assert_eq!(spec, format!("ssr:{}", root.join("app/form.tsx").display()));
     assert_eq!(client_reference_specifier(&root, "/_nata/deps/@radix-ui/react-dialog").unwrap(), "@radix-ui/react-dialog");
@@ -58,10 +58,10 @@ fn rsc_003_client_references_inside_packages_resolve_by_file() {
     std::fs::write(pkg.join("package.json"), r#"{"name":"intl-pkg","exports":{".":"./dist/index.js"}}"#).unwrap();
     std::fs::write(pkg.join("dist/index.js"), "export {};").unwrap();
     std::fs::write(pkg.join("dist/shared/Provider.js"), "\"use client\";").unwrap();
-    let root = root.canonicalize().unwrap();
+    let root = crate::rpc::canonicalize(&root).unwrap();
     if crate::framework_react::active_modules_dir(&root).is_some() {
         let spec = client_reference_specifier(&root, "/_nata/deps/intl-pkg/dist/shared/Provider.js").unwrap();
-        assert_eq!(spec, format!("ssr:{}", pkg.canonicalize().unwrap().join("dist/shared/Provider.js").display()));
+        assert_eq!(spec, format!("ssr:{}", crate::rpc::canonicalize(&pkg).unwrap().join("dist/shared/Provider.js").display()));
     }
     assert!(client_reference_specifier(&root, "/_nata/deps/intl-pkg/../../package.json").is_err()
         || crate::framework_react::active_modules_dir(&root).is_none());

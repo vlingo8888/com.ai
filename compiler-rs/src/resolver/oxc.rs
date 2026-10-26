@@ -40,7 +40,7 @@ fn registry() -> &'static Mutex<HashMap<PathBuf, Arc<LayerResolvers>>> {
 
 /// The cached resolvers of `root`, built on first use
 pub fn resolvers(root: &Path) -> Arc<LayerResolvers> {
-    let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let root = crate::rpc::canonicalize(&root).unwrap_or_else(|_| root.to_path_buf());
     let mut map = registry().lock().unwrap();
     map.entry(root.clone())
         .or_insert_with(|| Arc::new(LayerResolvers::new(&root)))
@@ -50,7 +50,7 @@ pub fn resolvers(root: &Path) -> Arc<LayerResolvers> {
 /// Drops the cached resolvers (and their file-system cache) of `root`: called when `tsconfig.json`,
 /// `package.json` or `node_modules` change
 pub fn invalidate(root: &Path) {
-    let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let root = crate::rpc::canonicalize(&root).unwrap_or_else(|_| root.to_path_buf());
     registry().lock().unwrap().remove(&root);
 }
 

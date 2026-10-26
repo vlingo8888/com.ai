@@ -227,7 +227,7 @@ fn cjs_closure(root: &Path, entry: &Path, layer: Layer) -> (Value, Vec<u8>) {
         body.extend_from_slice(source.as_bytes());
         let mut requires: HashMap<String, Value> = HashMap::new();
         if file.extension().is_some_and(|e| e == "json") {
-            files.insert(file.to_string_lossy().to_string(), json!({ "json": true, "offset": offset, "length": length }));
+            files.insert(crate::rpc::clean_path(&file), json!({ "json": true, "offset": offset, "length": length }));
             continue;
         }
         for caps in require_regex().captures_iter(&source) {
@@ -249,7 +249,7 @@ fn cjs_closure(root: &Path, entry: &Path, layer: Layer) -> (Value, Vec<u8>) {
                 Some(resolved) => {
                     let target_source = std::fs::read_to_string(&resolved.path).unwrap_or_default();
                     if resolved.path.extension().is_some_and(|e| e == "json") || !is_esm_source(&resolved.path, &target_source) {
-                        requires.insert(spec.to_string(), json!({ "file": resolved.path.to_string_lossy() }));
+                        requires.insert(spec.to_string(), json!({ "file": crate::rpc::clean_path(&resolved.path) }));
                         if !seen.contains(&resolved.path) {
                             read.insert(resolved.path.clone(), target_source);
                         }
@@ -264,7 +264,7 @@ fn cjs_closure(root: &Path, entry: &Path, layer: Layer) -> (Value, Vec<u8>) {
                 }
             }
         }
-        files.insert(file.to_string_lossy().to_string(), json!({ "offset": offset, "length": length, "requires": requires }));
+        files.insert(crate::rpc::clean_path(&file), json!({ "offset": offset, "length": length, "requires": requires }));
     }
-    (json!({ "kind": "cjs", "layer": layer.as_str(), "entry": entry.to_string_lossy(), "files": files }), body)
+    (json!({ "kind": "cjs", "layer": layer.as_str(), "entry": crate::rpc::clean_path(entry), "files": files }), body)
 }

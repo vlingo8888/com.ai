@@ -192,7 +192,7 @@ fn registry() -> &'static Mutex<HashMap<PathBuf, Arc<RwLock<ModuleGraph>>>> {
 
 /// The module graph of a project root
 pub fn for_root(root: &Path) -> Arc<RwLock<ModuleGraph>> {
-    let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let root = crate::rpc::canonicalize(&root).unwrap_or_else(|_| root.to_path_buf());
     registry().lock().unwrap().entry(root).or_default().clone()
 }
 
@@ -250,7 +250,7 @@ pub fn server_module_specifier(root: &Path, file: impl AsRef<Path>) -> Option<St
         return None;
     }
     let file = file.as_ref();
-    let file = file.canonicalize().unwrap_or_else(|_| file.to_path_buf());
+    let file = crate::rpc::canonicalize(&file).unwrap_or_else(|_| file.to_path_buf());
     Some(for_root(root).read().unwrap_or_else(|e| e.into_inner()).specifier(&file, Layer::Rsc))
 }
 
@@ -258,7 +258,7 @@ pub fn server_module_specifier(root: &Path, file: impl AsRef<Path>) -> Option<St
 fn canonical_root(root: &Path) -> PathBuf {
     static ROOTS: OnceLock<Mutex<HashMap<PathBuf, PathBuf>>> = OnceLock::new();
     let mut roots = ROOTS.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner());
-    roots.entry(root.to_path_buf()).or_insert_with(|| root.canonicalize().unwrap_or_else(|_| root.to_path_buf())).clone()
+    roots.entry(root.to_path_buf()).or_insert_with(|| crate::rpc::canonicalize(&root).unwrap_or_else(|_| root.to_path_buf())).clone()
 }
 
 /// Whether `react-refresh` is installed, checked again only when the resolution fingerprint changes

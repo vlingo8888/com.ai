@@ -97,8 +97,8 @@ impl FileResolver {
     }
 
     fn is_safe_path(root: &Path, cand: &Path) -> bool {
-        if let Ok(canon_cand) = cand.canonicalize() {
-            if let Ok(canon_root) = root.canonicalize() {
+        if let Ok(canon_cand) = crate::rpc::canonicalize(&cand) {
+            if let Ok(canon_root) = crate::rpc::canonicalize(&root) {
                 return canon_cand.starts_with(&canon_root);
             }
         }

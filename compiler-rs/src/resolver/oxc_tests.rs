@@ -14,7 +14,7 @@ pub(crate) fn workspace(name: &str, files: &[(&str, &str)]) -> PathBuf {
         fs::write(path, contents).unwrap();
     }
     oxc::invalidate(&dir);
-    dir.canonicalize().unwrap()
+    crate::rpc::canonicalize(&dir).unwrap()
 }
 
 fn rel(root: &Path, p: &Path) -> String {

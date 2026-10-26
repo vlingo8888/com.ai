@@ -215,7 +215,7 @@ fn route_files(root: &Path, route: &RouteEntry) -> Vec<PathBuf> {
     files.extend(route.global_error_file.iter().cloned());
     files.into_iter().map(|f| {
         let f = if f.is_absolute() { f } else { root.join(f) };
-        f.canonicalize().unwrap_or(f)
+        crate::rpc::canonicalize(&f).unwrap_or(f)
     }).collect()
 }
 

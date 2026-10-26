@@ -212,7 +212,7 @@ mod tests {
             std::fs::create_dir_all(p.parent().unwrap()).unwrap();
             std::fs::write(p, "export default function X() { return null; }").unwrap();
         }
-        let root = root.canonicalize().unwrap();
+        let root = crate::rpc::canonicalize(&root).unwrap();
         (root.clone(), root.join("app"))
     }
 

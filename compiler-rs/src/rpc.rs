@@ -1220,20 +1220,24 @@ pub fn clean_path<P: AsRef<Path>>(p: P) -> String {
     s.replace('\\', "/")
 }
 
-pub fn dunce_canonicalize<P: AsRef<Path>>(p: P) -> std::path::PathBuf {
-    match p.as_ref().canonicalize() {
-        Ok(canon) => {
-            let s = canon.to_string_lossy();
-            if s.starts_with(r"\\?\UNC\") {
-                std::path::PathBuf::from(format!(r"\\{}", &s[8..]))
-            } else if s.starts_with(r"\\?\") {
-                std::path::PathBuf::from(&s[4..])
-            } else {
-                canon
-            }
+/// `std::fs::canonicalize` without the `\\?\` prefix Windows adds: paths stay comparable with the
+/// ones built by joining, and usable in module specifiers and JS (`rsc:\\?\C:\app` reads as a query)
+pub fn canonicalize<P: AsRef<Path>>(p: P) -> std::io::Result<std::path::PathBuf> {
+    let canon = p.as_ref().canonicalize()?;
+    if cfg!(windows) {
+        let s = canon.to_string_lossy();
+        if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+            return Ok(std::path::PathBuf::from(format!(r"\\{rest}")));
         }
-        Err(_) => p.as_ref().to_path_buf(),
+        if let Some(rest) = s.strip_prefix(r"\\?\") {
+            return Ok(std::path::PathBuf::from(rest));
+        }
     }
+    Ok(canon)
+}
+
+pub fn dunce_canonicalize<P: AsRef<Path>>(p: P) -> std::path::PathBuf {
+    canonicalize(&p).unwrap_or_else(|_| p.as_ref().to_path_buf())
 }
 
 

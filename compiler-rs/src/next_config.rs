@@ -24,7 +24,7 @@ fn registry() -> &'static Mutex<HashMap<PathBuf, Arc<Value>>> {
 }
 
 fn key(root: &Path) -> PathBuf {
-    root.canonicalize().unwrap_or_else(|_| root.to_path_buf())
+    crate::rpc::canonicalize(&root).unwrap_or_else(|_| root.to_path_buf())
 }
 
 /// The loaded config, if the project has one and it loaded

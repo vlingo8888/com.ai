@@ -189,7 +189,7 @@ mod tests {
             std::fs::write(dir.join("index.js"), source).unwrap();
         }
         std::fs::write(root.join("package.json"), r#"{"name":"app"}"#).unwrap();
-        root.canonicalize().unwrap()
+        crate::rpc::canonicalize(&root).unwrap()
     }
 
     #[tokio::test]

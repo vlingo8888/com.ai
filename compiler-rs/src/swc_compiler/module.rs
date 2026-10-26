@@ -107,14 +107,14 @@ fn browser_url_for_package(spec: &str) -> String {
 }
 
 pub fn relative(root: &Path, file: &Path) -> String {
-    let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
-    let file_c = file.canonicalize().unwrap_or_else(|_| file.to_path_buf());
+    let root = crate::rpc::canonicalize(&root).unwrap_or_else(|_| root.to_path_buf());
+    let file_c = crate::rpc::canonicalize(&file).unwrap_or_else(|_| file.to_path_buf());
     file_c.strip_prefix(&root).unwrap_or(file).to_string_lossy().replace('\\', "/")
 }
 
 /// The namespaced specifier the worker loads a server module from (`rsc:/abs/file.tsx`)
 pub fn server_specifier(layer: Layer, file: &Path) -> String {
-    format!("{}:{}", layer.as_str(), file.to_string_lossy().replace('\\', "/"))
+    format!("{}:{}", layer.as_str(), crate::rpc::clean_path(file))
 }
 
 pub(crate) fn parse(cm: &Lrc<SourceMap>, source: &str, file_name: &str) -> Result<Program, CompileError> {

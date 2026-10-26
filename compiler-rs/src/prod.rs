@@ -33,7 +33,7 @@ pub fn active() -> bool {
 }
 
 pub async fn run(root: PathBuf, port: u16, hostname: String, target: String) -> Result<(), String> {
-    let root = root.canonicalize().unwrap_or(root);
+    let root = crate::rpc::canonicalize(&root).unwrap_or(root);
     crate::mode::check_production_bun()?;
     let manifest = manifest::load(&root)?;
     let build_id = manifest.build_id.clone();

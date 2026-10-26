@@ -37,7 +37,7 @@ impl ProjectWatcher {
     /// How the router should apply a change to `file`, when the module graph knows it
     pub fn hmr_module(root: &Path, file: &Path) -> Option<HmrModule> {
         use crate::resolver::Layer;
-        let file = file.canonicalize().unwrap_or_else(|_| file.to_path_buf());
+        let file = crate::rpc::canonicalize(&file).unwrap_or_else(|_| file.to_path_buf());
         let graph = crate::module_graph::for_root(root);
         let graph = graph.read().ok()?;
         let client = graph.node(&file, Layer::Client);
@@ -87,7 +87,7 @@ impl ProjectWatcher {
         router: std::sync::Arc<tokio::sync::RwLock<crate::router::AppRouter>>,
     ) -> tokio::task::JoinHandle<()> {
         let root = root_dir.as_ref().to_path_buf();
-        let canon_root = root.canonicalize().unwrap_or_else(|_| root.clone());
+        let canon_root = crate::rpc::canonicalize(&root).unwrap_or_else(|_| root.clone());
 
         tokio::spawn(async move {
             // Events wake this task up: nothing runs while no file changes
@@ -280,7 +280,7 @@ impl ProjectWatcher {
                 restart = true;
                 continue;
             }
-            let file = path.canonicalize().unwrap_or_else(|_| path.clone());
+            let file = crate::rpc::canonicalize(&path).unwrap_or_else(|_| path.clone());
             let mut graph = graph.write().unwrap_or_else(|e| e.into_inner());
             if !graph.contains(&file) {
                 continue;
@@ -483,7 +483,7 @@ impl ProjectWatcher {
                             let scoped_path = scoped_entry.path();
                             if let Ok(meta) = std::fs::symlink_metadata(&scoped_path) {
                                 if meta.file_type().is_symlink() {
-                                    if let Ok(canonical) = scoped_path.canonicalize() {
+                                    if let Ok(canonical) = crate::rpc::canonicalize(&scoped_path) {
                                         symlinks.push(canonical);
                                     }
                                 }
@@ -493,7 +493,7 @@ impl ProjectWatcher {
                 } else {
                     if let Ok(meta) = std::fs::symlink_metadata(&path) {
                         if meta.file_type().is_symlink() {
-                            if let Ok(canonical) = path.canonicalize() {
+                            if let Ok(canonical) = crate::rpc::canonicalize(&path) {
                                 symlinks.push(canonical);
                             }
                         }
@@ -518,7 +518,7 @@ mod tests {
             std::fs::create_dir_all(p.parent().unwrap()).unwrap();
             std::fs::write(p, body).unwrap();
         }
-        dir.canonicalize().unwrap()
+        crate::rpc::canonicalize(&dir).unwrap()
     }
 
     #[test]

@@ -292,7 +292,7 @@ pub async fn run(root: &Path, method: &str, uri: &axum::http::Uri, headers: &Hea
         return None;
     }
     let file = find(root)?;
-    let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let root = crate::rpc::canonicalize(&root).unwrap_or_else(|_| root.to_path_buf());
     let specifier = crate::module_graph::server_module_specifier(&root, &file)?;
 
     // The matcher of this version of the middleware (re-read after edits: new specifier)

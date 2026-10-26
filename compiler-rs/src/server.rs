@@ -130,7 +130,7 @@ impl DevServer {
 
     /// Setup shared by every mode: runtime files, the worker, next.config, the route table
     pub async fn prepare(root_dir: PathBuf, target: String) -> AppState {
-        let root_dir = root_dir.canonicalize().unwrap_or(root_dir);
+        let root_dir = crate::rpc::canonicalize(&root_dir).unwrap_or(root_dir);
         if let Some(major) = crate::module_graph::check_react_support(&root_dir).await {
             crate::term::warn(&format!(
                 "React {major} found and the framework's React {} could not be installed (offline?): Server Components, Server Actions and streaming need React 19, so pages render on the client. Upgrade with: bun add react@19 react-dom@19 react-server-dom-webpack@19",
@@ -1709,7 +1709,7 @@ async fn next_image_handler(State(state): State<AppState>, req: axum::extract::R
 /// A statically imported image, as the ES module the browser loads
 async fn image_module_handler(State(state): State<AppState>, Path(path): Path<String>) -> axum::response::Response {
     let file = state.root_dir.join(path.trim_start_matches('/'));
-    let inside = file.canonicalize().ok().zip(state.root_dir.canonicalize().ok()).is_some_and(|(f, r)| f.starts_with(r));
+    let inside = crate::rpc::canonicalize(&file).ok().zip(crate::rpc::canonicalize(&state.root_dir).ok()).is_some_and(|(f, r)| f.starts_with(r));
     if !inside || !crate::image_optimizer::is_image(&file) || !file.is_file() {
         return StatusCode::NOT_FOUND.into_response();
     }
