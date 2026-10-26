@@ -35,6 +35,14 @@ function requireShim(url: string): string {
   ].join("\n");
 }
 
+/**
+ * A file path rather than a package name. Bare-specifier filters (`/^[^./]/`) skip POSIX paths, but
+ * also match Windows ones (`E:\\app\\node_modules\\react\\index.js`, entry points included)
+ */
+export function isFilePath(spec: string): boolean {
+  return /^[A-Za-z]:[\\/]/.test(spec) || spec.startsWith("\\\\");
+}
+
 const importerSources = new Map<string, string>();
 
 /** Whether `importer` loads `specifier` with a CommonJS `require("specifier")` call */
@@ -88,7 +96,7 @@ async function resolveForBrowser(spec: string, probe: string): Promise<string | 
       {
         name: "nata-probe",
         setup(build) {
-          build.onResolve({ filter: /^[^./]/ }, (args) => (args.importer === probe || args.path.startsWith("#") ? undefined : { path: args.path, external: true }));
+          build.onResolve({ filter: /^[^./]/ }, (args) => (args.importer === probe || args.path.startsWith("#") || isFilePath(args.path) ? undefined : { path: args.path, external: true }));
           build.onLoad({ filter: /.*/ }, (args) => {
             if (!resolved && args.path !== probe) resolved = args.path;
             return undefined;
@@ -487,7 +495,7 @@ async function buildWithRolldown(modulePath: string, b: BuildInput): Promise<str
           handler(id: string, importer: string | undefined, opts: { kind: string }) {
             // Already pointing at the dev server (emitted by the require shim below)
             if (id.startsWith("/_nata/deps/")) return { id, external: "absolute" };
-            if (!importer || id.startsWith("node:")) return null;
+            if (!importer || id.startsWith("node:") || isFilePath(id)) return null;
             // `#name` is the package's own subpath import (package.json `imports`): part of the package
             if (id.startsWith("#")) return null;
             // The CommonJS wrapper bundles the package itself; everything else is another dependency
@@ -590,7 +598,7 @@ async function buildWithBun(b: BuildInput): Promise<string> {
             return { path: args.path, external: true };
           });
           build.onResolve({ filter: /^[^./]/ }, (args) => {
-            if (args.path.startsWith("node:")) return undefined;
+            if (args.path.startsWith("node:") || isFilePath(args.path)) return undefined;
             // `#name` is the package's own subpath import (package.json `imports`): part of the package
             if (args.path.startsWith("#")) return undefined;
             // The CommonJS wrapper bundles the package itself; everything else is another dependency
@@ -619,6 +627,12 @@ async function buildWithBun(b: BuildInput): Promise<string> {
   const code = rewriteBareImports(rewriteSiblingImports(await result.outputs[0].text(), siblingImports));
   // Production builds: whitespace goes too, once imports are rewritten (the rewrite needs lines)
   return nodeEnv === "production" ? new Bun.Transpiler({ loader: "js", minifyWhitespace: true }).transformSync(code) : code;
+}
+
+/** Bun.build throws an AggregateError ("Bundle failed") whose `errors` hold the actual messages */
+function describeError(error: any): string {
+  const inner = Array.isArray(error?.errors) ? error.errors.map((e: any) => String(e?.message ?? e)).join("\n") : "";
+  return inner || String(error?.stack || error);
 }
 
 /**
@@ -657,7 +671,7 @@ export async function serveBundler(options: { idleMs?: number } = {}) {
       clearTimeout(idleTimer);
       bundleDependency(request.input)
         .then((result) => write(JSON.stringify({ id: request.id, ok: true, result })))
-        .catch((error) => write(JSON.stringify({ id: request.id, ok: false, error: String(error?.stack || error) })))
+        .catch((error) => write(JSON.stringify({ id: request.id, ok: false, error: describeError(error) })))
         .finally(() => {
           running--;
           armIdle();
