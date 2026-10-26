@@ -33,6 +33,7 @@
     "build:cli": "bun build --compile --minify ./bin/cli.ts --outfile com",
     "build": "bun run build:binaries",
     "release": "bun ./scripts/publish-npm.ts",
+    "release:all": "bun ./scripts/release-all.ts",
     "publish:npm": "bun ./scripts/publish-npm.ts",
     "npm:pub": "npm publish --access public",
     "build:platform-packages": "bun ./scripts/build-platform-packages.ts",
