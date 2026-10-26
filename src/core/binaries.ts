@@ -47,7 +47,7 @@ function bunVersionAtLeast(version: string, min: number[]): boolean {
 
 /**
  * The Bun the engine's worker should run on: the one installed with the CLI (`bun` dependency), else
- * the Bun running the CLI when it is recent enough. `null` leaves the engine to find one.
+ * the Bun running the CLI or the `bun` on PATH when recent enough. `null` leaves the engine to find one.
  */
 export function resolveWorkerBun(fromDir: string = __dirname): string | null {
   try {
@@ -61,6 +61,15 @@ export function resolveWorkerBun(fromDir: string = __dirname): string | null {
   } catch {}
   const self = process.execPath;
   if (/[\\/]bun(\.exe)?$/.test(self) && bunVersionAtLeast(Bun.version, MIN_PRODUCTION_BUN)) return self;
+  // The `bun` on PATH: without COM_BUN the engine looks in ~/.bun/bin first, which may hold an older
+  // Bun than the one the shell runs (another install: npm, scoop, Homebrew)
+  const onPath = Bun.which(exeName("bun"));
+  if (onPath && onPath !== self) {
+    try {
+      const version = Bun.spawnSync([onPath, "--version"], { stdout: "pipe", stderr: "ignore" }).stdout.toString().trim();
+      if (bunVersionAtLeast(version, MIN_PRODUCTION_BUN)) return onPath;
+    } catch {}
+  }
   return null;
 }
 
