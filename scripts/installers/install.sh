@@ -1,6 +1,6 @@
 #!/bin/sh
-# Installs the com CLI on Linux (macOS: the .dmg / .pkg) without Node, npm or Bun:
-#   curl -fsSL https://hcm04.vstorage.vngcloud.vn/files/com-cli/install.sh | sh
+# Installs the com CLI on Linux and macOS without Node, npm or Bun (Windows: install.ps1):
+#   curl -fsSL https://com.ai.vn/install | bash
 # COM_VERSION=1.0.2 for a given release, COM_INSTALL_DIR to install elsewhere than ~/.com/cli.
 set -eu
 
@@ -9,17 +9,17 @@ release="latest"
 [ -n "${COM_VERSION:-}" ] && release="v${COM_VERSION#v}"
 dest="${COM_INSTALL_DIR:-$HOME/.com/cli}"
 
-case "$(uname -s)" in
-  Linux) ;;
-  Darwin) echo "On macOS, install com with the .dmg: $base/$release/com-macos.dmg" >&2; exit 1 ;;
-  *) echo "Unsupported system: $(uname -s). On Windows, use $base/$release/com-windows-setup.exe" >&2; exit 1 ;;
-esac
 case "$(uname -m)" in
   x86_64 | amd64) arch=x64 ;;
   aarch64 | arm64) arch=arm64 ;;
   *) echo "Unsupported CPU: $(uname -m)" >&2; exit 1 ;;
 esac
-file="com-linux-$arch.tar.gz"
+case "$(uname -s)" in
+  Linux) file="com-linux-$arch.tar.gz" ;;
+  # One archive for Apple Silicon and Intel (universal binaries)
+  Darwin) file="com-macos.tar.gz" ;;
+  *) echo "Unsupported system: $(uname -s). On Windows: powershell -c \"irm com.ai.vn/install.ps1 | iex\"" >&2; exit 1 ;;
+esac
 
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT

@@ -5,7 +5,8 @@
  *
  *   release/com-macos.dmg            macOS (Apple Silicon + Intel), a .pkg into /usr/local/com
  *   release/com-macos.pkg
- *   release/com-windows-setup.exe    Windows x64, per user, adds com to the PATH
+ *   release/com-macos.tar.gz         macOS, installed by release/install.sh (curl … | bash)
+ *   release/com-windows-setup.exe    Windows x64, per user, adds com to the PATH (also run by install.ps1)
  *   release/com-linux-x64.tar.gz     Linux, installed by release/install.sh
  *   release/com-linux-arm64.tar.gz
  *   release/SHA256SUMS, release/version.txt
@@ -169,7 +170,10 @@ async function buildMacos(lib: string): Promise<string[]> {
   );
   const dmg = join(OUT, "com-macos.dmg");
   run(["hdiutil", "create", "-volname", `com ${VERSION}`, "-srcfolder", volume, "-ov", "-format", "UDZO", dmg]);
-  return [dmg, pkg];
+  // For install.sh: files curl downloads carry no quarantine flag, so macOS runs them unsigned
+  const archive = join(OUT, "com-macos.tar.gz");
+  run(["tar", "--no-xattrs", "-czf", archive, "-C", payload, "com"]);
+  return [dmg, pkg, archive];
 }
 
 async function buildWindows(lib: string): Promise<string[]> {
@@ -204,6 +208,7 @@ const CONTENT_TYPES: Record<string, string> = {
   ".exe": "application/vnd.microsoft.portable-executable",
   ".gz": "application/gzip",
   ".sh": "text/x-shellscript; charset=utf-8",
+  ".ps1": "text/plain; charset=utf-8",
 };
 
 async function upload(files: string[], envFile: string | undefined) {
@@ -228,10 +233,14 @@ async function upload(files: string[], envFile: string | undefined) {
       await s3.write(key, Bun.file(file), { type, acl: "public-read" });
     }
   }
-  await s3.write(`${DOWNLOAD_PREFIX}/install.sh`, Bun.file(join(OUT, "install.sh")), { type: CONTENT_TYPES[".sh"], acl: "public-read" });
+  for (const script of ["install.sh", "install.ps1"]) {
+    const type = CONTENT_TYPES[script.slice(script.lastIndexOf("."))];
+    await s3.write(`${DOWNLOAD_PREFIX}/${script}`, Bun.file(join(OUT, script)), { type, acl: "public-read" });
+  }
   console.log(`\n\x1b[32m✓ Uploaded\x1b[0m`);
   for (const file of files.filter((f) => /\.(dmg|exe|gz)$/.test(f))) console.log(`  ${base}/latest/${basename(file)}`);
-  console.log(`  Linux: curl -fsSL ${base}/install.sh | sh`);
+  console.log(`  Linux, macOS: curl -fsSL https://com.ai.vn/install | bash`);
+  console.log(`  Windows: powershell -c "irm com.ai.vn/install.ps1 | iex"`);
 }
 
 if (import.meta.main) {
@@ -271,7 +280,7 @@ if (import.meta.main) {
       else files.push(...(await buildLinux(lib, platform)));
     }
 
-    cpSync(join(INSTALLERS, "install.sh"), join(OUT, "install.sh"));
+    for (const script of ["install.sh", "install.ps1"]) cpSync(join(INSTALLERS, script), join(OUT, script));
     writeFileSync(join(OUT, "version.txt"), `${VERSION}\n`);
     const sums = files.map((f) => `${new Bun.CryptoHasher("sha256").update(readFileSync(f)).digest("hex")}  ${basename(f)}`);
     writeFileSync(join(OUT, "SHA256SUMS"), sums.join("\n") + "\n");
