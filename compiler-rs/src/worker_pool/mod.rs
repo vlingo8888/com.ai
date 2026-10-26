@@ -296,7 +296,7 @@ async fn spawn(root: &Path) -> Result<Arc<Handle>, String> {
     // A new process has an empty module registry: server modules start again from version 0 state
     crate::module_graph::for_root(root).write().unwrap_or_else(|e| e.into_inner()).reset_server_layers();
 
-    let mut cmd = Command::new(crate::rpc::find_bun_bin());
+    let mut cmd = crate::rpc::bun_command();
     cmd.args(crate::store::bun_args(root));
     // --smol: a more aggressive GC and smaller heap; dev traffic is light, memory matters more
     if !matches!(std::env::var("COM_WORKER_SMOL").as_deref(), Ok("0") | Ok("false")) {
@@ -652,23 +652,17 @@ async fn rss_mb(pid: u32) -> Option<u64> {
 
 // ---------- runner scripts (tests, fallback) ----------
 
-/// One-off `bun -e <script>` (or Node as a last resort): the pre-worker behaviour, kept as a fallback
+/// One-off `bun -e <script>`: the pre-worker behaviour, kept as a fallback. No Node fallback: the
+/// scripts import the `.ts` runtimes and use `Bun.*`
 pub async fn spawn_once(root: &Path, script: &str) -> Result<ScriptOutput, String> {
     let _ = write_runtime_files(root);
-    let mut cmd = Command::new(crate::rpc::find_bun_bin());
+    let mut cmd = crate::rpc::bun_command();
     cmd.args(crate::store::bun_args(root)).arg("-e").arg(script).current_dir(root);
     apply_runner_env(&mut cmd, root);
-    let output = match cmd.output().await {
-        Ok(out) => out,
-        Err(_) => Command::new("node")
-            .arg("--input-type=module")
-            .arg("-e")
-            .arg(script)
-            .current_dir(root)
-            .output()
-            .await
-            .map_err(|e| format!("Neither bun nor node runtime could be spawned: {e}"))?,
-    };
+    let output = cmd
+        .output()
+        .await
+        .map_err(|e| format!("Could not run Bun ({}): {e}", crate::rpc::find_bun_bin().display()))?;
     Ok(ScriptOutput {
         stdout: String::from_utf8_lossy(&output.stdout).to_string(),
         stderr: String::from_utf8_lossy(&output.stderr).to_string(),

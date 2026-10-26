@@ -1206,6 +1206,30 @@ pub fn find_bun_bin() -> std::path::PathBuf {
     std::path::PathBuf::from("bun")
 }
 
+/// `COM_BUN_SELF`: `COM_BUN` is the standalone `com` executable, which embeds Bun and acts as the
+/// Bun CLI when started with `BUN_BE_BUN=1`
+fn bun_is_self(flag: Option<&str>) -> bool {
+    matches!(flag, Some(v) if !v.is_empty() && v != "0" && v != "false")
+}
+
+fn bun_env() -> Option<(&'static str, &'static str)> {
+    bun_is_self(std::env::var("COM_BUN_SELF").ok().as_deref()).then_some(("BUN_BE_BUN", "1"))
+}
+
+/// A Bun process (`find_bun_bin`), whether Bun is installed or embedded in `com`
+pub fn bun_command() -> tokio::process::Command {
+    let mut cmd = tokio::process::Command::new(find_bun_bin());
+    cmd.envs(bun_env());
+    cmd
+}
+
+/// `bun_command` for synchronous callers
+pub fn bun_std_command() -> std::process::Command {
+    let mut cmd = std::process::Command::new(find_bun_bin());
+    cmd.envs(bun_env());
+    cmd
+}
+
 pub fn clean_path<P: AsRef<Path>>(p: P) -> String {
     let mut s = p.as_ref().to_string_lossy().to_string();
     if s.starts_with(r"\\?\UNC\") {
@@ -1244,6 +1268,15 @@ pub fn dunce_canonicalize<P: AsRef<Path>>(p: P) -> std::path::PathBuf {
 #[cfg(test)]
 mod tests {
     use super::RpcExecutor;
+
+    #[test]
+    fn only_a_standalone_com_runs_as_bun() {
+        assert!(super::bun_is_self(Some("1")));
+        assert!(!super::bun_is_self(None));
+        assert!(!super::bun_is_self(Some("")));
+        assert!(!super::bun_is_self(Some("0")));
+        assert!(!super::bun_is_self(Some("false")));
+    }
 
     fn project(name: &str) -> std::path::PathBuf {
         let root = std::env::temp_dir().join(format!("nata_runtime_env_{name}_{}", std::process::id()));

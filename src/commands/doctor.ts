@@ -3,6 +3,7 @@ import { arch, cpus, platform, release, totalmem } from "os";
 import { join, resolve } from "path";
 import { logger, colors } from "../core/logger";
 import { findAvailablePort, findEngineBinary } from "./dev";
+import { isCompiled } from "../core/self";
 import packageJson from "../../package.json";
 
 /**
@@ -74,7 +75,7 @@ export async function runChecks(projectDir: string, port = 3000): Promise<Check[
   const checks: Check[] = [];
   const add = (name: string, status: Status, detail: string) => checks.push({ name, status, detail });
 
-  add("Bun", semverAtLeast(Bun.version, MIN_BUN) ? "ok" : "fail", `v${Bun.version}${semverAtLeast(Bun.version, MIN_BUN) ? "" : ` (need >= ${MIN_BUN.join(".")})`}`);
+  add("Bun", semverAtLeast(Bun.version, MIN_BUN) ? "ok" : "fail", `v${Bun.version}${isCompiled() ? " (embedded in com)" : semverAtLeast(Bun.version, MIN_BUN) ? "" : ` (need >= ${MIN_BUN.join(".")})`}`);
 
   const engine = findEngineBinary();
   if (engine) add("Engine", "ok", `${engineVersion(engine) ?? "unknown version"} (${engine})`);

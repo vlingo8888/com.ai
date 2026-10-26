@@ -2,6 +2,7 @@
 // Commands are imported on demand: `com start` should not parse `create`, `db` or `qrcode-terminal`
 import { resolve } from "path";
 import { logger, colors } from "../src/core/logger";
+import { isCompiled } from "../src/core/self";
 import packageJson from "../package.json";
 
 function printHelp() {
@@ -133,7 +134,7 @@ async function main() {
       },
       {
         label: "Bun Runtime",
-        value: `v${Bun.version} (${process.arch}-${process.platform})`,
+        value: `v${Bun.version} (${process.arch}-${process.platform})${isCompiled() ? ", embedded" : ""}`,
         color: colors.yellow,
       },
       {

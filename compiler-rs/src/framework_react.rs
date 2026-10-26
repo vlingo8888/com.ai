@@ -85,7 +85,7 @@ pub async fn ensure(root: &Path) -> bool {
     }
     crate::term::event(&format!("Installing the framework's React {VERSION} for the App Router (once per machine)..."));
     let started = std::time::Instant::now();
-    let mut cmd = tokio::process::Command::new(crate::rpc::find_bun_bin());
+    let mut cmd = crate::rpc::bun_command();
     // Without peers: react-server-dom-webpack declares webpack, which only its webpack plugin uses
     cmd.args(["install", "--omit", "peer"])
         .current_dir(&dir)

@@ -1,7 +1,8 @@
 #!/usr/bin/env bun
 /**
  * Builds installers of the com CLI that need neither Node, npm nor Bun on the machine: each one ships
- * the CLI sources with their production dependencies, the Bun runtime and the Rust engine.
+ * the standalone `com` (the CLI compiled with `bun build --compile`, Bun embedded; it also runs the
+ * engine's worker and bundler as Bun, src/core/self.ts) and the Rust engine next to it.
  *
  *   release/com-macos.dmg            macOS (Apple Silicon + Intel), a .pkg into /usr/local/com
  *   release/com-macos.pkg
@@ -18,13 +19,13 @@
  *     --env <file>   read AWS_ENDPOINT, AWS_REGION, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY and
  *                    AWS_S3_BUCKET_NAME from this file instead of the environment
  *
- * Runs on macOS (pkgbuild, hdiutil, lipo); the Windows installer needs NSIS (brew install makensis).
+ * Runs on macOS (pkgbuild, hdiutil, lipo, codesign); the Windows installer needs NSIS (brew install makensis).
  * The installers are not signed: macOS asks to allow the .pkg in System Settings > Privacy &
  * Security, Windows SmartScreen shows "More info > Run anyway".
  */
 
-import { chmodSync, cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { basename, join, resolve } from "node:path";
+import { chmodSync, cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { basename, dirname, join, resolve } from "node:path";
 import { S3Client } from "bun";
 import { TARGETS } from "./build-binaries";
 
@@ -43,6 +44,13 @@ const BUN_ASSET: Record<Target, string> = {
   "darwin-x64": "bun-darwin-x64",
   "linux-x64": "bun-linux-x64",
   "linux-arm64": "bun-linux-aarch64",
+  "win32-x64": "bun-windows-x64",
+};
+const BUN_COMPILE_TARGET: Record<Target, string> = {
+  "darwin-arm64": "bun-darwin-arm64",
+  "darwin-x64": "bun-darwin-x64",
+  "linux-x64": "bun-linux-x64",
+  "linux-arm64": "bun-linux-arm64",
   "win32-x64": "bun-windows-x64",
 };
 const PLATFORMS = {
@@ -94,55 +102,51 @@ function bunBinary(target: Target): string {
   return file;
 }
 
-/** The CLI sources and their production dependencies, the same for every platform */
-function stageLib(): string {
-  const lib = join(OUT, "stage/lib");
-  rmSync(lib, { recursive: true, force: true });
-  mkdirSync(join(lib, "bin"), { recursive: true });
-  cpSync(join(ROOT, "bin/cli.ts"), join(lib, "bin/cli.ts"));
-  cpSync(join(ROOT, "src"), join(lib, "src"), { recursive: true, filter: (src) => !/\.test\.tsx?$/.test(src) });
-  cpSync(join(ROOT, "tsconfig.json"), join(lib, "tsconfig.json"));
-  // The engine embeds its runtime; Bun ships next to the CLI instead of as the `bun` npm package
-  const { bun: _, ...dependencies } = PKG.dependencies;
-  const manifest = { name: PKG.name, version: VERSION, type: PKG.type, dependencies };
-  writeFileSync(join(lib, "package.json"), JSON.stringify(manifest, null, 2) + "\n");
-  run([process.execPath, "install", "--production", "--ignore-scripts", "--no-save"], lib);
-  return lib;
+/** The host's Bun of the version the CLI depends on: `--compile` embeds the Bun that compiles */
+function hostBun(): string {
+  return bunBinary(process.arch === "arm64" ? "darwin-arm64" : "darwin-x64");
+}
+
+/** The standalone `com` of `target`: the CLI and its dependencies compiled into the Bun of `target` */
+function compileCli(target: Target): string {
+  const out = join(OUT, "stage/cli", target, exe("com", target));
+  rmSync(dirname(out), { recursive: true, force: true });
+  mkdirSync(dirname(out), { recursive: true });
+  run([hostBun(), "build", "--compile", "--minify", `--target=${BUN_COMPILE_TARGET[target]}-v${BUN_VERSION}`, join(ROOT, "bin/cli.ts"), "--outfile", out]);
+  return out;
 }
 
 /** `<dir>/com`: the folder every installer puts on the machine */
-function assemble(dir: string, lib: string, target: Target, bun: string, compiler: string): string {
+function assemble(dir: string, target: Target, cli: string, compiler: string): string {
   const home = join(dir, "com");
   rmSync(dir, { recursive: true, force: true });
-  mkdirSync(join(home, "runtime"), { recursive: true });
-  cpSync(lib, join(home, "lib"), { recursive: true, verbatimSymlinks: true });
-  cpSync(bun, join(home, "runtime", exe("bun", target)));
-  cpSync(compiler, join(home, "runtime", exe("com-compiler", target)));
-  for (const name of ["com", "cai", "aivn"]) {
-    if (target === "win32-x64") {
-      cpSync(join(INSTALLERS, "com.cmd"), join(home, `${name}.cmd`));
-    } else {
-      cpSync(join(INSTALLERS, "com"), join(home, name));
-      chmodSync(join(home, name), 0o755);
-    }
+  mkdirSync(home, { recursive: true });
+  cpSync(cli, join(home, exe("com", target)));
+  cpSync(compiler, join(home, exe("com-compiler", target)));
+  for (const name of ["cai", "aivn"]) {
+    // Aliases: a link on unix, a two-line script on Windows (a copy would weigh 100MB more)
+    if (target === "win32-x64") writeFileSync(join(home, `${name}.cmd`), `@echo off\r\n"%~dp0com.exe" %*\r\n`);
+    else symlinkSync("com", join(home, name));
   }
   if (target !== "win32-x64") {
-    chmodSync(join(home, "runtime/bun"), 0o755);
-    chmodSync(join(home, "runtime/com-compiler"), 0o755);
+    chmodSync(join(home, "com"), 0o755);
+    chmodSync(join(home, "com-compiler"), 0o755);
   }
   return home;
 }
 
-async function buildMacos(lib: string): Promise<string[]> {
+async function buildMacos(): Promise<string[]> {
   const universal = join(OUT, "stage/macos-bin");
   mkdirSync(universal, { recursive: true });
-  const bun = join(universal, "bun");
+  const cli = join(universal, "com");
   const compiler = join(universal, "com-compiler");
-  run(["lipo", "-create", bunBinary("darwin-arm64"), bunBinary("darwin-x64"), "-output", bun]);
+  run(["lipo", "-create", compileCli("darwin-arm64"), compileCli("darwin-x64"), "-output", cli]);
+  // lipo drops the signature each compiled slice had: Apple Silicon kills unsigned executables
+  run(["codesign", "--force", "--sign", "-", cli]);
   run(["lipo", "-create", engine("darwin-arm64"), engine("darwin-x64"), "-output", compiler]);
 
   const payload = join(OUT, "stage/macos");
-  assemble(payload, lib, "darwin-arm64", bun, compiler);
+  assemble(payload, "darwin-arm64", cli, compiler);
   run(["xattr", "-cr", payload]);
   const pkg = join(OUT, "com-macos.pkg");
   run([
@@ -169,24 +173,26 @@ async function buildMacos(lib: string): Promise<string[]> {
       `Uninstall: sudo rm -rf /usr/local/com /usr/local/bin/com /usr/local/bin/cai /usr/local/bin/aivn\n`,
   );
   const dmg = join(OUT, "com-macos.dmg");
-  run(["hdiutil", "create", "-volname", `com ${VERSION}`, "-srcfolder", volume, "-ov", "-format", "UDZO", dmg]);
+  // hdiutil's own estimate of the volume size falls short of the .pkg: "No space left on device"
+  const sizeMb = Math.ceil(statSync(pkg).size / 1048576) + 32;
+  run(["hdiutil", "create", "-volname", `com ${VERSION}`, "-srcfolder", volume, "-size", `${sizeMb}m`, "-ov", "-format", "UDZO", dmg]);
   // For install.sh: files curl downloads carry no quarantine flag, so macOS runs them unsigned
   const archive = join(OUT, "com-macos.tar.gz");
   run(["tar", "--no-xattrs", "-czf", archive, "-C", payload, "com"]);
   return [dmg, pkg, archive];
 }
 
-async function buildWindows(lib: string): Promise<string[]> {
+async function buildWindows(): Promise<string[]> {
   if (!Bun.which("makensis")) throw new Error("The Windows installer needs NSIS: brew install makensis");
-  const home = assemble(join(OUT, "stage/windows"), lib, "win32-x64", bunBinary("win32-x64"), engine("win32-x64"));
+  const home = assemble(join(OUT, "stage/windows"), "win32-x64", compileCli("win32-x64"), engine("win32-x64"));
   const setup = join(OUT, "com-windows-setup.exe");
   run(["makensis", "-V2", `-DVERSION=${VERSION}`, `-DSRC=${home}`, `-DOUT=${setup}`, join(INSTALLERS, "com.nsi")]);
   return [setup];
 }
 
-async function buildLinux(lib: string, target: "linux-x64" | "linux-arm64"): Promise<string[]> {
+async function buildLinux(target: "linux-x64" | "linux-arm64"): Promise<string[]> {
   const dir = join(OUT, `stage/${target}`);
-  assemble(dir, lib, target, bunBinary(target), engine(target));
+  assemble(dir, target, compileCli(target), engine(target));
   const archive = join(OUT, `com-${target}.tar.gz`);
   run(["tar", "--no-xattrs", "-czf", archive, "-C", dir, "com"]);
   return [archive];
@@ -271,13 +277,14 @@ if (import.meta.main) {
     for (const name of readdirSync(OUT)) {
       if (name.startsWith("com-") || name === "SHA256SUMS" || name === "version.txt") rmSync(join(OUT, name), { force: true });
     }
-    const lib = stageLib();
+    // The layout before the standalone `com` (lib/ + runtime/bun)
+    rmSync(join(OUT, "stage/lib"), { recursive: true, force: true });
     const files: string[] = [];
     for (const platform of platforms) {
       console.log(`\n\x1b[36m▶ ${platform}\x1b[0m`);
-      if (platform === "macos") files.push(...(await buildMacos(lib)));
-      else if (platform === "windows") files.push(...(await buildWindows(lib)));
-      else files.push(...(await buildLinux(lib, platform)));
+      if (platform === "macos") files.push(...(await buildMacos()));
+      else if (platform === "windows") files.push(...(await buildWindows()));
+      else files.push(...(await buildLinux(platform)));
     }
 
     for (const script of ["install.sh", "install.ps1"]) cpSync(join(INSTALLERS, script), join(OUT, script));

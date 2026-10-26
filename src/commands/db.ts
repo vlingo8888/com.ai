@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { logger, colors } from "../core/logger";
+import { loadPGliteClass } from "../core/pglite";
 
 export interface ColumnMeta {
   name: string;
@@ -593,16 +594,7 @@ export async function introspectPGLite(
   projectDir: string,
   customDbPath?: string
 ): Promise<DatabaseSchema> {
-  let PGliteClass: any = null;
-  try {
-    const pglitePkg = require("@pglite/core");
-    PGliteClass = pglitePkg.PGLite || pglitePkg.PGLiteNative;
-  } catch {}
-  if (!PGliteClass) {
-    try {
-      PGliteClass = require("@electric-sql/pglite").PGlite;
-    } catch {}
-  }
+  const PGliteClass = loadPGliteClass(projectDir);
   if (!PGliteClass) {
     throw new Error("@pglite/core is not available in the current runtime environment");
   }

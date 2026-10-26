@@ -3,6 +3,7 @@ import { createRequire } from "module";
 import { dirname, join } from "path";
 import { storeEnv } from "../store";
 import { logger } from "./logger";
+import { isCompiled, selfDir } from "./self";
 
 /** Platforms that get a prebuilt `@com.ai.vn/compiler-<platform>-<arch>` package on npm. */
 export const SUPPORTED_COMPILER_TARGETS = [
@@ -27,6 +28,11 @@ export function compilerPackageName(platform: string = process.platform, arch: s
  * (unsupported platform, or optional deps were skipped).
  */
 export function resolvePrebuiltCompiler(fromDir: string = __dirname): string | null {
+  // The standalone `com` ships the engine next to it (the npm package is not there)
+  if (isCompiled()) {
+    const bin = join(selfDir(fromDir), exeName("com-compiler"));
+    return existsSync(bin) ? bin : null;
+  }
   try {
     const req = createRequire(join(fromDir, "noop.js"));
     const pkgJson = req.resolve(`${compilerPackageName()}/package.json`);
@@ -50,6 +56,8 @@ function bunVersionAtLeast(version: string, min: number[]): boolean {
  * the Bun running the CLI or the `bun` on PATH when recent enough. `null` leaves the engine to find one.
  */
 export function resolveWorkerBun(fromDir: string = __dirname): string | null {
+  // The standalone `com` embeds Bun: it is the worker's Bun (as Bun with BUN_BE_BUN, see engineEnv)
+  if (isCompiled()) return process.execPath;
   try {
     const req = createRequire(join(fromDir, "noop.js"));
     const pkg = req.resolve("bun/package.json");
@@ -76,15 +84,18 @@ export function resolveWorkerBun(fromDir: string = __dirname): string | null {
 /**
  * Environment for engine processes: `COM_BUN` unless the user set it, `COM_CLI` (the engine runs
  * `com pkg add` for packages a project imports before installing them), and for a project on the
- * shared store, where its packages are (`NODE_PATH`, inherited by the worker and the bundler)
+ * shared store, where its packages are (`NODE_PATH`, inherited by the worker and the bundler).
+ * The standalone `com` is both: `COM_BUN_SELF` has the engine start it as Bun (`BUN_BE_BUN=1`).
  */
-export function engineEnv(projectDir?: string): Record<string, string> {
-  const env = { COM_CLI: join(__dirname, "../../bin/cli.ts"), ...(projectDir ? storeEnv(projectDir) : {}) };
-  return { ...env, ...workerBunEnv() };
+export function engineEnv(projectDir?: string, compiled: boolean = isCompiled()): Record<string, string> {
+  const cli = compiled ? process.execPath : join(__dirname, "../../bin/cli.ts");
+  const env = { COM_CLI: cli, ...(projectDir ? storeEnv(projectDir) : {}) };
+  return { ...env, ...workerBunEnv(compiled) };
 }
 
-function workerBunEnv(): Record<string, string> {
+function workerBunEnv(compiled: boolean): Record<string, string> {
   if (process.env.COM_BUN) return {};
+  if (compiled) return { COM_BUN: process.execPath, COM_BUN_SELF: "1" };
   const bun = resolveWorkerBun();
   if (!bun) {
     // The engine then runs the first Bun it finds (~/.bun/bin...), often this same old one: Bun 1.2

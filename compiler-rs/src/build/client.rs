@@ -233,7 +233,7 @@ pub async fn bundle(root: &Path, app: &Router, base: &str, entries: &[String]) -
     let config_file = nata.join("client_bundler.json");
     std::fs::write(&config_file, config.to_string()).map_err(|e| e.to_string())?;
 
-    let output = tokio::process::Command::new(crate::rpc::find_bun_bin())
+    let output = crate::rpc::bun_command()
         .arg(&script)
         .arg(&config_file)
         .current_dir(root)

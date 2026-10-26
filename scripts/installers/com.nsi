@@ -22,9 +22,11 @@ BrandingText "Com.AI.VN"
 !insertmacro MUI_LANGUAGE "English"
 
 Section "Install"
-  ; An upgrade replaces the CLI sources, never mixes two versions
+  ; An upgrade replaces the CLI, never mixes two versions; lib\, runtime\ and com.cmd are the layout
+  ; before the standalone com.exe
   RMDir /r "$INSTDIR\lib"
   RMDir /r "$INSTDIR\runtime"
+  Delete "$INSTDIR\com.cmd"
   SetOutPath "$INSTDIR"
   File /r "${SRC}\*"
   WriteUninstaller "$INSTDIR\uninstall.exe"

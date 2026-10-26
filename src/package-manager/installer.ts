@@ -1,6 +1,7 @@
 import { logger, colors } from "../core/logger";
 import { usesStore } from "../store";
 import { ensurePackages } from "../store/ensure";
+import { bunEnv } from "../core/self";
 
 export interface InstallOptions {
   cwd: string;
@@ -19,6 +20,7 @@ export async function installDependencies(options: InstallOptions): Promise<bool
       cwd: options.cwd,
       stdout: "ignore",
       stderr: "ignore",
+      env: bunEnv(process.execPath),
     });
 
     const exitCode = await proc.exited;

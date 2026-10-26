@@ -44,6 +44,7 @@ import { dirname, join, relative } from "path";
 import { comHome } from "../commands/cache";
 import { parseLockfile, pathSegments, resolveGraph, type LockPackage, type ResolvedGraph } from "./lockfile";
 import { extractTgz } from "./tar";
+import { bunEnv } from "../core/self";
 
 /** Bumped when the layout of entries changes */
 const STORE_FORMAT = "v1";
@@ -123,7 +124,7 @@ const PREFETCH_TIMEOUT_MS = 90_000;
 const DOWNLOAD_TIMEOUT_MS = 60_000;
 
 async function run(bun: string, args: string[], cwd: string, timeoutMs: number): Promise<void> {
-  const proc = Bun.spawn([bun, ...args], { cwd, stdout: "ignore", stderr: "pipe", env: { ...process.env, COM_STORE: "0" } });
+  const proc = Bun.spawn([bun, ...args], { cwd, stdout: "ignore", stderr: "pipe", env: bunEnv(bun, { ...process.env, COM_STORE: "0" }) });
   let timedOut = false;
   const timer = setTimeout(() => {
     timedOut = true;

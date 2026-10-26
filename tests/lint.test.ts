@@ -27,7 +27,7 @@ describe("com lint", () => {
   });
 
   it("type checks with the project's TypeScript when installed, else the pinned 5.x", () => {
-    expect(tscCommand(dir)).toEqual(["bunx", `typescript@${TYPESCRIPT_VERSION}`]);
+    expect(tscCommand(dir)).toEqual([process.execPath, "x", `typescript@${TYPESCRIPT_VERSION}`]);
     mkdirSync(join(dir, "node_modules/.bin"), { recursive: true });
     writeFileSync(join(dir, "node_modules/.bin/tsc"), "");
     expect(tscCommand(dir)).toEqual([join(dir, "node_modules/.bin/tsc")]);

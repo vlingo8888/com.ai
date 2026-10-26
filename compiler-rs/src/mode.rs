@@ -47,7 +47,7 @@ pub const MIN_PRODUCTION_BUN: (u32, u32) = (1, 3);
 /// `Err` with what to do when the worker's Bun is too old for `com build` / `com start`
 pub fn check_production_bun() -> Result<(), String> {
     let bun = crate::rpc::find_bun_bin();
-    let out = std::process::Command::new(&bun).arg("--version").output().map_err(|e| format!("Could not run {}: {e}", bun.display()))?;
+    let out = crate::rpc::bun_std_command().arg("--version").output().map_err(|e| format!("Could not run {}: {e}", bun.display()))?;
     let version = String::from_utf8_lossy(&out.stdout).trim().to_string();
     if bun_at_least(&version, MIN_PRODUCTION_BUN) {
         Ok(())

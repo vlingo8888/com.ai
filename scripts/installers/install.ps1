@@ -24,7 +24,7 @@ try {
   if (-not $expected -or $expected.ToLower() -ne $actual) { throw "Checksum mismatch for $file" }
 
   # A running com locks its files: the setup could not replace them
-  Get-Process com-compiler -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+  Get-Process com, com-compiler -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
 
   $proc = Start-Process -FilePath $setup -ArgumentList "/S" -Wait -PassThru
   if ($proc.ExitCode -ne 0) { throw "$file exited with code $($proc.ExitCode)" }
@@ -33,7 +33,7 @@ try {
 }
 
 $dest = Join-Path $env:LOCALAPPDATA "Programs\com"
-if (-not (Test-Path (Join-Path $dest "com.cmd"))) { throw "The setup did not install com into $dest" }
+if (-not (Test-Path (Join-Path $dest "com.exe"))) { throw "The setup did not install com into $dest" }
 # The setup adds $dest to the user's PATH; this session sees it without reopening the terminal
 if (($env:Path -split ";") -notcontains $dest) { $env:Path = "$dest;$env:Path" }
 Write-Host "Installed com into $dest"

@@ -7,6 +7,7 @@ import { existsSync, readFileSync } from "fs";
 import { join } from "path";
 import { logger, colors } from "../core/logger";
 import { resolveWorkerBun } from "../core/binaries";
+import { bunEnv } from "../core/self";
 import { installProject, lockfileCurrent, readProjectState, StoreUnsupportedError, usesStore } from "./index";
 
 /** The Bun that resolves versions (`--lockfile-only`) and fills its cache */
@@ -31,7 +32,7 @@ async function bunInstall(projectDir: string, quiet: boolean) {
   const missing = missingDependencies(projectDir);
   if (missing.length === 0) return;
   const spinner = quiet ? null : logger.spinner(`Installing ${missing.length} missing ${missing.length === 1 ? "dependency" : "dependencies"} (bun install)...`);
-  const proc = Bun.spawn([process.execPath, "install"], { cwd: projectDir, stdout: "ignore", stderr: "pipe", env: { ...process.env, COM_STORE: "0" } });
+  const proc = Bun.spawn([process.execPath, "install"], { cwd: projectDir, stdout: "ignore", stderr: "pipe", env: bunEnv(process.execPath, { ...process.env, COM_STORE: "0" }) });
   const stderr = await new Response(proc.stderr).text();
   if ((await proc.exited) === 0) {
     spinner?.stop(true, "Dependencies installed");

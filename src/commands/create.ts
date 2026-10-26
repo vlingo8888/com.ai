@@ -1,4 +1,7 @@
 import { installDependencies } from "../package-manager/installer";
+import { loadPGliteClass } from "../core/pglite";
+import { isCompiled } from "../core/self";
+import { ensurePackages } from "../store/ensure";
 import { existsSync, mkdirSync, readdirSync, writeFileSync } from "fs";
 import { join, resolve, relative, dirname } from "path";
 import { logger, colors } from "../core/logger";
@@ -1234,18 +1237,7 @@ async function initializeLocalDatabase(targetDir: string, schemaSql: string): Pr
   }
 
   try {
-    let PGliteClass: any = null;
-    try {
-      const pglitePkg = require("@pglite/core");
-      PGliteClass = pglitePkg.PGLite || pglitePkg.PGLiteNative;
-    } catch {}
-
-    if (!PGliteClass) {
-      try {
-        PGliteClass = require("@electric-sql/pglite").PGlite;
-      } catch {}
-    }
-
+    const PGliteClass = loadPGliteClass(targetDir);
     if (!PGliteClass) {
       logger.warn("Could not find PGLite constructor, skipping automatic table creation");
       return 0;
@@ -1371,8 +1363,14 @@ export async function createProject(
     })),
   });
 
-  // Initialize PGlite database & seed data
   const schemaFile = templateFiles.find((f) => f.path === "schema.sql");
+  // The standalone com cannot run the native PGlite it bundles: seed with the project's own
+  if (schemaFile && isCompiled() && !options.install) {
+    spinner.update("Installing packages to seed the database...");
+    await ensurePackages(targetDir, { quiet: true });
+  }
+
+  // Initialize PGlite database & seed data
   let seededRows = 0;
   if (schemaFile) {
     seededRows = await initializeLocalDatabase(targetDir, schemaFile.content);

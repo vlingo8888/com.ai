@@ -2,6 +2,7 @@ import { existsSync } from "fs";
 import { join } from "path";
 import { homedir } from "os";
 import { exeName } from "../core/binaries";
+import { bunEnv, isCompiled, selfDir } from "../core/self";
 import { logger, colors } from "../core/logger";
 
 export interface TunnelOptions {
@@ -50,6 +51,7 @@ export async function start123cTunnel(options: TunnelOptions = {}): Promise<{
     const proc = Bun.spawn(args, {
       stdout: "pipe",
       stderr: "ignore",
+      env: bunEnv(process.execPath),
     });
 
     const timeout = setTimeout(() => {
@@ -102,6 +104,7 @@ export async function locateOrBuildTunnelBinary(): Promise<string> {
   const home = homedir();
   const bin = exeName("tunnel-rs");
   const candidates = [
+    ...(isCompiled() ? [join(selfDir(__dirname), bin)] : []),
     join(__dirname, `../${bin}`),
     join(__dirname, `../../${bin}`),
     join(__dirname, `../bin/${bin}`),

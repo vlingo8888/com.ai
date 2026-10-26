@@ -1,6 +1,7 @@
 import { existsSync } from "fs";
 import { resolve, relative, join } from "path";
 import { logger, colors } from "../core/logger";
+import { bunEnv } from "../core/self";
 
 export interface TestOptions {
   dir?: string;
@@ -145,11 +146,11 @@ export async function testCommand(rawArgs: string[] = [], options: TestOptions =
     stdout: "inherit",
     stderr: "inherit",
     stdin: options.watch ? "inherit" : "ignore",
-    env: {
+    env: bunEnv(process.execPath, {
       ...process.env,
       NODE_ENV: "test",
       COM_TEST: "true",
-    },
+    }),
   });
 
   const exitCode = await proc.exited;

@@ -168,7 +168,7 @@ fn add_command(root: &Path, specs: &[&str], dev: bool) -> Option<tokio::process:
     if crate::store::uses_store(root) {
         return crate::store::add_command(root, specs, dev);
     }
-    let mut cmd = tokio::process::Command::new(crate::rpc::find_bun_bin());
+    let mut cmd = crate::rpc::bun_command();
     cmd.arg("add");
     if dev {
         cmd.arg("-d");

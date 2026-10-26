@@ -2,8 +2,9 @@ import { existsSync } from "fs";
 import { join, resolve } from "path";
 import { logger } from "../core/logger";
 import { packagesDir, usesStore } from "../store";
+import { bunEnv } from "../core/self";
 
-// Pinned so `com lint` behaves the same on every machine; fetched once by bunx (zero-install).
+// Pinned so `com lint` behaves the same on every machine; fetched once by `bun x` (zero-install).
 // TypeScript stays on 5.x: 7.x rejects `target: "es5"` / `moduleResolution: "node"`, still common in Next projects
 export const OXLINT_VERSION = "1.88.0";
 export const TYPESCRIPT_VERSION = "5.9.3";
@@ -37,11 +38,11 @@ export function tscCommand(projectDir: string): string[] {
   // Store packages have no `.bin`: run the package's own script
   const fromStore = join(packagesDir(projectDir), "typescript/bin/tsc");
   if (usesStore(projectDir) && existsSync(fromStore)) return [process.execPath, fromStore];
-  return ["bunx", `typescript@${TYPESCRIPT_VERSION}`];
+  return [process.execPath, "x", `typescript@${TYPESCRIPT_VERSION}`];
 }
 
 async function run(cmd: string[], cwd: string): Promise<number> {
-  const proc = Bun.spawn(cmd, { cwd, stdout: "inherit", stderr: "inherit", stdin: "inherit" });
+  const proc = Bun.spawn(cmd, { cwd, stdout: "inherit", stderr: "inherit", stdin: "inherit", env: bunEnv(cmd[0]) });
   return await proc.exited;
 }
 
@@ -55,7 +56,7 @@ export async function typecheck(projectDir: string): Promise<number> {
 
 export async function lintCommand(options: LintOptions = {}) {
   const projectDir = resolve(process.cwd(), options.dir || ".");
-  let code = await run(["bunx", `oxlint@${OXLINT_VERSION}`, ...oxlintArgs(projectDir, options)], projectDir);
+  let code = await run([process.execPath, "x", `oxlint@${OXLINT_VERSION}`, ...oxlintArgs(projectDir, options)], projectDir);
   if (options.types) {
     if (!options.json) logger.info("Type checking (tsc --noEmit)...");
     code = (await typecheck(projectDir)) || code;

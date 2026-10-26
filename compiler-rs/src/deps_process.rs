@@ -19,7 +19,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{Child, ChildStdin, Command};
+use tokio::process::{Child, ChildStdin};
 use tokio::sync::oneshot;
 
 pub const ROLLDOWN_VERSION: &str = "1.2.13";
@@ -98,7 +98,7 @@ async fn spawn(root: &Path) -> Result<BundlerProcess, String> {
         "import {{ serveBundler }} from {};\nawait serveBundler({{ idleMs: {idle_ms} }});\n",
         serde_json::to_string(&crate::rpc::clean_path(root.join(".nata/deps_bundler.ts"))).unwrap_or_default()
     );
-    let mut cmd = Command::new(crate::rpc::find_bun_bin());
+    let mut cmd = crate::rpc::bun_command();
     cmd.args(crate::store::bun_args(root))
         .arg("-e")
         .arg(script)
@@ -163,7 +163,7 @@ async fn install_rolldown() -> Option<PathBuf> {
     std::fs::write(dir.join("package.json"), manifest.to_string()).ok()?;
     crate::term::event(&format!("Installing Rolldown {ROLLDOWN_VERSION} for COM_BUNDLER=rolldown (once per machine)..."));
     let started = std::time::Instant::now();
-    let mut cmd = Command::new(crate::rpc::find_bun_bin());
+    let mut cmd = crate::rpc::bun_command();
     cmd.arg("install").current_dir(&dir).stdout(Stdio::null()).stderr(Stdio::piped());
     let ok = matches!(cmd.output().await, Ok(out) if out.status.success()) && module.is_file();
     if ok {
