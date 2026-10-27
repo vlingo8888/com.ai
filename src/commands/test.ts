@@ -72,6 +72,19 @@ export function buildBunTestArgs(pattern?: string, options: TestOptions = {}): s
 }
 
 import { ensureRuntimeEnvironment } from "../core/runtime";
+
+/**
+ * Entry file of this CLI's `@pglite/core`, for the in-memory database of `.nata/core.ts`: projects do
+ * not install it and `bun test` ignores NODE_PATH. None when it is not on disk (standalone executable).
+ */
+function pgliteEntry(): string | undefined {
+  try {
+    const entry = require.resolve("@pglite/core");
+    return existsSync(entry) ? entry : undefined;
+  } catch {
+    return undefined;
+  }
+}
 import { ensurePackages } from "../store/ensure";
 
 /**
@@ -150,6 +163,7 @@ export async function testCommand(rawArgs: string[] = [], options: TestOptions =
       ...process.env,
       NODE_ENV: "test",
       COM_TEST: "true",
+      COM_PGLITE_PATH: process.env.COM_PGLITE_PATH || pgliteEntry(),
     }),
   });
 

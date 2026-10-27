@@ -613,6 +613,17 @@ export class CookieStore {
 
 export const cookies = async () => new CookieStore();
 
+/** Empty tables between tests (same helper as the core.ts that `com test` writes) */
+export async function truncateTables(tableNames: string[]) {
+  for (const tbl of tableNames) {
+    try {
+      await sql.raw("TRUNCATE TABLE " + tbl).execute(db);
+    } catch {
+      await sql.raw("DELETE FROM " + tbl).execute(db);
+    }
+  }
+}
+
 export function json(data: any, init?: ResponseInit | number): Response {
   const status = typeof init === "number" ? init : init?.status || 200;
   const headers = typeof init === "object" ? init.headers : undefined;
@@ -643,6 +654,7 @@ export default {
   upload,
   connections,
   cookies,
+  truncateTables,
   json,
   auth,
 };

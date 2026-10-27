@@ -27,7 +27,12 @@ export function markRevalidated() {
   g.__NATA_REVALIDATED__ = true;
 }
 
-const call = (cmd: string, input: unknown) => g.__NATA_CALL_ENGINE__(cmd, input) as Promise<{ meta: any; body: Uint8Array }>;
+// Without the engine (`com test`, plain `bun`) nothing is cached and revalidation is a no-op,
+// so server actions that call revalidatePath() / revalidateTag() still run in tests
+const call = (cmd: string, input: unknown): Promise<{ meta: any; body: Uint8Array }> =>
+  typeof g.__NATA_CALL_ENGINE__ === "function"
+    ? g.__NATA_CALL_ENGINE__(cmd, input)
+    : Promise.resolve({ meta: cmd === "cache_get" ? { hit: false } : {}, body: new Uint8Array() });
 
 const REACT_ELEMENT = Symbol.for("react.transitional.element");
 const LEGACY_ELEMENT = Symbol.for("react.element");

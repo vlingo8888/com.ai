@@ -146,6 +146,18 @@ let dbInstance: Kysely<any> | null = null;
 let rawPgInstance: any = null;
 let schemaInitPromise: Promise<void> | null = null;
 
+/**
+ * The in-memory test engine has no sequences: the identity columns that pulled schemas declare as
+ * INTEGER DEFAULT nextval('..._seq'::regclass) would get that text as their value. SERIAL does the same job.
+ */
+function serialDefaults(ddl: string): string {
+  return ddl.replace(
+    /\\b(SMALLINT|INTEGER|INT|BIGINT)(\\s+NOT\\s+NULL)?\\s+DEFAULT\\s+nextval\\(\\s*'[^']+'(?:::regclass)?\\s*\\)/gi,
+    (_m, type: string, notNull?: string) =>
+      (({ SMALLINT: "SMALLSERIAL", BIGINT: "BIGSERIAL" } as Record<string, string>)[type.toUpperCase()] ?? "SERIAL") + (notNull ?? ""),
+  );
+}
+
 function createDbInstance(): Kysely<any> {
   const isTestMode = process.env.NODE_ENV === "test" || process.env.COM_TEST === "true";
   const dbUrl = !isTestMode ? (process.env.DATABASE_URL || process.env.POSTGRES_URL) : null;
@@ -176,7 +188,16 @@ function createDbInstance(): Kysely<any> {
 
   // @pglite/core Embedded & In-Memory Database Engine
   let PGliteClass: any = null;
-  try { PGliteClass = require("@pglite/core").PGLite || require("@pglite/core").PGLiteNative; } catch {}
+  // com test passes its own copy: projects do not install @pglite/core, and bun test ignores NODE_PATH
+  if (process.env.COM_PGLITE_PATH) {
+    try {
+      const mod = require(process.env.COM_PGLITE_PATH);
+      PGliteClass = mod.PGLite || mod.PGLiteNative;
+    } catch {}
+  }
+  if (!PGliteClass) {
+    try { PGliteClass = require("@pglite/core").PGLite || require("@pglite/core").PGLiteNative; } catch {}
+  }
   if (!PGliteClass) {
     try { PGliteClass = require("@electric-sql/pglite").PGlite; } catch {}
   }
@@ -216,7 +237,7 @@ function createDbInstance(): Kysely<any> {
       if (existsSync(sp)) {
         try {
           const ddl = readFileSync(sp, "utf-8");
-          await pgliteInstance.exec(ddl);
+          await pgliteInstance.exec(isTestMode ? serialDefaults(ddl) : ddl);
           break;
         } catch (e: any) {
           // Ignore table already exists or minor DDL warnings
@@ -232,7 +253,7 @@ function createDbInstance(): Kysely<any> {
         for (const file of files) {
           try {
             const ddl = readFileSync(join(migrationsDir, file), "utf-8");
-            await pgliteInstance.exec(ddl);
+            await pgliteInstance.exec(isTestMode ? serialDefaults(ddl) : ddl);
           } catch (_) {}
         }
       } catch (_) {}
@@ -247,6 +268,10 @@ function createDbInstance(): Kysely<any> {
         await schemaInitPromise;
       }
       if (!pgliteInstance) {
+        // An empty result would make every database test pass or fail for the wrong reason
+        if (isTestMode) {
+          throw new Error("[com test] In-memory PostgreSQL (@pglite/core) could not be loaded, so database queries cannot run. Run the tests with com test.");
+        }
         return { rows: [] };
       }
       const { sql: sqlStr, parameters } = compiledQuery;
