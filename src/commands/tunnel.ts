@@ -4,6 +4,7 @@ import { homedir } from "os";
 import { exeName } from "../core/binaries";
 import { bunEnv, isCompiled, selfDir } from "../core/self";
 import { logger, colors } from "../core/logger";
+import { studioEvent } from "../core/studio";
 
 export interface TunnelOptions {
   port?: number | string;
@@ -279,6 +280,7 @@ export function superviseTunnel(
         if (stopped) { try { next.proc?.kill(); } catch {} return; }
         if (next.publicUrl !== current.publicUrl) {
           logger.warn(`${options.label} tunnel reconnected on a NEW URL ${next.publicUrl} (was ${current.publicUrl}); restart \`com dev\` so the app and QR code use it`);
+          studioEvent({ type: "tunnel-url-changed", label: options.label, url: next.publicUrl, previous: current.publicUrl });
         } else {
           logger.success(`${options.label} tunnel reconnected: ${next.publicUrl}`);
         }

@@ -1,6 +1,7 @@
 import { networkInterfaces } from "os";
 import qrcode from "qrcode-terminal";
 import { colors } from "../../core/logger";
+import { studioEvent } from "../../core/studio";
 
 /**
  * Gets the active non-internal IPv4 address for local network access
@@ -42,6 +43,8 @@ export function generateZaloShortLink(appId: string, host: string, port: number 
  */
 export function printZaloDevQrCode(deepLinkUrl: string, appId: string, networkUrl: string) {
   const shortLink = deepLinkUrl.replace("/app/link/zapps/", "/s/");
+  // COM Studio draws this QR itself from the exact link (not from the terminal art)
+  studioEvent({ type: "zalo-qr", url: deepLinkUrl, appId, clientIp: networkUrl });
   try {
     qrcode.generate(deepLinkUrl, { small: true }, (qr: string) => {
       console.log(`   ${colors.dim}Scan with Zalo camera to preview:${colors.reset}\n`);
