@@ -1,9 +1,18 @@
 use super::*;
 use std::collections::HashMap;
 
+/// A folder of its own per test: the clock alone is not enough (macOS gives microseconds, and tests
+/// starting together shared a folder, the first to finish deleting it under the other)
+fn temp_project() -> std::path::PathBuf {
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+    std::env::temp_dir().join(format!("nata_rh_test_{}_{nanos}_{n}", std::process::id()))
+}
+
 #[tokio::test]
 async fn test_route_handler_get_hello() {
-    let temp_dir = std::env::temp_dir().join(format!("nata_rh_test_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+    let temp_dir = temp_project();
     let root = &temp_dir;
     let _ = std::fs::create_dir_all(root);
 
@@ -42,7 +51,7 @@ export async function GET(request: any) {
 
 #[tokio::test]
 async fn test_route_handler_dynamic_params_and_post_body() {
-    let temp_dir = std::env::temp_dir().join(format!("nata_rh_test_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+    let temp_dir = temp_project();
     let root = &temp_dir;
     let _ = std::fs::create_dir_all(root);
 
@@ -116,7 +125,7 @@ export async function POST(request: any, { params }: any) {
 
 #[tokio::test]
 async fn test_route_handler_method_not_allowed_and_options() {
-    let temp_dir = std::env::temp_dir().join(format!("nata_rh_test_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+    let temp_dir = temp_project();
     let root = &temp_dir;
     let _ = std::fs::create_dir_all(root);
 
