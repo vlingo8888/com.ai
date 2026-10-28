@@ -46,6 +46,8 @@ swc_core = { version = "79.0.0", features = [
     "ecma_parser_typescript",
     "ecma_transforms_react",
     "ecma_transforms_typescript",
+    "ecma_transforms_module",
+    "ecma_helpers_inline",
     "ecma_codegen",
 ] }
 oxc_resolver = { version = "=11.23.0", default-features = false }

@@ -18,6 +18,8 @@ export interface ViewDetailsResponse {
   db_code?: string;
   type?: string;
   status?: string;
+  /** Server version of the files; publishing bumps it too. */
+  updated_at?: string;
   domains?: string[];
   files?: Array<{
     path: string;

@@ -102,11 +102,17 @@ export async function publishCommand(options: PublishOptions = {}) {
     const elapsed = ((Date.now() - startTime) / 1000).toFixed(2);
     pubSpinner.stop(true, `Successfully published View #${viewId} in ${elapsed}s`);
 
-    // Update local configuration timestamp (re-read: the save above already updated it)
+    // Publishing bumps the view's `updated_at`: record it, or the next save reports a false conflict
+    // (re-read the config: the save above already updated it)
     const latestConfig = getLocalViewConfig(targetDir);
     if (latestConfig) {
+      const remoteUpdatedAt = await client
+        .getViewDetails(viewId)
+        .then((v) => v.updated_at)
+        .catch(() => undefined);
       saveLocalViewConfig(targetDir, {
         ...latestConfig,
+        remoteUpdatedAt: remoteUpdatedAt ?? latestConfig.remoteUpdatedAt,
         lastSyncedAt: new Date().toISOString(),
       });
     }

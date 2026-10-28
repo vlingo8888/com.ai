@@ -50,6 +50,9 @@ enum Commands {
         #[arg(short, long, default_value = "web")]
         target: String,
     },
+    /// Compile files to CommonJS `es5` for the cloud runtime: JSON `[{path, content}]` on stdin,
+    /// `[{path, es5, error?}]` on stdout
+    Es5,
     /// Scan App Router structure
     Routes {
         /// Project root directory
@@ -67,6 +70,13 @@ fn runtime_threads(production: bool) -> usize {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
+    // Plain stdin/stdout batch: no runtime, logging or banner to mix into the JSON
+    if matches!(cli.command, Commands::Es5) {
+        let input: Vec<compiler_rs::swc_compiler::cjs::Es5Input> = serde_json::from_reader(std::io::stdin().lock())?;
+        let output = compiler_rs::swc_compiler::cjs::compile_all_cjs(input);
+        serde_json::to_writer(std::io::stdout().lock(), &output)?;
+        return Ok(());
+    }
     let production = matches!(cli.command, Commands::Build { .. } | Commands::Start { .. });
     if production {
         // Before any thread starts: the worker and every module compiled inherit it
@@ -129,6 +139,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 std::process::exit(1);
             }
         }
+        Commands::Es5 => unreachable!("handled in main"),
         Commands::Routes { dir } => {
             let router = compiler_rs::router::AppRouter::scan(&dir);
             println!("\x1b[1;36m◆ DISCOVERED APP ROUTER ROUTES:\x1b[0m");
