@@ -53,8 +53,9 @@ pub fn installed_version(root: &Path, name: &str) -> Option<String> {
 /// imports such as vfile's `#minpath` were left external and fetched from `/_nata/deps/#name`; v8: a file
 /// a package exports as another specifier is imported from it, so `use-intl` and `use-intl/react` share
 /// one React context; v9: likewise for wildcard exports imported by subpath, so `konva` and the
-/// `konva/lib/Core.js` of react-konva share one Konva object)
-const BUNDLE_FORMAT: &str = "v9";
+/// `konva/lib/Core.js` of react-konva share one Konva object; v10: on Windows the named exports of a
+/// CommonJS file that re-exports another (react-server-dom-webpack/client.browser) were lost)
+const BUNDLE_FORMAT: &str = "v10";
 
 /// Where the bundled module for `spec` at `version` is cached
 pub fn cache_path(root: &Path, spec: &str, version: &str) -> PathBuf {
@@ -391,10 +392,10 @@ mod tests {
     #[test]
     fn cache_path_is_versioned_per_subpath() {
         let root = Path::new("/p");
-        assert_eq!(cache_path(root, "react", "19.1.0"), Path::new("/p/.nata/deps/v9/react@19.1.0/index.js"));
+        assert_eq!(cache_path(root, "react", "19.1.0"), Path::new("/p/.nata/deps/v10/react@19.1.0/index.js"));
         assert_eq!(
             cache_path(root, "@hookform/resolvers/zod", "3.9.0"),
-            Path::new("/p/.nata/deps/v9/@hookform__resolvers@3.9.0/zod.js")
+            Path::new("/p/.nata/deps/v10/@hookform__resolvers@3.9.0/zod.js")
         );
     }
 }

@@ -335,11 +335,11 @@ function layerRequire(layer: string, file: string): any {
   }
   const mod = { exports: {} as any, loaded: false };
   cjsModules.set(key, mod);
-  const dirname = file.slice(0, file.lastIndexOf("/"));
+  const dir = dirname(file);
   const localRequire = (spec: string) => {
     const target = entry.requires?.[spec];
-    if (!target) return nodeRequire(spec, dirname);
-    if (target.builtin) return nodeRequire(target.builtin, dirname);
+    if (!target) return nodeRequire(spec, dir);
+    if (target.builtin) return nodeRequire(target.builtin, dir);
     if (target.file) return layerRequire(layer, target.file);
     if (target.esm) return esmForRequire.get(target.esm);
     throw new Error(`Cannot find module '${spec}' from '${file}' (${layer} layer)`);
@@ -347,7 +347,7 @@ function layerRequire(layer: string, file: string): any {
   const fn = new Function("module", "exports", "require", "__filename", "__dirname", entry.code + "\n//# sourceURL=" + layer + ":" + file);
   // The source text is not needed once compiled (React's development builds are megabytes)
   entry.code = null;
-  fn(mod, mod.exports, localRequire, file, dirname);
+  fn(mod, mod.exports, localRequire, file, dir);
   mod.loaded = true;
   return mod.exports;
 }

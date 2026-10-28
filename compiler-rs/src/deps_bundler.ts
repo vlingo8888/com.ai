@@ -192,7 +192,7 @@ function cjsExportNames(file: string, nodeEnv: string, seen = new Set<string>())
   const preferred = reexports.filter((r) => (nodeEnv === "production" ? !/development/.test(r) : !/production/.test(r)));
   for (const rel of preferred.length ? preferred : reexports) {
     try {
-      const target = Bun.resolveSync(rel, file.slice(0, file.lastIndexOf("/")));
+      const target = Bun.resolveSync(rel, dirname(file));
       for (const name of cjsExportNames(target, nodeEnv, seen)) names.add(name);
     } catch {}
   }
