@@ -6,7 +6,7 @@ import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readlinkSync, realpathSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
-import { farmDir, gc, installProject, linksCurrent, listEntries, packagesDir, readProjectState, usesStore, why } from "./index";
+import { entryDir, farmDir, gc, installProject, linksCurrent, listEntries, packagesDir, readProjectState, usesStore, why } from "./index";
 
 const saved = { home: process.env.COM_HOME, cache: process.env.BUN_INSTALL_CACHE_DIR, store: process.env.COM_STORE };
 let base: string;
@@ -110,7 +110,13 @@ describe("shared package store", () => {
     expect(linksCurrent(dir)).toBe(false);
     expect((await installProject(dir, "bun-is-not-needed")).upToDate).toBe(true);
     expect(linksCurrent(dir)).toBe(true);
-    // A removed link (a package deleted from the store) is noticed without the lockfile
+    // A nested dependency removed from the store is noticed without the lockfile
+    const nested = readProjectState(dir)!.entries.find((e) => e.startsWith("b@2"))!;
+    rmSync(entryDir(nested), { recursive: true, force: true });
+    expect(linksCurrent(dir)).toBe(false);
+    expect((await installProject(dir, "bun-is-not-needed")).upToDate).toBe(false);
+    expect(require(join(farmDir(dir), "c"))).toBe(2);
+    // So is a removed link
     rmSync(join(farmDir(dir), "a"), { recursive: true, force: true });
     expect(linksCurrent(dir)).toBe(false);
     expect((await installProject(dir, "bun-is-not-needed")).upToDate).toBe(false);

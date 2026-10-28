@@ -421,15 +421,19 @@ function packageStamp(projectDir: string): string | null {
 }
 
 /**
- * Whether the project's links are current without reading the lockfile: package.json and bun.lock are
- * as they were at the last install and the linked packages are still there (a link into a removed
- * store entry is dangling)
+ * Whether the project's packages are current without reading the lockfile: package.json and bun.lock
+ * are as they were at the last install, and every store entry and link it made is still there (the
+ * same checks as `upToDate`, without parsing and hashing bun.lock)
  */
 export function linksCurrent(projectDir: string): boolean {
   const state = readProjectState(projectDir);
   if (!state || state.format !== STORE_FORMAT || !state.stamp || state.stamp !== packageStamp(projectDir)) return false;
   const farm = farmDir(projectDir);
-  return isLinkTo(join(projectDir, "node_modules"), farm) && state.links.every((name) => existsSync(join(farm, name)));
+  return (
+    state.entries.every(entryComplete) &&
+    state.links.every((name) => existsSync(join(farm, name))) &&
+    isLinkTo(join(projectDir, "node_modules"), farm)
+  );
 }
 
 /** Projects registered with the store; unregisters those that no longer use it */
