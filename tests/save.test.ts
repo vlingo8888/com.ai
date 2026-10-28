@@ -2,7 +2,7 @@ import { describe, expect, it } from "bun:test";
 import { mkdtempSync, rmSync, mkdirSync, writeFileSync, existsSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
-import { collectProjectFiles, computeDeleted, isBinaryFile } from "../src/commands/save";
+import { collectProjectFiles, computeDeleted, isBinaryFile, recordSave } from "../src/commands/save";
 import { NataApiClient, SaveConflictError } from "../src/core/api";
 import { saveLocalViewConfig, getLocalViewConfig } from "../src/core/config";
 
@@ -222,6 +222,30 @@ describe("API Client - merge saves and conflicts", () => {
       expect(err.updatedAt).toBe("t9");
     } finally {
       mockServer.stop();
+    }
+  });
+});
+
+describe("Save Command - recordSave", () => {
+  it("stores the server version so the next save (e.g. after publish) does not report a false conflict", () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "com-record-test-"));
+    try {
+      const base = {
+        viewId: 1054,
+        apiUrl: "https://base.myworkbeast.com",
+        clonedAt: "2026-10-26T00:00:00.000Z",
+        remoteUpdatedAt: "2026-10-28T05:43:42Z",
+        files: [{ path: "old.ts", size: 1 }, { path: "keep.ts", size: 2 }],
+      };
+      saveLocalViewConfig(tempDir, base);
+
+      recordSave(tempDir, base, [{ path: "new.ts", content: "x", size: 1 }], ["old.ts"], "2026-10-28T05:45:08Z");
+
+      const config = getLocalViewConfig(tempDir);
+      expect(config?.remoteUpdatedAt).toBe("2026-10-28T05:45:08Z");
+      expect(config?.files.map((f) => f.path)).toEqual(["keep.ts", "new.ts"]);
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
     }
   });
 });

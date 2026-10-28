@@ -1,8 +1,9 @@
 import { resolve } from "path";
-import { NataApiClient } from "../core/api";
+import { NataApiClient, SaveConflictError } from "../core/api";
 import { getLocalViewConfig, saveLocalViewConfig } from "../core/config";
 import { logger, colors } from "../core/logger";
-import { collectProjectFiles } from "./save";
+import { compileAllEs5 } from "../core/es5";
+import { collectProjectFiles, computeDeleted, recordSave } from "./save";
 
 export interface PublishOptions {
   dir?: string;
@@ -46,18 +47,41 @@ export async function publishCommand(options: PublishOptions = {}) {
   if (!options.skipSave) {
     const spinner = logger.spinner("Packaging and syncing latest changes to Cloud before publishing...");
     const files = collectProjectFiles(targetDir);
-    if (files.length > 0) {
+    const deleted = computeDeleted(targetDir, localConfig?.files, new Set(files.map((f) => f.path)));
+    if (files.length > 0 || deleted.length > 0) {
       try {
-        const rawFilesPayload = files.map((f) => ({
-          path: f.path,
-          content: f.content,
-        }));
-        await client.saveViewRawFiles(viewId, rawFilesPayload, {
+        const failed: Array<{ path: string; message: string }> = [];
+        const rawFilesPayload = compileAllEs5(
+          files.map((f) => ({ path: f.path, content: f.content })),
+          failed
+        );
+        if (failed.length > 0) {
+          spinner.stop(false, `${failed.length} file(s) did not compile`);
+          for (const f of failed) {
+            console.log(`    ${colors.red}✖ ${f.path}${colors.reset} ${colors.darkGray}${f.message.split("\n")[0]}${colors.reset}`);
+          }
+          logger.error("Fix these files before publishing: the published app cannot run them.");
+          process.exit(1);
+        }
+        // Same save as `com save`: merge keeps binary files on the server, and the base version
+        // catches edits made elsewhere instead of overwriting them.
+        const res = await client.saveViewRawFiles(viewId, rawFilesPayload, {
           name: localConfig?.name,
+          mode: "merge",
+          deleted,
+          baseUpdatedAt: localConfig?.remoteUpdatedAt,
         });
+        if (localConfig) recordSave(targetDir, localConfig, files, deleted, res.updated_at);
         spinner.stop(true, `Synced ${files.length} files to Cloud`);
       } catch (err: any) {
         spinner.stop(false, "Failed to sync local files");
+        if (err instanceof SaveConflictError) {
+          logger.error(
+            "The view was changed on the server since your last clone/save.",
+            `Compare first with \`com clone ${viewId} --dir <other-dir>\`, or overwrite with \`com save --force\`, then \`com publish --skip-save\`.`
+          );
+          process.exit(1);
+        }
         logger.error(err.message || String(err), "Could not save files before publishing.");
         process.exit(1);
       }
@@ -78,10 +102,11 @@ export async function publishCommand(options: PublishOptions = {}) {
     const elapsed = ((Date.now() - startTime) / 1000).toFixed(2);
     pubSpinner.stop(true, `Successfully published View #${viewId} in ${elapsed}s`);
 
-    // Update local configuration timestamp
-    if (localConfig) {
+    // Update local configuration timestamp (re-read: the save above already updated it)
+    const latestConfig = getLocalViewConfig(targetDir);
+    if (latestConfig) {
       saveLocalViewConfig(targetDir, {
-        ...localConfig,
+        ...latestConfig,
         lastSyncedAt: new Date().toISOString(),
       });
     }

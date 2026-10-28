@@ -3,6 +3,7 @@ import { existsSync, readdirSync, statSync, readFileSync } from "fs";
 import { NataApiClient, SaveConflictError } from "../core/api";
 import { getLocalViewConfig, saveLocalViewConfig, type LocalViewConfig } from "../core/config";
 import { logger, colors } from "../core/logger";
+import { compileAllEs5 } from "../core/es5";
 
 export interface SaveOptions {
   dir?: string;
@@ -135,6 +136,33 @@ export function collectProjectFiles(
   return result.sort((a, b) => a.path.localeCompare(b.path));
 }
 
+/**
+ * Records what the server holds after a save: the tracked file list (for deletions) and its
+ * `updated_at` (sent back as `baseUpdatedAt`). Without it the next save reports a false conflict.
+ */
+export function recordSave(
+  dir: string,
+  localConfig: LocalViewConfig,
+  files: ScannedFile[],
+  deleted: string[],
+  remoteUpdatedAt: string | undefined
+) {
+  const deletedSet = new Set(deleted);
+  const tracked = new Map<string, LocalViewConfig["files"][number]>();
+  for (const f of localConfig.files || []) {
+    if (!deletedSet.has(f.path)) tracked.set(f.path, f);
+  }
+  for (const f of files) {
+    tracked.set(f.path, { path: f.path, size: f.size });
+  }
+  saveLocalViewConfig(dir, {
+    ...localConfig,
+    files: [...tracked.values()].sort((a, b) => a.path.localeCompare(b.path)),
+    remoteUpdatedAt: remoteUpdatedAt ?? localConfig.remoteUpdatedAt,
+    lastSyncedAt: new Date().toISOString(),
+  });
+}
+
 export async function saveCommand(options: SaveOptions = {}) {
   const targetDir = resolve(process.cwd(), options.dir || ".");
   const localConfig = getLocalViewConfig(targetDir);
@@ -210,10 +238,11 @@ export async function saveCommand(options: SaveOptions = {}) {
   const startTime = Date.now();
 
   try {
-    const rawFilesPayload = files.map((f) => ({
-      path: f.path,
-      content: f.content,
-    }));
+    const failed: Array<{ path: string; message: string }> = [];
+    const rawFilesPayload = compileAllEs5(
+      files.map((f) => ({ path: f.path, content: f.content })),
+      failed
+    );
 
     const res = await client.saveViewRawFiles(viewId, rawFilesPayload, {
       name: localConfig?.name,
@@ -226,6 +255,12 @@ export async function saveCommand(options: SaveOptions = {}) {
     const elapsed = ((Date.now() - startTime) / 1000).toFixed(2);
     pushSpinner.stop(true, `Saved to Cloud in ${elapsed}s`);
 
+    if (failed.length > 0) {
+      logger.warn(`${failed.length} file(s) did not compile and will not run in the published app:`);
+      for (const f of failed) {
+        console.log(`    ${colors.red}✖ ${f.path}${colors.reset} ${colors.darkGray}${f.message.split("\n")[0]}${colors.reset}`);
+      }
+    }
     if (res.mode !== "merge") {
       logger.warn("This server does not support merge saves: it replaced every file with the ones just uploaded.");
     }
@@ -239,22 +274,7 @@ export async function saveCommand(options: SaveOptions = {}) {
     }
 
     // Step 3: Track what the server now holds, so the next save can detect deletions and conflicts
-    if (localConfig) {
-      const deletedSet = new Set(deleted);
-      const tracked = new Map<string, LocalViewConfig["files"][number]>();
-      for (const f of localConfig.files || []) {
-        if (!deletedSet.has(f.path)) tracked.set(f.path, f);
-      }
-      for (const f of files) {
-        tracked.set(f.path, { path: f.path, size: f.size });
-      }
-      saveLocalViewConfig(targetDir, {
-        ...localConfig,
-        files: [...tracked.values()].sort((a, b) => a.path.localeCompare(b.path)),
-        remoteUpdatedAt: res.updated_at ?? localConfig.remoteUpdatedAt,
-        lastSyncedAt: new Date().toISOString(),
-      });
-    }
+    if (localConfig) recordSave(targetDir, localConfig, files, deleted, res.updated_at);
 
     // Step 4: Display Summary
     logger.card("CLOUD SAVE SUMMARY", [

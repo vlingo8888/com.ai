@@ -151,7 +151,7 @@ export class NataApiClient {
 
   async saveViewRawFiles(
     viewId: number | string,
-    files: Array<{ path: string; content: string }>,
+    files: Array<{ path: string; content: string; es5?: string }>,
     options: SaveViewOptions = {}
   ): Promise<SaveViewResponse> {
     const rawFilesUrl = `${this.apiUrl}/api/views/${viewId}/raw_files`;
