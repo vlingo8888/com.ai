@@ -43,9 +43,10 @@ interface Check {
   api?: { method?: string; body?: unknown; status: number; json?: unknown; text?: string; headers?: Record<string, string>; requestHeaders?: Record<string, string> };
   /**
    * Edit a project file after the steps above (put such checks last: the edit stays): the page must
-   * show `expectText` without reloading, and still show `keepText` (state from before the edit)
+   * show `expectText` without reloading, and still show `keepText` (state from before the edit).
+   * `expectStyle`: a computed style the edit must bring (a class the stylesheet did not have yet)
    */
-  edit?: { file: string; from: string; to: string; expectText: string; keepText?: string };
+  edit?: { file: string; from: string; to: string; expectText: string; keepText?: string; expectStyle?: { selector: string; property: string; equals: string } };
 }
 
 type Outcome = "PASS" | "FAIL" | "XFAIL" | "XPASS";
@@ -179,6 +180,13 @@ async function runCheck(server: DevServer, page: Page, check: Check): Promise<st
     if (!(await waitForText(page, expectText))) return `after editing ${file}, text not visible: ${JSON.stringify(expectText)}`;
     if ((await page.evaluate<number>("window.__compatMarker")) !== marker) return `editing ${file} reloaded the page instead of updating it`;
     if (keepText && !(await waitForText(page, keepText, 500))) return `editing ${file} lost component state (${JSON.stringify(keepText)} is gone)`;
+    if (check.edit.expectStyle) {
+      const { selector, property, equals } = check.edit.expectStyle;
+      const read = `(() => { const el = document.querySelector(${JSON.stringify(selector)}); return el ? getComputedStyle(el).getPropertyValue(${JSON.stringify(property)}) : null; })()`;
+      let value: string | null = null;
+      for (let i = 0; i < 100 && (value = await page.evaluate<string | null>(read)) !== equals; i++) await sleep(50);
+      if (value !== equals) return `after editing ${file}, ${selector} ${property} = ${JSON.stringify(value)}, expected ${JSON.stringify(equals)}`;
+    }
   }
   return null;
 }

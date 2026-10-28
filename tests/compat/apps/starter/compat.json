@@ -4,6 +4,17 @@
     { "name": "Tailwind is compiled on the server", "path": "/", "computedStyle": { "selector": "a[href='/about']", "property": "background-color", "equals": "rgb(0, 0, 0)" } },
     { "name": "next/image renders an img", "path": "/", "selector": "img[alt='Next.js logo']" },
     { "name": "Link navigates client-side", "path": "/", "navigate": { "click": "a[href='/about']", "expectText": "About page", "expectPath": "/about" } },
-    { "name": "nested page metadata", "path": "/about", "status": 200, "ssr": ["About page"], "title": "About" }
+    { "name": "nested page metadata", "path": "/about", "status": 200, "ssr": ["About page"], "title": "About" },
+    {
+      "name": "a Tailwind class new to the project styles the page right after the edit",
+      "path": "/",
+      "edit": {
+        "file": "app/page.tsx",
+        "from": "<li>Save and see your changes instantly.</li>",
+        "to": "<li id=\"restyled\" className=\"bg-[#123456]\">Restyled without a reload.</li>",
+        "expectText": "Restyled without a reload.",
+        "expectStyle": { "selector": "#restyled", "property": "background-color", "equals": "rgb(18, 52, 86)" }
+      }
+    }
   ]
 }
