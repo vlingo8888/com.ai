@@ -35,6 +35,7 @@ import {
   realpathSync,
   renameSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from "fs";
@@ -376,6 +377,8 @@ export interface ProjectState {
   entries: string[];
   /** Names linked in `.nata/modules/node_modules` */
   links: string[];
+  /** `packageStamp` when the links were made: unchanged means nothing to check again */
+  stamp?: string;
 }
 
 function stateFile(projectDir: string): string {
@@ -397,9 +400,36 @@ function projectsDir(): string {
 /** One file per project, so concurrent installs never overwrite each other's registration */
 function register(projectDir: string) {
   const root = realpathSync(projectDir);
-  mkdirSync(projectsDir(), { recursive: true });
   const file = join(projectsDir(), `${createHash("sha256").update(root).digest("hex").slice(0, 16)}.json`);
+  if (existsSync(file)) return;
+  mkdirSync(projectsDir(), { recursive: true });
   writeFileSync(file, JSON.stringify({ root, updated: new Date().toISOString() }));
+}
+
+/** Size and modification time of package.json and bun.lock: what an install depends on */
+function packageStamp(projectDir: string): string | null {
+  try {
+    return ["package.json", "bun.lock"]
+      .map((name) => {
+        const stat = statSync(join(projectDir, name));
+        return `${stat.size}:${stat.mtimeMs}`;
+      })
+      .join("/");
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Whether the project's links are current without reading the lockfile: package.json and bun.lock are
+ * as they were at the last install and the linked packages are still there (a link into a removed
+ * store entry is dangling)
+ */
+export function linksCurrent(projectDir: string): boolean {
+  const state = readProjectState(projectDir);
+  if (!state || state.format !== STORE_FORMAT || !state.stamp || state.stamp !== packageStamp(projectDir)) return false;
+  const farm = farmDir(projectDir);
+  return isLinkTo(join(projectDir, "node_modules"), farm) && state.links.every((name) => existsSync(join(farm, name)));
 }
 
 /** Projects registered with the store; unregisters those that no longer use it */
@@ -455,13 +485,23 @@ export async function installProject(projectDir: string, bun: string, progress: 
   if (!existsSync(join(projectDir, "package.json"))) {
     return { upToDate: true, packages: 0, downloaded: 0, created: 0, skippedScripts: [], ms: 0 };
   }
-  if (!lockfileCurrent(projectDir)) progress("Resolving package versions (bun install --lockfile-only)...");
-  await ensureLockfile(projectDir, bun);
+  if (linksCurrent(projectDir)) {
+    register(projectDir);
+    return { upToDate: true, packages: readProjectState(projectDir)!.entries.length, downloaded: 0, created: 0, skippedScripts: [], ms: performance.now() - started };
+  }
+  if (!lockfileCurrent(projectDir)) {
+    progress("Resolving package versions (bun install --lockfile-only)...");
+    await ensureLockfile(projectDir, bun);
+  }
   const text = readFileSync(join(projectDir, "bun.lock"), "utf-8");
   const hash = lockHash(text);
   if (upToDate(projectDir, hash)) {
+    const state = readProjectState(projectDir)!;
+    // Same packages, only the files were touched: remember them so the next start skips the check
+    const stamp = packageStamp(projectDir) ?? undefined;
+    if (state.stamp !== stamp) writeFileSync(stateFile(projectDir), JSON.stringify({ ...state, stamp }, null, 2));
     register(projectDir);
-    return { upToDate: true, packages: readProjectState(projectDir)!.entries.length, downloaded: 0, created: 0, skippedScripts: [], ms: performance.now() - started };
+    return { upToDate: true, packages: state.entries.length, downloaded: 0, created: 0, skippedScripts: [], ms: performance.now() - started };
   }
 
   const lock = parseLockfile(text);
@@ -518,7 +558,13 @@ export async function installProject(projectDir: string, bun: string, progress: 
   // The project's `node_modules` is one link to them (see the top of this file)
   linkNodeModules(projectDir);
 
-  const state: ProjectState = { format: STORE_FORMAT, lockHash: hash, entries: [...new Set(graph.entries.values())].sort(), links: links.sort() };
+  const state: ProjectState = {
+    format: STORE_FORMAT,
+    lockHash: hash,
+    entries: [...new Set(graph.entries.values())].sort(),
+    links: links.sort(),
+    stamp: packageStamp(projectDir) ?? undefined,
+  };
   writeFileSync(stateFile(projectDir), JSON.stringify(state, null, 2));
   register(projectDir);
   return { upToDate: false, packages: state.entries.length, downloaded, created, skippedScripts: [...new Set(skippedScripts)].sort(), ms: performance.now() - started };

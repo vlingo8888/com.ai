@@ -4,7 +4,6 @@ import { existsSync, readFileSync, readdirSync, writeFileSync, mkdirSync } from 
 import { join, relative, resolve } from "path";
 import { createConnection, createServer } from "net";
 import { logger, colors } from "../core/logger";
-import { startTunnelBackground, superviseTunnel, printTunnelQrCode } from "./tunnel";
 import { exeName, resolvePrebuiltCompiler, compilerPackageName, engineEnv } from "../core/binaries";
 import packageJson from "../../package.json";
 
@@ -86,12 +85,50 @@ export function isZaloMiniAppProject(projectDir: string): boolean {
   return false;
 }
 
-async function promptTargetSelection(projectDir: string): Promise<"zalo" | "web"> {
-  const isZalo = isZaloMiniAppProject(projectDir);
-  if (!process.stdin.isTTY) {
-    return isZalo ? "zalo" : "web";
-  }
+type DevTarget = "web" | "zalo";
 
+/** The target chosen for this project the last time `com dev` asked or got `--target` (`.nata/dev.json`) */
+export function savedTarget(projectDir: string): DevTarget | null {
+  try {
+    const { target } = JSON.parse(readFileSync(join(projectDir, ".nata/dev.json"), "utf-8"));
+    return target === "web" || target === "zalo" ? target : null;
+  } catch {
+    return null;
+  }
+}
+
+function saveTarget(projectDir: string, target: DevTarget) {
+  if (savedTarget(projectDir) === target) return;
+  try {
+    mkdirSync(join(projectDir, ".nata"), { recursive: true });
+    writeFileSync(join(projectDir, ".nata/dev.json"), JSON.stringify({ target }, null, 2) + "\n");
+  } catch {}
+}
+
+/**
+ * `--target`, else the choice remembered for this project, else detected: a web project starts right
+ * away, a Zalo Mini App project is asked once (the answer is remembered)
+ */
+export async function resolveTarget(
+  projectDir: string,
+  option?: DevTarget,
+  ask: ((projectDir: string) => Promise<DevTarget>) | null = process.stdin.isTTY ? promptTargetSelection : null
+): Promise<DevTarget> {
+  if (option) {
+    saveTarget(projectDir, option);
+    return option;
+  }
+  const saved = savedTarget(projectDir);
+  if (saved) return saved;
+  if (!isZaloMiniAppProject(projectDir)) return "web";
+  if (!ask) return "zalo";
+  const target = await ask(projectDir);
+  saveTarget(projectDir, target);
+  return target;
+}
+
+async function promptTargetSelection(projectDir: string): Promise<DevTarget> {
+  const isZalo = isZaloMiniAppProject(projectDir);
   const defaultChoice = isZalo ? "2" : "1";
 
   const readline = await import("readline");
@@ -266,7 +303,11 @@ function commentOutDatabaseUrlInEnv(envFilePath: string) {
   } catch {}
 }
 
-import { getLocalNetworkIp, generateZaloDeepLink, printZaloDevQrCode, resolveOrPromptAppId, setupAdbReverse, ensureHrConfigFile } from "../zalominiapp/dev";
+import { getLocalNetworkIp } from "../zalominiapp/dev/qr";
+
+// Only loaded for Zalo projects and tunnels: a plain web `com dev` does not parse them
+const zaloDev = () => import("../zalominiapp/dev");
+const tunnels = () => import("./tunnel");
 
 export { missingDependencies } from "../store/ensure";
 
@@ -337,20 +378,12 @@ export async function devCommand(options: DevOptions = {}) {
     } catch {}
   }
 
-  const requestedPort = Number(options.port || process.env.PORT || 3000);
-  const port = await findAvailablePort(requestedPort);
-  if (port !== requestedPort) {
-    logger.warn(`Port ${requestedPort} is in use, automatically switched to port ${port}`);
-  }
-
-  // Target selection: CLI option -> Interactive Prompt -> default "web"
-  let target: "web" | "zalo" = options.target || "web";
-  if (!options.target && !comxBuild) {
-    target = await promptTargetSelection(projectDir);
-  }
+  // Target selection: CLI option -> remembered choice -> detected (asked once for Zalo projects)
+  const target: DevTarget = comxBuild ? options.target || "web" : await resolveTarget(projectDir, options.target);
 
   let zaloAppId: string | null = null;
   if (target === "zalo") {
+    const { resolveOrPromptAppId, ensureHrConfigFile } = await zaloDev();
     zaloAppId = await resolveOrPromptAppId(projectDir);
     ensureHrConfigFile(projectDir);
   }
@@ -393,10 +426,18 @@ export async function devCommand(options: DevOptions = {}) {
     }
   }
 
-  // The shared store when the project has no node_modules (src/store), else bun install
-  await ensurePackages(projectDir);
-
-  let dbStatus = await detectDatabaseStatus(projectDir);
+  // Independent of each other: a free port, the packages (the shared store when the project has no
+  // node_modules, else bun install) and the database probe
+  const requestedPort = Number(options.port || process.env.PORT || 3000);
+  const [port, , detectedDb] = await Promise.all([
+    findAvailablePort(requestedPort),
+    ensurePackages(projectDir),
+    detectDatabaseStatus(projectDir),
+  ]);
+  if (port !== requestedPort) {
+    logger.warn(`Port ${requestedPort} is in use, automatically switched to port ${port}`);
+  }
+  let dbStatus = detectedDb;
 
   if (dbStatus.isConfigured && !dbStatus.isLive) {
     const shouldSwitch = await promptSwitchToPglite(dbStatus.target || "PostgreSQL");
@@ -448,6 +489,7 @@ export async function devCommand(options: DevOptions = {}) {
   let backendTunnelUrl: string | null = null;
 
   if (isTunnel) {
+    const { startTunnelBackground, superviseTunnel } = await tunnels();
     if (target === "zalo") {
       // Both tunnels connect at the same time: 1. the Zalo Mini App frontend tunnel via 123c (so the
       // Zalo mobile webview can load the app), 2. the backend tunnel via tunnel-rs for API / RPC calls.
@@ -501,6 +543,7 @@ export async function devCommand(options: DevOptions = {}) {
   if (target === "zalo" && zaloAppId) {
     // Zalo opens via 123c tunnel
     const clientEndpoint = zaloTunnelUrl || networkUrl;
+    const { generateZaloDeepLink, setupAdbReverse, printZaloDevQrCode } = await zaloDev();
     const deepLinkUrl = generateZaloDeepLink(zaloAppId, clientEndpoint, port);
     if (!zaloTunnelUrl) {
       try {
@@ -509,7 +552,7 @@ export async function devCommand(options: DevOptions = {}) {
     }
     printZaloDevQrCode(deepLinkUrl, zaloAppId, clientEndpoint);
   } else if (backendTunnelUrl) {
-    printTunnelQrCode(backendTunnelUrl);
+    (await tunnels()).printTunnelQrCode(backendTunnelUrl);
   }
 
   // The engine prints ` ✓ Ready in …` once it is listening, measured from COM_START_TIME
@@ -522,6 +565,9 @@ export async function devCommand(options: DevOptions = {}) {
     ...engineEnv(projectDir),
     COM_MANAGED: "1",
     COM_START_TIME: String(Math.round(performance.timeOrigin)),
+    // mimalloc (the engine's allocator, and Bun's for the worker) keeps freed memory for later by
+    // default: a dev server is idle most of the time, so give it back to the system right away
+    MIMALLOC_PURGE_DELAY: process.env.MIMALLOC_PURGE_DELAY ?? "0",
     COM_BACKEND_URL: effectiveBackendUrl,
     ...(options.eruda ? { COM_ERUDA: "1" } : {}),
     ...(options.start && options.start.startsWith("/") ? { COM_ZALO_START: options.start } : {}),

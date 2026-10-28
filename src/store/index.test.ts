@@ -6,7 +6,7 @@ import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readlinkSync, realpathSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
-import { farmDir, gc, installProject, listEntries, packagesDir, readProjectState, usesStore, why } from "./index";
+import { farmDir, gc, installProject, linksCurrent, listEntries, packagesDir, readProjectState, usesStore, why } from "./index";
 
 const saved = { home: process.env.COM_HOME, cache: process.env.BUN_INSTALL_CACHE_DIR, store: process.env.COM_STORE };
 let base: string;
@@ -99,6 +99,23 @@ describe("shared package store", () => {
     expect(readProjectState(dir)!.entries).toEqual(readProjectState(join(base, "one"))!.entries);
     const again = await installProject(dir, "bun-is-not-needed");
     expect(again.upToDate).toBe(true);
+  });
+
+  it("trusts the links while package.json and bun.lock are untouched, and checks again once they change", async () => {
+    const dir = project("stamp");
+    await installProject(dir, "bun-is-not-needed");
+    expect(linksCurrent(dir)).toBe(true);
+    // An edit to package.json (even one that changes nothing) means the lockfile must be compared again
+    writeFileSync(join(dir, "package.json"), JSON.stringify({ name: "stamp", dependencies: { c: "^1.0.0", a: "^1.0.0" } }));
+    expect(linksCurrent(dir)).toBe(false);
+    expect((await installProject(dir, "bun-is-not-needed")).upToDate).toBe(true);
+    expect(linksCurrent(dir)).toBe(true);
+    // A removed link (a package deleted from the store) is noticed without the lockfile
+    rmSync(join(farmDir(dir), "a"), { recursive: true, force: true });
+    expect(linksCurrent(dir)).toBe(false);
+    expect((await installProject(dir, "bun-is-not-needed")).upToDate).toBe(false);
+    expect(require(join(farmDir(dir), "a"))).toBe(42);
+    rmSync(dir, { recursive: true, force: true });
   });
 
   it("removes the temporary folders of installs whose process is gone, keeping running ones'", async () => {

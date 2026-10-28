@@ -6,6 +6,8 @@
  * The worker installs `serialImport()` as `globalThis.__nata_import` for the runtimes.
  */
 const imported = new Map<string, Promise<unknown>>();
+/** Module without `?v=` → the version imported last: an edit makes the older version garbage */
+const latest = new Map<string, string>();
 let importing: Promise<unknown> = Promise.resolve();
 
 /** How long a first import waits for the one before it: a module whose evaluation waits on another
@@ -18,6 +20,11 @@ export function serialImport(specifier: string): Promise<any> {
   const turn = Promise.race([importing, new Promise((resolve) => setTimeout(resolve, SERIAL_IMPORT_WAIT_MS))]);
   const loading = turn.then(() => import(specifier));
   imported.set(specifier, loading);
+  // Holding every version's namespace would keep all of them alive in a long `com dev` session
+  const base = specifier.replace(/\?v=\d+$/, "");
+  const previous = latest.get(base);
+  if (previous !== undefined && previous !== specifier) imported.delete(previous);
+  latest.set(base, specifier);
   importing = loading.catch(() => {});
   // A failed import is attempted again by the next request
   loading.catch(() => imported.delete(specifier));

@@ -417,6 +417,14 @@ async function runCommand(cmd: string, input: any, body: Uint8Array): Promise<Ha
       const { renderRoute } = await import(join(nataDir, "rsc_render.ts"));
       return await renderRoute(input);
     }
+    case "warm": {
+      // Sent once the worker is up (rsc::prewarm): React for both layers and the render runtime load
+      // now, not on the first page request
+      await import(join(nataDir, "rsc_render.ts"));
+      await import(input.runtime);
+      await import(input.ssrRuntime);
+      return { output: true };
+    }
     case "static_params": {
       const rsc = await import(input.runtime);
       return { output: await rsc.staticParams(input.specifiers) };
@@ -680,26 +688,51 @@ process.on("unhandledRejection", (err) => {
 
 sendFrame(KIND_READY, 0, { pid: process.pid });
 
-let buffer = new Uint8Array(0);
+// Chunks are kept as they arrive and joined only once a whole frame is there: copying everything
+// received so far for each chunk made a multi-megabyte reply (React's sources) quadratic
+let chunks: Uint8Array[] = [];
+let buffered = 0;
+let frameLength = -1;
+function take(bytes: number): Uint8Array {
+  const out = chunks.length === 1 && chunks[0].length === bytes ? chunks[0] : new Uint8Array(bytes);
+  if (out !== chunks[0]) {
+    let at = 0;
+    while (at < bytes) {
+      const chunk = chunks[0];
+      const n = Math.min(chunk.length, bytes - at);
+      out.set(chunk.subarray(0, n), at);
+      at += n;
+      if (n === chunk.length) chunks.shift();
+      else chunks[0] = chunk.subarray(n);
+    }
+  } else {
+    chunks.shift();
+  }
+  buffered -= bytes;
+  return out;
+}
 const reader = Bun.stdin.stream().getReader();
 while (true) {
   const { value, done } = await reader.read();
   if (done) break;
-  const merged = new Uint8Array(buffer.length + value.length);
-  merged.set(buffer);
-  merged.set(value, buffer.length);
-  buffer = merged;
+  chunks.push(value);
+  buffered += value.length;
 
-  while (buffer.length >= 4) {
-    const view = new DataView(buffer.buffer, buffer.byteOffset, buffer.byteLength);
-    const length = view.getUint32(0, true);
-    if (buffer.length < 4 + length) break;
-    const kind = view.getUint8(4);
-    const id = view.getUint32(5, true);
-    const metaLength = view.getUint32(9, true);
-    const meta = JSON.parse(decoder.decode(buffer.subarray(13, 13 + metaLength)));
-    const body = buffer.slice(13 + metaLength, 4 + length);
-    buffer = buffer.slice(4 + length);
+  while (true) {
+    if (frameLength < 0) {
+      if (buffered < 4) break;
+      const head = take(4);
+      frameLength = new DataView(head.buffer, head.byteOffset, 4).getUint32(0, true);
+    }
+    if (buffered < frameLength) break;
+    const frame = take(frameLength);
+    frameLength = -1;
+    const view = new DataView(frame.buffer, frame.byteOffset, frame.byteLength);
+    const kind = view.getUint8(0);
+    const id = view.getUint32(1, true);
+    const metaLength = view.getUint32(5, true);
+    const meta = JSON.parse(decoder.decode(frame.subarray(9, 9 + metaLength)));
+    const body = frame.subarray(9 + metaLength);
 
     if (kind === KIND_SHUTDOWN) realExit(0);
     if (kind === KIND_REQUEST) handleRequest(id, meta, body);

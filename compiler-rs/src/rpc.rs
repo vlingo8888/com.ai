@@ -659,7 +659,7 @@ export default {
   auth,
 };
 "#;
-        let _ = std::fs::write(nata_dir.join("core.ts"), core_ts);
+        crate::next_shims::write_if_changed(nata_dir.join("core.ts"), core_ts);
 
         // A project that installs the real `next` (or has its own `core/`) also runs with `next dev`:
         // nothing outside `.nata/` is written for it, the resolver aliases reach the framework modules
@@ -673,7 +673,7 @@ export default {
         }
 
         // next-intl/server: compiler-rs/src/next/intl-server.ts
-        let _ = std::fs::write(nata_dir.join("next-intl-server.ts"), include_str!("next/intl-server.ts"));
+        crate::next_shims::write_if_changed(nata_dir.join("next-intl-server.ts"), include_str!("next/intl-server.ts"));
 
         // 4. Ensure node_modules/core has canonical NATA package files (overriding any broken ancient core package)
         let packages = crate::store::packages_dir(root);
@@ -681,11 +681,11 @@ export default {
         if !own_core && !crate::store::is_shared(&packages.join("core")) {
             let nm_core = packages.join("core");
             let _ = std::fs::create_dir_all(&nm_core);
-            let _ = std::fs::write(
+            crate::next_shims::write_if_changed(
                 nm_core.join("package.json"),
                 format!(r#"{{"name":"core","version":"1.0.0","main":"{nata_rel}/core.ts","module":"{nata_rel}/core.ts","types":"{nata_rel}/core.ts"}}"#),
             );
-            let _ = std::fs::write(nm_core.join("index.js"), format!(r#"module.exports = require("{nata_rel}/core.ts");"#));
+            crate::next_shims::write_if_changed(nm_core.join("index.js"), format!(r#"module.exports = require("{nata_rel}/core.ts");"#));
         }
 
         // 5. The stub `next` package (headers, server, navigation, font mocks): only when the project
@@ -767,7 +767,7 @@ export default {
         // Not for the store's next-intl (shared by every project): the resolvers alias `next-intl/server`
         let nm_next_intl = crate::store::packages_dir(root).join("next-intl");
         if nm_next_intl.exists() && !real_next && !crate::store::is_shared(&nm_next_intl) {
-            let _ = std::fs::write(
+            crate::next_shims::write_if_changed(
                 nm_next_intl.join("server.js"),
                 format!(r#"module.exports = require("{}/next-intl-server.ts");"#, crate::store::nata_from_package(root)),
             );
@@ -997,15 +997,15 @@ fn write_stub_next_package(root: &Path) {
         return;
     }
     let _ = std::fs::create_dir_all(&nm_next);
-    let _ = std::fs::write(
+    crate::next_shims::write_if_changed(
         nm_next.join("package.json"),
         r#"{"name":"next","version":"14.2.5","main":"index.js","types":"index.d.ts"}"#,
     );
-    let _ = std::fs::write(
+    crate::next_shims::write_if_changed(
         nm_next.join("index.js"),
         r#"module.exports = {};"#,
     );
-    let _ = std::fs::write(
+    crate::next_shims::write_if_changed(
         nm_next.join("index.d.ts"),
         r#"export interface Metadata {
   title?: string | { default?: string; template?: string; absolute?: string };
@@ -1113,7 +1113,7 @@ function Link({ href, children, onClick, onMouseEnter, target, replace, scroll, 
 module.exports = Link;
 module.exports.default = Link;
 "#;
-    let _ = std::fs::write(nm_next.join("link.js"), nm_next_link);
+    crate::next_shims::write_if_changed(nm_next.join("link.js"), nm_next_link);
 
 
     let nm_next_head = r#"function Head() {
@@ -1123,7 +1123,7 @@ module.exports.default = Link;
 module.exports = Head;
 module.exports.default = Head;
 "#;
-    let _ = std::fs::write(nm_next.join("head.js"), nm_next_head);
+    crate::next_shims::write_if_changed(nm_next.join("head.js"), nm_next_head);
 
     let nm_next_router = r#"exports.useRouter = function() {
   const loc = globalThis.__NATA_LOCATION__ || { pathname: '/', search: '' };
@@ -1143,7 +1143,7 @@ events: { on: noop, off: noop, emit: noop }
 };
 exports.default = { useRouter: exports.useRouter };
 "#;
-    let _ = std::fs::write(nm_next.join("router.js"), nm_next_router);
+    crate::next_shims::write_if_changed(nm_next.join("router.js"), nm_next_router);
 
 
     let nm_next_font_google = nm_next.join("font").join("google");
@@ -1162,11 +1162,11 @@ return createFont(String(prop));
   }
 });
 "#;
-    let _ = std::fs::write(nm_next_font_google.join("index.js"), nm_font_code);
+    crate::next_shims::write_if_changed(nm_next_font_google.join("index.js"), nm_font_code);
 
     let nm_next_font_local = nm_next.join("font").join("local");
     let _ = std::fs::create_dir_all(&nm_next_font_local);
-    let _ = std::fs::write(nm_next_font_local.join("index.js"), nm_font_code);
+    crate::next_shims::write_if_changed(nm_next_font_local.join("index.js"), nm_font_code);
 }
 
 pub fn format_module_path(clean: &str) -> String {

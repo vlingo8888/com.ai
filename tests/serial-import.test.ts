@@ -40,4 +40,14 @@ describe("worker: serialImport", () => {
     // Bun caches the failed resolution of a specifier; a new version is a new specifier
     expect((await serialImport(missing + "?v=2")).ok).toBe(true);
   });
+
+  it("forgets an older version once a newer one is imported", async () => {
+    const v1 = join(dir, "b.ts") + "?v=5";
+    const first = serialImport(v1);
+    await first;
+    expect(serialImport(v1)).toBe(first);
+    await serialImport(join(dir, "b.ts") + "?v=6");
+    // Not the cached promise any more (a new import() of the same specifier, served by Bun's registry)
+    expect(serialImport(v1)).not.toBe(first);
+  });
 });

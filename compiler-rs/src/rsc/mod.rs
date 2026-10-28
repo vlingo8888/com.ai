@@ -252,6 +252,26 @@ pub fn images_client_config(root: &Path) -> Value {
     })
 }
 
+/// `<link rel="modulepreload">` for the modules `/_nata/router.js` imports and theirs (URLs exactly as
+/// the import map and the relative imports resolve them, or the browser fetches them twice)
+fn dev_preload_tags() -> String {
+    let mut urls = vec![
+        "/_nata/deps/react",
+        "/_nata/deps/react/jsx-dev-runtime",
+        "/_nata/deps/react-dom",
+        "/_nata/deps/react-dom/client",
+        "/_nata/deps/scheduler",
+        "/_nata/deps/react-server-dom-webpack/client.browser",
+        "/_nata/rsc/boundaries.js",
+        "/_nata/overlay.js",
+        "/_nata/debug.js",
+    ];
+    if crate::module_graph::refresh_enabled() {
+        urls.extend(["/_nata/refresh.js", "/_nata/deps/react-refresh/runtime"]);
+    }
+    urls.iter().map(|url| format!("<link rel=\"modulepreload\" href=\"{url}\">")).collect()
+}
+
 pub fn head_start(root: &Path, stylesheet_tags: &str, target: &str) -> String {
     let build = crate::build::manifest::current();
     // Production build: bundles instead of the module URLs of development (no import map)
@@ -259,7 +279,10 @@ pub fn head_start(root: &Path, stylesheet_tags: &str, target: &str) -> String {
         Some(manifest) => crate::build::manifest::head_globals(manifest),
         None => {
             let import_map = serde_json::to_string(&crate::bundler::ClientTransformer::import_map("")).unwrap_or_else(|_| "{}".into());
-            format!("<script type=\"importmap\">{import_map}</script><script>{WEBPACK_GLOBALS}</script>")
+            // The router's imports, fetched alongside it instead of one level after another (the
+            // Zalo container loads them from the backend instead)
+            let preload = if target == "zalo" { String::new() } else { dev_preload_tags() };
+            format!("<script type=\"importmap\">{import_map}</script>{preload}<script>{WEBPACK_GLOBALS}</script>")
         }
     };
     // Links prefetch in production, like Next.js (in development only when asked)
@@ -284,14 +307,27 @@ pub fn prewarm(root: &Path) {
     if !crate::module_graph::rsc_enabled() {
         return;
     }
-    let root = root.to_path_buf();
+    let root = crate::rpc::dunce_canonicalize(root);
     tokio::spawn(async move {
-        let _ = ensure_flight_runtime(&root).await;
+        if ensure_flight_runtime(&root).await.is_ok() && crate::worker_pool::enabled() {
+            // The worker started by worker_pool::prewarm loads React (both layers) and the render
+            // runtime while nobody waits: the first page only renders
+            let (runtime, ssr_runtime) = runtime_specifiers(&root);
+            let _ = crate::worker_pool::call(&root, "warm", json!({ "runtime": runtime, "ssrRuntime": ssr_runtime }), Vec::new()).await;
+        }
         // next/og renders with Satori: install it when the app generates images
-        if project_mentions(&root, &["next/og", "ImageResponse"]) {
+        let scan_root = root.clone();
+        if tokio::task::spawn_blocking(move || project_mentions(&scan_root, &["next/og", "ImageResponse"])).await.unwrap_or(false) {
             let _ = crate::deps::ensure_dev_packages(&root, &["satori"]).await;
         }
     });
+}
+
+/// `rsc:` specifier of rsc_runtime.ts and `ssr:` specifier of rsc_ssr.ts, at their current versions
+fn runtime_specifiers(root: &Path) -> (String, String) {
+    let graph = crate::module_graph::for_root(root);
+    let graph = graph.read().unwrap_or_else(|e| e.into_inner());
+    (graph.specifier(&root.join(".nata/rsc_runtime.ts"), Layer::Rsc), graph.specifier(&root.join(".nata/rsc_ssr.ts"), Layer::Ssr))
 }
 
 /// Whether a source file of the app mentions one of `needles` (cheap scan of `app/` and `src/`)
@@ -442,11 +478,7 @@ async fn page_command(root: &Path, target: &str, stylesheet_tags: &str, req: Pag
     crate::rpc::RpcExecutor::ensure_runtime_env(&root);
     ensure_flight_runtime(&root).await?;
     let _ = crate::worker_pool::write_runtime_files(&root);
-    let (runtime, ssr_runtime) = {
-        let graph = crate::module_graph::for_root(&root);
-        let graph = graph.read().unwrap_or_else(|e| e.into_inner());
-        (graph.specifier(&root.join(".nata/rsc_runtime.ts"), Layer::Rsc), graph.specifier(&root.join(".nata/rsc_ssr.ts"), Layer::Ssr))
-    };
+    let (runtime, ssr_runtime) = runtime_specifiers(&root);
 
     let route = route_input(&root, &req);
     let (cmd, mode, action_id, content_type, body) = match req.mode {

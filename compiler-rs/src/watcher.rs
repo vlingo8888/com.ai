@@ -71,8 +71,9 @@ impl ProjectWatcher {
     const QUIET_BULK: Duration = Duration::from_millis(300);
     /// A batch with more files than this is bulk…
     const EDIT_FILES: usize = 3;
-    /// …and so is one following BURST_BATCHES batches applied within BURST_WINDOW (a tool writing files
-    /// one by one, slowly enough for each to look like a save)
+    /// …and so is one following BURST_BATCHES batches applied within BURST_WINDOW, when it brings a file
+    /// they did not have (a tool writing files one by one, slowly enough for each to look like a save).
+    /// Saving the same files again and again is still editing: it must not wait QUIET_BULK
     const BURST_BATCHES: usize = 3;
     const BURST_WINDOW: Duration = Duration::from_secs(1);
     /// …unless they keep coming: apply what we have after this
@@ -124,7 +125,7 @@ impl ProjectWatcher {
             let mut pending_files: HashSet<PathBuf> = HashSet::new();
             // When the current batch of changes started, for the ` ✓ Compiled … in Xms` line
             let mut first_change: Option<Instant> = None;
-            let mut recent_batches: std::collections::VecDeque<Instant> = std::collections::VecDeque::new();
+            let mut recent_batches: std::collections::VecDeque<(Instant, Vec<PathBuf>)> = std::collections::VecDeque::new();
 
             loop {
                 let event = if pending_files.is_empty() {
@@ -133,8 +134,8 @@ impl ProjectWatcher {
                         None => return,
                     }
                 } else {
-                    recent_batches.retain(|at| at.elapsed() < Self::BURST_WINDOW);
-                    let bulk = pending_files.len() > Self::EDIT_FILES || recent_batches.len() >= Self::BURST_BATCHES;
+                    recent_batches.retain(|(at, _)| at.elapsed() < Self::BURST_WINDOW);
+                    let bulk = Self::is_bulk(&pending_files, &recent_batches);
                     let quiet = if bulk { Self::QUIET_BULK } else { Self::QUIET_EDIT };
                     let deadline = (last_event_time + quiet).min(first_change.unwrap_or(last_event_time) + Self::MAX_WAIT);
                     match tokio::time::timeout_at(deadline.into(), rx.recv()).await {
@@ -165,15 +166,15 @@ impl ProjectWatcher {
                 }
 
                 if !pending_files.is_empty() {
-                    recent_batches.push_back(Instant::now());
                     let now_ms = SystemTime::now()
                         .duration_since(UNIX_EPOCH)
                         .unwrap_or_default()
                         .as_millis();
 
                     let files_to_notify: Vec<PathBuf> = pending_files.drain().collect();
+                    recent_batches.push_back((Instant::now(), files_to_notify.clone()));
                     // New class names, CSS edits: the next stylesheet request rescans (changed files only)
-                    crate::css_compiler::tailwind_native::invalidate(&canon_root);
+                    crate::css_compiler::tailwind_native::invalidate(&canon_root, &files_to_notify);
                     let changed_at = first_change.take().unwrap_or_else(Instant::now);
 
                     // Server code: with React Server Components the worker loads modules through the
@@ -251,6 +252,13 @@ impl ProjectWatcher {
                 }
             }
         })
+    }
+
+    /// Whether the pending changes are bulk writes (see `EDIT_FILES` and `BURST_BATCHES`), given the
+    /// batches applied within `BURST_WINDOW`
+    fn is_bulk(pending: &HashSet<PathBuf>, recent: &std::collections::VecDeque<(Instant, Vec<PathBuf>)>) -> bool {
+        pending.len() > Self::EDIT_FILES
+            || (recent.len() >= Self::BURST_BATCHES && pending.iter().any(|p| !recent.iter().any(|(_, files)| files.contains(p))))
     }
 
     /// Updates the module graph for changed files; returns whether the worker must restart
@@ -550,6 +558,22 @@ mod tests {
         assert_eq!(graph.read().unwrap().version(&file, crate::resolver::Layer::Rsc), 1);
         // Config changes still restart the worker
         assert!(ProjectWatcher::apply_server_changes(&root, &[root.join("package.json")]));
+    }
+
+    #[test]
+    fn test_saving_the_same_file_quickly_is_not_bulk() {
+        let file = |name: &str| PathBuf::from(format!("/workspace/{name}"));
+        let batch = |files: &[&str]| (Instant::now(), files.iter().map(|f| file(f)).collect::<Vec<_>>());
+        let pending = |files: &[&str]| files.iter().map(|f| file(f)).collect::<HashSet<_>>();
+        let saves: std::collections::VecDeque<_> = [batch(&["app/page.tsx"]), batch(&["app/page.tsx"]), batch(&["ui/card.tsx"])].into();
+        // Saving the files being edited again (several times a second) still applies in QUIET_EDIT
+        assert!(!ProjectWatcher::is_bulk(&pending(&["app/page.tsx"]), &saves));
+        assert!(!ProjectWatcher::is_bulk(&pending(&["ui/card.tsx", "app/page.tsx"]), &saves));
+        // A tool writing new files one by one is bulk
+        assert!(ProjectWatcher::is_bulk(&pending(&["lib/new.ts"]), &saves));
+        // So is a big batch, and a new file after only a couple of saves is not
+        assert!(ProjectWatcher::is_bulk(&pending(&["a.ts", "b.ts", "c.ts", "d.ts"]), &Default::default()));
+        assert!(!ProjectWatcher::is_bulk(&pending(&["lib/new.ts"]), &saves.iter().take(2).cloned().collect()));
     }
 
     #[test]

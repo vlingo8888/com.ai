@@ -8,7 +8,7 @@ import { join } from "path";
 import { logger, colors } from "../core/logger";
 import { resolveWorkerBun } from "../core/binaries";
 import { bunEnv } from "../core/self";
-import { installProject, lockfileCurrent, readProjectState, StoreUnsupportedError, usesStore } from "./index";
+import { installProject, linksCurrent, lockfileCurrent, readProjectState, StoreUnsupportedError, usesStore } from "./index";
 
 /** The Bun that resolves versions (`--lockfile-only`) and fills its cache */
 export function storeBun(): string {
@@ -54,7 +54,9 @@ export async function ensurePackages(projectDir: string, options: EnsureOptions 
     await bunInstall(projectDir, !!options.quiet);
     return "node_modules";
   }
-  // Nothing to say when nothing changed: the check is a hash and a few `stat`s
+  // package.json and bun.lock untouched since the last install: a few `stat`s, nothing to do
+  if (linksCurrent(projectDir)) return "store";
+  // Nothing to say when the lockfile still matches: only the links are checked
   const likelyCurrent = lockfileCurrent(projectDir) && readProjectState(projectDir) !== null;
   const spinner = options.quiet || likelyCurrent ? null : logger.spinner("Linking packages from the shared store...");
   try {

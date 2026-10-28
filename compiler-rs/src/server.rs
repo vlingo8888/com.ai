@@ -38,6 +38,21 @@ pub struct HmrVersion {
     pub last_file: Option<String>,
 }
 
+/// Arguments and results shown in the dev panel's log: a big one (a list of thousands of rows) is
+/// summarized, or the log (500 entries) and the HMR channel would hold megabytes of copies
+fn log_preview(value: &serde_json::Value) -> serde_json::Value {
+    const MAX_BYTES: usize = 8 * 1024;
+    let text = value.to_string();
+    if text.len() <= MAX_BYTES {
+        return value.clone();
+    }
+    let mut end = MAX_BYTES;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    serde_json::Value::String(format!("{}… ({} KB, truncated in the dev log)", &text[..end], text.len() / 1024))
+}
+
 /// Mirrors watcher events (not query logs) from the HMR broadcast into `HmrVersion`
 fn spawn_hmr_version_tracker(hmr_tx: &broadcast::Sender<String>, hmr_version: Arc<RwLock<HmrVersion>>) {
     let mut rx = hmr_tx.subscribe();
@@ -45,6 +60,10 @@ fn spawn_hmr_version_tracker(hmr_tx: &broadcast::Sender<String>, hmr_version: Ar
         loop {
             match rx.recv().await {
                 Ok(msg) => {
+                    // Query logs (the most frequent, and the biggest) are not parsed
+                    if msg.contains(r#""type":"query_log""#) {
+                        continue;
+                    }
                     let Ok(event) = serde_json::from_str::<serde_json::Value>(&msg) else { continue };
                     let event_type = event.get("type").and_then(|t| t.as_str()).unwrap_or("");
                     if event_type != "reload" && event_type != "RELOAD" && event_type != "css" {
@@ -83,9 +102,11 @@ impl DevServer {
         // Start native file system watcher for live HMR & CSS hot reload
         crate::watcher::ProjectWatcher::start(&root_dir, state.hmr_tx.clone(), state.router.clone());
         // Over a tunnel every byte counts (react-dom alone is ~590 KB). Only JS and CSS are compressed:
-        // streamed pages, Flight payloads and Server Action responses must keep flushing chunk by chunk
+        // streamed pages, Flight payloads and Server Action responses must keep flushing chunk by chunk.
+        // Brotli's default (quality 11) costs ~1s of CPU for react-dom; quality 4 is ~50x faster and
+        // within ~15% of its size. Requests from this machine are not compressed at all (see below)
         let app = Self::app(state, ServeMode::Dev).layer(
-            tower_http::compression::CompressionLayer::new().br(true).gzip(true).compress_when(
+            tower_http::compression::CompressionLayer::new().br(true).gzip(true).quality(tower_http::CompressionLevel::Precise(4)).compress_when(
                 tower_http::compression::predicate::SizeAbove::new(1024).and(
                     |_: axum::http::StatusCode, _: axum::http::Version, headers: &HeaderMap, _: &axum::http::Extensions| {
                         headers.get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).is_some_and(|ct| {
@@ -94,7 +115,8 @@ impl DevServer {
                     },
                 ),
             ),
-        );
+        )
+        .layer(axum::middleware::map_request(skip_local_compression));
 
         // Auto-find next available port if in use
         let mut port = initial_port;
@@ -115,9 +137,6 @@ impl DevServer {
                 Err(e) => return Err(e.into()),
             }
         };
-
-        let (db_status_title, db_status_detail) = detect_database_env(&root_dir);
-        let _ = (db_status_title, db_status_detail);
 
         if std::env::var("COM_MANAGED").is_err() {
             println!("   - Local:        http://localhost:{}\n", port);
@@ -260,44 +279,24 @@ async fn log_request(req: axum::extract::Request, next: axum::middleware::Next) 
     response
 }
 
-fn detect_database_env(root_dir: &std::path::Path) -> (String, String) {
-    let mut db_url = std::env::var("DATABASE_URL").or_else(|_| std::env::var("POSTGRES_URL")).ok();
 
-    if db_url.is_none() {
-        for env_file in &[".env.local", ".env.development", ".env"] {
-            let p = root_dir.join(env_file);
-            if p.exists() {
-                if let Ok(content) = std::fs::read_to_string(&p) {
-                    for line in content.lines() {
-                        let trimmed = line.trim();
-                        if trimmed.is_empty() || trimmed.starts_with('#') || !trimmed.contains('=') {
-                            continue;
-                        }
-                        if let Some((key, val)) = trimmed.split_once('=') {
-                            let k = key.trim();
-                            let v = val.trim().trim_matches('"').trim_matches('\'');
-                            if (k == "DATABASE_URL" || k == "POSTGRES_URL") && !v.is_empty() {
-                                db_url = Some(v.to_string());
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-            if db_url.is_some() {
-                break;
-            }
-        }
+/// A browser on this machine reads responses at memory speed: compressing them only costs CPU on every
+/// reload. Requests through a tunnel or from the LAN (another Host, or forwarded) stay compressed
+async fn skip_local_compression(mut req: axum::extract::Request) -> axum::extract::Request {
+    if is_local_request(req.headers()) {
+        req.headers_mut().remove(header::ACCEPT_ENCODING);
     }
+    req
+}
 
-    if let Some(url) = db_url {
-        // Mask password in URL
-        let re = regex::Regex::new(r"://([^:@]+):([^@]+)@").unwrap();
-        let masked = re.replace(&url, "://$1:***@").to_string();
-        ("\x1b[1;32m● PostgreSQL\x1b[0m".to_string(), format!("\x1b[90m({})\x1b[0m", masked))
-    } else {
-        ("\x1b[36m○ PGlite Embedded\x1b[0m".to_string(), "\x1b[90m(data/app.db - No DATABASE_URL in .env)\x1b[0m".to_string())
-    }
+fn is_local_request(headers: &HeaderMap) -> bool {
+    let forwarded = ["x-forwarded-for", "x-forwarded-host", "forwarded", "x-real-ip"].iter().any(|h| headers.contains_key(*h));
+    let host = headers.get(header::HOST).and_then(|h| h.to_str().ok()).unwrap_or("");
+    let name = match host.rsplit_once(':') {
+        Some((name, port)) if !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()) => name,
+        _ => host,
+    };
+    !forwarded && matches!(name, "localhost" | "127.0.0.1" | "[::1]")
 }
 
 async fn ws_hmr_handler(
@@ -424,8 +423,8 @@ async fn rpc_handler(
                 "type": "rpc",
                 "module": mod_name,
                 "action": action_name,
-                "parameters": payload.args,
-                "response": output.data,
+                "parameters": payload.args.as_ref().map(log_preview),
+                "response": log_preview(&output.data),
                 "duration_ms": rpc_duration,
                 "status": "success",
                 "error": null,
@@ -502,7 +501,7 @@ async fn rpc_handler(
                 "type": "rpc",
                 "module": mod_name.clone(),
                 "action": action_name.clone(),
-                "parameters": payload.args,
+                "parameters": payload.args.as_ref().map(log_preview),
                 "response": null,
                 "duration_ms": rpc_duration,
                 "status": "error",
@@ -1600,6 +1599,7 @@ fn build_error_module(err: &crate::swc_compiler::CompileError) -> String {
 async fn bundle_handler(
     State(state): State<AppState>,
     Path(path): Path<String>,
+    request_headers: HeaderMap,
 ) -> impl IntoResponse {
     let clean_path = path.trim_start_matches('/');
     let tsconfig = crate::resolver::TsConfig::load_from_dir(&state.root_dir);
@@ -1612,9 +1612,25 @@ async fn bundle_handler(
                 js_headers.insert(header::CACHE_CONTROL, "no-cache".parse().unwrap());
 
                 if crate::module_graph::rsc_enabled() {
-                    return match crate::module_graph::compile(&state.root_dir, &resolved.absolute_path, crate::resolver::Layer::Client, &content) {
-                        Ok(compiled) => {
-                            let js = crate::resolver::ImportResolver::soften_remote_named_imports(&compiled.code);
+                    // SWC (on a cache miss) and the cache lookup are CPU work: off the request threads
+                    let (root, file) = (state.root_dir.clone(), resolved.absolute_path.clone());
+                    let compiled = tokio::task::spawn_blocking(move || {
+                        crate::module_graph::compile(&root, &file, crate::resolver::Layer::Client, &content)
+                            .map(|compiled| crate::resolver::ImportResolver::soften_remote_named_imports(&compiled.code))
+                    })
+                    .await;
+                    let Ok(compiled) = compiled else {
+                        return (StatusCode::INTERNAL_SERVER_ERROR, "Compilation was interrupted").into_response();
+                    };
+                    return match compiled {
+                        Ok(js) => {
+                            // A reload revalidates every module: unchanged ones answer 304 without a body
+                            let etag = format!("\"{}\"", &blake3::hash(js.as_bytes()).to_hex()[..16]);
+                            let fresh = request_headers.get(header::IF_NONE_MATCH).and_then(|v| v.to_str().ok()) == Some(etag.as_str());
+                            js_headers.insert(header::ETAG, etag.parse().unwrap());
+                            if fresh {
+                                return (StatusCode::NOT_MODIFIED, js_headers).into_response();
+                            }
                             (StatusCode::OK, js_headers, js).into_response()
                         }
                         Err(err) => {
@@ -2004,7 +2020,10 @@ async fn route_request(state: AppState, req: axum::extract::Request) -> impl Int
             }
         }
 
-        let stylesheet_tags = crate::css_compiler::stylesheet::project_head_tags(&state.root_dir).await;
+        // A client navigation or HMR refresh (`RSC: 1`) only gets the payload: the document head with
+        // the inlined stylesheet is not sent, so the stylesheet is not built for it
+        let flight = crate::module_graph::rsc_enabled() && req.method() == axum::http::Method::GET && req.headers().get("rsc").is_some();
+        let stylesheet_tags: std::sync::Arc<str> = if flight { "".into() } else { crate::css_compiler::stylesheet::project_head_tags(&state.root_dir).await };
 
         if crate::module_graph::rsc_enabled() {
             // Zalo Mini Apps render on the device: the browser preview gets the Mini App document,
@@ -2212,6 +2231,24 @@ async fn route_request(state: AppState, req: axum::extract::Request) -> impl Int
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_only_requests_from_this_machine_skip_compression() {
+        let headers = |pairs: &[(&'static str, &str)]| {
+            let mut map = HeaderMap::new();
+            for (name, value) in pairs {
+                map.insert(*name, value.parse().unwrap());
+            }
+            map
+        };
+        assert!(is_local_request(&headers(&[("host", "localhost:3000")])));
+        assert!(is_local_request(&headers(&[("host", "127.0.0.1:3000")])));
+        assert!(is_local_request(&headers(&[("host", "[::1]:3000")])));
+        // Phones on the LAN, tunnels (even when they rewrite Host to localhost)
+        assert!(!is_local_request(&headers(&[("host", "192.168.1.20:3000")])));
+        assert!(!is_local_request(&headers(&[("host", "abc.loca.lt")])));
+        assert!(!is_local_request(&headers(&[("host", "localhost:3000"), ("x-forwarded-for", "1.2.3.4")])));
+    }
 
     #[test]
     fn test_zmp_bootstrap_boots_shared_runtime_client_only() {

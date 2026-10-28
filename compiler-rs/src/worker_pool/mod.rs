@@ -134,6 +134,8 @@ struct Handle {
     inflight: AtomicUsize,
     last_used: Mutex<Instant>,
     limiter: Semaphore,
+    /// Resident memory at the first idle check, once the app has loaded (React, the database)
+    baseline_rss_mb: Mutex<Option<u64>>,
 }
 
 impl Handle {
@@ -226,13 +228,36 @@ pub fn runtime_source(rel: &str, embedded: &'static str) -> std::borrow::Cow<'st
     }
 }
 
-/// Writes the worker and the runtimes it imports into `.nata/`
+/// Writes the worker and the runtimes it imports into `.nata/`. Called before each page request: after
+/// the first call of the process only checks they are still there (the sources cannot change while
+/// the engine runs, see `runtime_source`)
 pub fn write_runtime_files(root: &Path) -> std::io::Result<PathBuf> {
+    static WRITTEN: OnceLock<std::sync::Mutex<std::collections::HashSet<PathBuf>>> = OnceLock::new();
+    let written = WRITTEN.get_or_init(Default::default);
     let nata_dir = root.join(".nata");
-    std::fs::create_dir_all(&nata_dir)?;
     // What these files import (`./next/request.ts`, `core`): restored first if it was deleted since startup
     crate::rpc::RpcExecutor::ensure_runtime_env(root);
-    for (name, rel, embedded) in [
+    let known = written.lock().map(|set| set.contains(root)).unwrap_or(false);
+    if known && RUNTIME_FILES.iter().all(|(name, _, _)| nata_dir.join(name).is_file()) {
+        return Ok(nata_dir.join("worker.ts"));
+    }
+    std::fs::create_dir_all(&nata_dir)?;
+    for (name, rel, embedded) in RUNTIME_FILES {
+        let source = runtime_source(rel, embedded);
+        let path = nata_dir.join(name);
+        // Skip identical content so file watchers and Bun's cache see no change
+        if std::fs::read_to_string(&path).ok().as_deref() != Some(&*source) {
+            std::fs::write(&path, &*source)?;
+        }
+    }
+    if let Ok(mut set) = written.lock() {
+        set.insert(root.to_path_buf());
+    }
+    Ok(nata_dir.join("worker.ts"))
+}
+
+/// `.nata/` file name, path under `src/` (for `COM_RUNTIME_SRC`), embedded source
+const RUNTIME_FILES: [(&str, &str, &str); 12] = [
         ("worker.ts", "worker_pool/worker.ts", WORKER_SOURCE),
         ("explain_error.ts", "worker_pool/explain_error.ts", EXPLAIN_ERROR),
         ("serial_import.ts", "worker_pool/serial_import.ts", SERIAL_IMPORT),
@@ -245,16 +270,7 @@ pub fn write_runtime_files(root: &Path) -> std::io::Result<PathBuf> {
         ("rsc_ssr.ts", "rsc/ssr_runtime.ts", RSC_SSR),
         ("rsc_render.ts", "rsc/render.ts", RSC_RENDER),
         ("rsc_boundaries.js", "rsc/boundaries.js", RSC_BOUNDARIES),
-    ] {
-        let source = runtime_source(rel, embedded);
-        let path = nata_dir.join(name);
-        // Skip identical content so file watchers and Bun's cache see no change
-        if std::fs::read_to_string(&path).ok().as_deref() != Some(&*source) {
-            std::fs::write(&path, &*source)?;
-        }
-    }
-    Ok(nata_dir.join("worker.ts"))
-}
+];
 
 // ---------- framing ----------
 
@@ -408,6 +424,7 @@ async fn spawn(root: &Path) -> Result<Arc<Handle>, String> {
         inflight: AtomicUsize::new(0),
         last_used: Mutex::new(Instant::now()),
         limiter: Semaphore::new(concurrency),
+        baseline_rss_mb: Mutex::new(None),
     }))
 }
 
@@ -585,14 +602,21 @@ const RECYCLE_CHECK_AFTER: Duration = Duration::from_secs(30);
 const REAPER_TICK: Duration = Duration::from_secs(15);
 
 /// Stops workers that have been idle longer than `COM_WORKER_IDLE` seconds, and replaces a worker
-/// whose memory grew past `COM_WORKER_MAX_RSS_MB` (default 200, `0` = never) once it is idle: the
-/// JavaScript heap of a dev worker stays small, but native memory (JIT code, the allocator, leaks in
-/// application code, module versions left by edits) only grows. The next request starts a fresh one.
+/// whose memory grew too much once it is idle: the JavaScript heap of a dev worker stays small, but
+/// native memory (JIT code, the allocator, leaks in application code, module versions left by edits)
+/// only grows. The next request starts a fresh one.
+///
+/// "Too much" is measured from what the worker used at its first idle check: an app with an embedded
+/// database starts well above a fixed limit, and replacing its worker after every pause only made each
+/// next request a cold start. `COM_WORKER_MAX_GROWTH_MB` (default 150, `0` = never) is the growth
+/// allowed; `COM_WORKER_MAX_RSS_MB` sets a fixed limit instead (`0` = never).
 fn ensure_idle_reaper() {
     static STARTED: OnceLock<()> = OnceLock::new();
     let idle_secs = env_number("COM_WORKER_IDLE", 600);
-    let max_rss_mb = env_number("COM_WORKER_MAX_RSS_MB", 200);
-    if (idle_secs == 0 && max_rss_mb == 0) || STARTED.set(()).is_err() {
+    let fixed_limit = std::env::var("COM_WORKER_MAX_RSS_MB").ok().and_then(|v| v.trim().parse::<u64>().ok());
+    let growth_mb = env_number("COM_WORKER_MAX_GROWTH_MB", 150);
+    let recycle = fixed_limit.map_or(growth_mb > 0, |mb| mb > 0);
+    if (idle_secs == 0 && !recycle) || STARTED.set(()).is_err() {
         return;
     }
     let idle = if idle_secs == 0 { Duration::MAX } else { Duration::from_secs(idle_secs) };
@@ -617,14 +641,20 @@ fn ensure_idle_reaper() {
                 // One check per idle stretch: the first tick after RECYCLE_CHECK_AFTER
                 let oversized = quiet
                     && !expired
-                    && max_rss_mb > 0
+                    && recycle
                     && idle_for >= RECYCLE_CHECK_AFTER
                     && idle_for < RECYCLE_CHECK_AFTER + REAPER_TICK
                     && match handle.child.lock().await.id() {
                         Some(pid) => rss_mb(pid).await.is_some_and(|rss| {
-                            let over = rss > max_rss_mb;
+                            let baseline = *handle.baseline_rss_mb.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert(rss);
+                            let limit = recycle_limit(fixed_limit, growth_mb, baseline);
+                            let over = rss > limit;
                             if over {
-                                crate::term::event(&format!("Restarting the server worker to free memory ({rss}MB, limit {max_rss_mb}MB: COM_WORKER_MAX_RSS_MB)"));
+                                let why = match fixed_limit {
+                                    Some(mb) => format!("limit {mb}MB: COM_WORKER_MAX_RSS_MB"),
+                                    None => format!("started at {baseline}MB, growth allowed {growth_mb}MB: COM_WORKER_MAX_GROWTH_MB"),
+                                };
+                                crate::term::event(&format!("Restarting the server worker to free memory ({rss}MB, {why})"));
                             }
                             over
                         }),
@@ -638,6 +668,17 @@ fn ensure_idle_reaper() {
             }
         }
     });
+}
+
+/// Memory above which an idle worker is replaced: the fixed limit when set, else its first measured
+/// memory plus the allowed growth
+fn recycle_limit(fixed_limit: Option<u64>, growth_mb: u64, baseline_mb: u64) -> u64 {
+    match fixed_limit {
+        Some(0) => u64::MAX,
+        Some(mb) => mb,
+        None if growth_mb == 0 => u64::MAX,
+        None => baseline_mb + growth_mb,
+    }
 }
 
 /// Resident memory of a process in MB (`ps`, available on macOS and Linux; `None` elsewhere)
@@ -680,5 +721,20 @@ pub async fn run(root: &Path, script: &str) -> Result<ScriptOutput, String> {
         }),
         Err(WorkerError::Failed(e)) => Ok(ScriptOutput { stdout: String::new(), stderr: e, success: false }),
         Err(WorkerError::Unavailable(_)) => spawn_once(root, script).await,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::recycle_limit;
+
+    #[test]
+    fn idle_workers_are_replaced_on_growth_from_their_first_measure() {
+        // A worker that starts at 230MB (React + PGlite) is not replaced for being itself
+        assert_eq!(recycle_limit(None, 150, 230), 380);
+        // A fixed limit, when set, wins; 0 turns either off
+        assert_eq!(recycle_limit(Some(200), 150, 230), 200);
+        assert_eq!(recycle_limit(Some(0), 150, 230), u64::MAX);
+        assert_eq!(recycle_limit(None, 0, 230), u64::MAX);
     }
 }

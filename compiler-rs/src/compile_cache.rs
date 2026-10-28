@@ -21,7 +21,7 @@ const TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("compiled_modu
 
 /// Identifies the engine build: rebuilding it (new transforms, new SWC) must invalidate cached output,
 /// and `CARGO_PKG_VERSION` does not change between development builds
-fn engine_fingerprint() -> &'static str {
+pub(crate) fn engine_fingerprint() -> &'static str {
     static FINGERPRINT: OnceLock<String> = OnceLock::new();
     FINGERPRINT.get_or_init(|| {
         let exe = std::env::current_exe().ok().and_then(|p| std::fs::metadata(p).ok());

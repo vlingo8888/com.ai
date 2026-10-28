@@ -55,7 +55,9 @@ const ENTRIES: [(&str, &str); 5] = [
     ("og", "og.ts"),
 ];
 
-fn write_if_changed(path: &Path, contents: &str) {
+/// Writes only when the contents differ: an unchanged file keeps its modification time
+pub fn write_if_changed(path: impl AsRef<Path>, contents: impl AsRef<str>) {
+    let (path, contents) = (path.as_ref(), contents.as_ref());
     if std::fs::read_to_string(path).ok().as_deref() != Some(contents) {
         let _ = std::fs::write(path, contents);
     }
