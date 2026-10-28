@@ -13,7 +13,7 @@
 
 import { existsSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { join, resolve } from "path";
-import { Browser, copyToTemp, findEngine, median, percentile, readJson, repoRoot, serverRssMb, sleep, startDev, timeRequests } from "../tests/compat/lib/harness";
+import { Browser, copyToTemp, findEngine, median, percentile, readJson, repoRoot, serverCpuMs, serverRssMb, sleep, startDev, timeRequests } from "../tests/compat/lib/harness";
 
 const args = process.argv.slice(2);
 const flag = (name: string) => {
@@ -52,6 +52,10 @@ const LABELS: Record<string, string> = {
   clientJsGzipKb: "client JS gzip (prod, no devtools)",
   hmrMs: "HMR client component",
   hmrServerMs: "HMR server component",
+  hmrRepeatMs: "HMR after repeated saves",
+  cpuStartMs: "CPU: start + first page load",
+  cpuHmrMs: "CPU: 6 HMR saves",
+  cpuIdleMs: "CPU: 15s idle",
 };
 
 /**
@@ -108,9 +112,20 @@ try {
     const report = await page.load(server.url + pagePath, 4000);
     metrics.clientJsKb = Math.round(report.jsBytes / 1024);
     // Save → screen: a client component (Fast Refresh) and a Server Component (payload refetch)
+    metrics.cpuStartMs = serverCpuMs(server);
     if (pagePath === "/" && existsSync(join(dir, "app/counter.tsx"))) {
+      const cpu = serverCpuMs(server);
       metrics.hmrMs = await timeHmr(page, join(dir, "app/counter.tsx"), "Count: {count}", "Clicks: {count}", "Clicks: 0");
       metrics.hmrServerMs = await timeHmr(page, join(dir, "app/page.tsx"), "Save and see your changes instantly.", "Saved, and seen instantly.", "Saved, and seen instantly.");
+      // Saving the same file several times a second (tweaking a value, autosave): the last save must
+      // still show as fast as a single one
+      const counter = join(dir, "app/counter.tsx");
+      for (const label of ["Taps", "Hits", "Presses"]) {
+        writeFileSync(counter, readFileSync(counter, "utf-8").replace(/>\n\s*\w+: \{count\}/, `>\n      ${label}: {count}`));
+        await sleep(250);
+      }
+      metrics.hmrRepeatMs = await timeHmr(page, counter, "Presses: {count}", "Pushes: {count}", "Pushes: 0");
+      metrics.cpuHmrMs = serverCpuMs(server) - cpu;
     }
     page.close();
   } finally {
@@ -121,11 +136,13 @@ try {
   // collects when idle): report that as the peak, and "idle" once memory has settled
   metrics.rssPeakMb = serverRssMb(server);
   let idle = metrics.rssPeakMb;
+  const idleCpu = serverCpuMs(server);
   for (let i = 0; i < 15; i++) {
     await sleep(1000);
     idle = Math.min(idle, serverRssMb(server));
   }
   metrics.rssIdleMb = idle;
+  metrics.cpuIdleMs = serverCpuMs(server) - idleCpu;
 } finally {
   await server.stop();
   rmSync(dir, { recursive: true, force: true });

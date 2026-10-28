@@ -127,9 +127,15 @@ async function startServer(dir: string, port: number, cliArgs: string[], readyPa
   if (Number.isNaN(readyMs)) throw new Error(`com ${cliArgs[0]} did not become ready:\n${output}`);
 
   const pids = () => {
-    // The CLI, the engine and the Bun worker of this project
-    const list = Bun.spawnSync(["pgrep", "-f", dir]).stdout.toString().trim().split("\n").filter(Boolean).map(Number);
-    return [proc.pid, ...list.filter((p) => p !== proc.pid)];
+    // The CLI (or the engine that replaced it), its children (worker, dependency bundler) and any other
+    // process started for this project
+    const list = (args: string[]) => Bun.spawnSync(args).stdout.toString().trim().split("\n").filter(Boolean).map(Number);
+    const found = new Set([proc.pid, ...list(["pgrep", "-f", dir])]);
+    for (const pid of [...found]) {
+      const queue = [pid];
+      while (queue.length) for (const child of list(["pgrep", "-P", String(queue.pop())])) if (!found.has(child)) found.add(child), queue.push(child);
+    }
+    return [...found];
   };
   return {
     url,
@@ -159,6 +165,24 @@ export function serverRssMb(server: DevServer): number {
     kb += Number(out) || 0;
   }
   return Math.round(kb / 1024);
+}
+
+const cpuSeen = new WeakMap<DevServer, Map<number, number>>();
+
+/** CPU time (user + system) used so far by the processes of the server, in ms. A process that exited
+ *  since an earlier call (the dependency bundler, a reaped worker) keeps counting with its last value */
+export function serverCpuMs(server: DevServer): number {
+  const seen = cpuSeen.get(server) ?? new Map<number, number>();
+  cpuSeen.set(server, seen);
+  for (const pid of server.pids()) {
+    // `[[dd-]hh:]mm:ss[.cc]`
+    const out = Bun.spawnSync(["ps", "-o", "time=", "-p", String(pid)]).stdout.toString().trim();
+    if (!out) continue;
+    const [clock, days] = out.includes("-") ? [out.split("-")[1], Number(out.split("-")[0])] : [out, 0];
+    const seconds = clock.split(":").reduce((total, part) => total * 60 + Number(part), 0);
+    seen.set(pid, Math.max(seen.get(pid) ?? 0, (days * 86400 + seconds) * 1000));
+  }
+  return Math.round([...seen.values()].reduce((a, b) => a + b, 0));
 }
 
 export async function timeRequests(url: string, count: number, init?: RequestInit): Promise<number[]> {
