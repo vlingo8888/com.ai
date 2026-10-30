@@ -264,10 +264,12 @@ function withoutDocument(node) {
 }
 
 window.addEventListener("popstate", () => navigate(currentUrl().href, { pop: true }));
-let scrollFrame = 0;
+// Saved once scrolling stops, not every frame: browsers cap history.replaceState (Safari throws a
+// SecurityError past 100 calls in 10 seconds), and a navigation saves the position anyway
+let scrollTimer = 0;
 window.addEventListener("scroll", () => {
-  cancelAnimationFrame(scrollFrame);
-  scrollFrame = requestAnimationFrame(() => history.state && history.state.__nata && saveScroll());
+  clearTimeout(scrollTimer);
+  scrollTimer = setTimeout(() => history.state && history.state.__nata && saveScroll(), 150);
 }, { passive: true });
 
 /** The payload inlined in the document, as a stream (chunks keep arriving until the HTML is parsed) */

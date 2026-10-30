@@ -378,6 +378,25 @@ export async function bundleDependency(input: {
     // A client component inside a package is referenced by its file (`next-intl/dist/.../X.js`), which the
     // package's `exports` may not expose: that file is the entry then
     const direct = packageFile(spec, resolveDir);
+
+    // The shared bundle's name depends only on the package's exports (siblings) and on whether it is
+    // per-file, not on the probe below: a bundle another project (or an earlier session) already
+    // built is linked without running Bun.build at all
+    if (input.sharedFile) {
+      const siblings = packageEntries(spec, resolveDir, nodeEnv);
+      const perFile = direct !== null ? perFilePackage(spec, direct, resolveDir) : null;
+      const candidates = [
+        perFile ? sharedBundleFile(input.sharedFile.replace(/\.js$/, "~files.js"), siblings) : null,
+        sharedBundleFile(input.sharedFile, siblings),
+        input.sharedFile,
+      ];
+      const hit = candidates.find((file): file is string => !!file && existsSync(file));
+      if (hit) {
+        linkBundle(hit, outFile);
+        return { bytes: statSync(hit).size, shared: true };
+      }
+    }
+
     const resolved = (await resolveForBrowser(spec, probe)) ?? direct;
     const esm = resolved !== null && isEsmModule(resolved);
     const target = resolved !== null && resolved === direct ? direct : spec;
@@ -641,8 +660,57 @@ function describeError(error: any): string {
  * whose native module takes ~30ms to load) starts once instead of once per package. The process exits
  * after `idleMs` without work, so the bundlers' memory is not kept for the whole `com dev` session.
  */
-export async function serveBundler(options: { idleMs?: number } = {}) {
+export async function serveBundler(options: { idleMs?: number; concurrency?: number } = {}) {
   const idleMs = options.idleMs ?? 30_000;
+  // Bundles at a time (the rest wait their turn): each holds a bundler's memory while it runs. The
+  // browser's requests (`priority`) go before prefetches (deps.rs) in the queue.
+  const concurrency = Math.max(1, options.concurrency ?? Infinity);
+  const queue: { start: () => void; priority: boolean }[] = [];
+  let active = 0;
+  /** Gives a free slot to the next waiting bundle (a browser request first); the slot is taken here */
+  const next = () => {
+    if (active >= concurrency || !queue.length) return;
+    const i = queue.findIndex((q) => q.priority);
+    const job = i >= 0 ? queue.splice(i, 1)[0] : queue.shift()!;
+    active++;
+    job.start();
+  };
+  type Input = Parameters<typeof bundleDependency>[0] & { priority?: boolean };
+  // The same package asked twice while it bundles (by the browser and a prefetch): one bundle, both
+  // answered; the browser's request moves a queued prefetch to the front
+  const inFlight = new Map<string, { job: ReturnType<typeof bundleDependency>; waiting: { priority: boolean } | null }>();
+  const bundleOnce = (input: Input) => {
+    const { priority = false, ...rest } = input;
+    const key = JSON.stringify(rest);
+    const known = inFlight.get(key);
+    if (known) {
+      if (priority && known.waiting) known.waiting.priority = true;
+      return known.job;
+    }
+    const entry: { job: ReturnType<typeof bundleDependency>; waiting: { start: () => void; priority: boolean } | null } = {
+      job: null!,
+      waiting: null,
+    };
+    entry.job = (async () => {
+      if (active < concurrency) active++;
+      else {
+        // `next` takes the slot for it
+        await new Promise<void>((start) => {
+          entry.waiting = { start, priority };
+          queue.push(entry.waiting);
+        });
+      }
+      entry.waiting = null;
+      try {
+        return await bundleDependency(rest);
+      } finally {
+        active--;
+        next();
+      }
+    })().finally(() => inFlight.delete(key));
+    inFlight.set(key, entry);
+    return entry.job;
+  };
   // stdout carries replies only
   const write = (line: string) => process.stdout.write(line + "\n");
   console.log = console.info = console.debug = (...args: unknown[]) => console.error(...args);
@@ -661,7 +729,7 @@ export async function serveBundler(options: { idleMs?: number } = {}) {
       const line = buffered.slice(0, newline).trim();
       buffered = buffered.slice(newline + 1);
       if (!line) continue;
-      let request: { id: number; input: Parameters<typeof bundleDependency>[0] };
+      let request: { id: number; input: Input };
       try {
         request = JSON.parse(line);
       } catch {
@@ -669,7 +737,7 @@ export async function serveBundler(options: { idleMs?: number } = {}) {
       }
       running++;
       clearTimeout(idleTimer);
-      bundleDependency(request.input)
+      bundleOnce(request.input)
         .then((result) => write(JSON.stringify({ id: request.id, ok: true, result })))
         .catch((error) => write(JSON.stringify({ id: request.id, ok: false, error: describeError(error) })))
         .finally(() => {

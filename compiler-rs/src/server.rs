@@ -1,8 +1,7 @@
+#[cfg(not(target_family = "wasm"))]
+use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::{
-    extract::{
-        ws::{Message, WebSocket, WebSocketUpgrade},
-        Path, State,
-    },
+    extract::{Path, State},
     http::{header, HeaderMap, HeaderValue, StatusCode},
     response::{Html, IntoResponse},
     routing::{get, post},
@@ -10,6 +9,7 @@ use axum::{
 };
 use std::{collections::VecDeque, path::PathBuf, sync::Arc};
 use tokio::sync::{broadcast, RwLock};
+#[cfg(not(target_family = "wasm"))]
 use tower_http::compression::Predicate;
 use tower_http::cors::CorsLayer;
 
@@ -96,6 +96,7 @@ pub enum ServeMode {
 }
 
 impl DevServer {
+    #[cfg(not(target_family = "wasm"))]
     pub async fn run(root_dir: PathBuf, initial_port: u16, target: String) -> Result<(), Box<dyn std::error::Error>> {
         let state = Self::prepare(root_dir, target).await;
         let root_dir = state.root_dir.clone();
@@ -147,6 +148,17 @@ impl DevServer {
         Ok(())
     }
 
+    /// `com-compiler.wasm`: the dev app without a socket, the host hands it every request. HMR
+    /// messages go out through the returned channel instead of the `/_hmr` WebSocket
+    #[cfg(target_family = "wasm")]
+    pub async fn start_in_host(root_dir: PathBuf, target: String) -> (Router, broadcast::Sender<String>) {
+        let state = Self::prepare(root_dir, target).await;
+        crate::watcher::ProjectWatcher::start(&state.root_dir, state.hmr_tx.clone(), state.router.clone());
+        let hmr_tx = state.hmr_tx.clone();
+        crate::term::ready();
+        (Self::app(state, ServeMode::Dev), hmr_tx)
+    }
+
     /// Setup shared by every mode: runtime files, the worker, next.config, the route table
     pub async fn prepare(root_dir: PathBuf, target: String) -> AppState {
         let root_dir = crate::rpc::canonicalize(&root_dir).unwrap_or(root_dir);
@@ -161,6 +173,8 @@ impl DevServer {
         // Start the Bun worker now so the first render / Server Action does not pay its startup
         crate::worker_pool::prewarm(&crate::rpc::dunce_canonicalize(&root_dir));
         crate::rsc::prewarm(&root_dir);
+        // Bundles the pages asked for before, in the background (see deps::prewarm)
+        crate::deps::prewarm(&crate::rpc::dunce_canonicalize(&root_dir));
         {
             let root = root_dir.clone();
             tokio::spawn(async move {
@@ -212,8 +226,11 @@ impl DevServer {
             .route("/zmp.json", get(zmp_app_config_handler));
 
         if mode == ServeMode::Dev {
+            #[cfg(not(target_family = "wasm"))]
+            {
+                app = app.route("/_hmr", get(ws_hmr_handler));
+            }
             app = app
-                .route("/_hmr", get(ws_hmr_handler))
                 .route("/_nata/hmr_version", get(hmr_version_handler))
                 .route("/_nata/client.js", get(client_runtime_handler))
                 .route("/_nata/overlay.js", get(overlay_handler))
@@ -280,6 +297,7 @@ async fn log_request(req: axum::extract::Request, next: axum::middleware::Next) 
 }
 
 
+#[cfg(not(target_family = "wasm"))]
 /// A browser on this machine reads responses at memory speed: compressing them only costs CPU on every
 /// reload. Requests through a tunnel or from the LAN (another Host, or forwarded) stay compressed
 async fn skip_local_compression(mut req: axum::extract::Request) -> axum::extract::Request {
@@ -289,6 +307,7 @@ async fn skip_local_compression(mut req: axum::extract::Request) -> axum::extrac
     req
 }
 
+#[cfg(not(target_family = "wasm"))]
 fn is_local_request(headers: &HeaderMap) -> bool {
     let forwarded = ["x-forwarded-for", "x-forwarded-host", "forwarded", "x-real-ip"].iter().any(|h| headers.contains_key(*h));
     let host = headers.get(header::HOST).and_then(|h| h.to_str().ok()).unwrap_or("");
@@ -299,6 +318,7 @@ fn is_local_request(headers: &HeaderMap) -> bool {
     !forwarded && matches!(name, "localhost" | "127.0.0.1" | "[::1]")
 }
 
+#[cfg(not(target_family = "wasm"))]
 async fn ws_hmr_handler(
     ws: WebSocketUpgrade,
     State(state): State<AppState>,
@@ -306,6 +326,7 @@ async fn ws_hmr_handler(
     ws.on_upgrade(|socket| handle_hmr_socket(socket, state.hmr_tx))
 }
 
+#[cfg(not(target_family = "wasm"))]
 async fn handle_hmr_socket(mut socket: WebSocket, hmr_tx: broadcast::Sender<String>) {
     let mut rx = hmr_tx.subscribe();
     loop {
@@ -675,7 +696,7 @@ async fn favicon_handler(
     State(state): State<AppState>,
 ) -> impl IntoResponse {
     if let Some((p, mime)) = crate::metadata::MetadataEngine::find_route_asset(&state.root_dir, "icon") {
-        if let Ok(bytes) = tokio::fs::read(p).await {
+        if let Ok(bytes) = crate::platform::fs::read(p).await {
             let mut headers = HeaderMap::new();
             headers.insert(header::CONTENT_TYPE, mime.parse().unwrap());
             return (StatusCode::OK, headers, bytes).into_response();
@@ -693,7 +714,7 @@ async fn favicon_handler(
     };
 
     if let Some(p) = target {
-        if let Ok(bytes) = tokio::fs::read(p).await {
+        if let Ok(bytes) = crate::platform::fs::read(p).await {
             let mut headers = HeaderMap::new();
             headers.insert(header::CONTENT_TYPE, "image/x-icon".parse().unwrap());
             return (StatusCode::OK, headers, bytes).into_response();
@@ -735,7 +756,7 @@ async fn manifest_handler(
 
 async fn icon_handler(State(state): State<AppState>) -> impl IntoResponse {
     if let Some((path, mime)) = crate::metadata::MetadataEngine::find_route_asset(&state.root_dir, "icon") {
-        if let Ok(bytes) = tokio::fs::read(path).await {
+        if let Ok(bytes) = crate::platform::fs::read(path).await {
             let mut headers = HeaderMap::new();
             headers.insert(header::CONTENT_TYPE, mime.parse().unwrap());
             return (StatusCode::OK, headers, bytes).into_response();
@@ -746,7 +767,7 @@ async fn icon_handler(State(state): State<AppState>) -> impl IntoResponse {
 
 async fn apple_icon_handler(State(state): State<AppState>) -> impl IntoResponse {
     if let Some((path, mime)) = crate::metadata::MetadataEngine::find_route_asset(&state.root_dir, "apple-icon") {
-        if let Ok(bytes) = tokio::fs::read(path).await {
+        if let Ok(bytes) = crate::platform::fs::read(path).await {
             let mut headers = HeaderMap::new();
             headers.insert(header::CONTENT_TYPE, mime.parse().unwrap());
             return (StatusCode::OK, headers, bytes).into_response();
@@ -757,7 +778,7 @@ async fn apple_icon_handler(State(state): State<AppState>) -> impl IntoResponse 
 
 async fn og_image_handler(State(state): State<AppState>) -> impl IntoResponse {
     if let Some((path, mime)) = crate::metadata::MetadataEngine::find_route_asset(&state.root_dir, "opengraph-image") {
-        if let Ok(bytes) = tokio::fs::read(path).await {
+        if let Ok(bytes) = crate::platform::fs::read(path).await {
             let mut headers = HeaderMap::new();
             headers.insert(header::CONTENT_TYPE, mime.parse().unwrap());
             return (StatusCode::OK, headers, bytes).into_response();
@@ -768,7 +789,7 @@ async fn og_image_handler(State(state): State<AppState>) -> impl IntoResponse {
 
 async fn twitter_image_handler(State(state): State<AppState>) -> impl IntoResponse {
     if let Some((path, mime)) = crate::metadata::MetadataEngine::find_route_asset(&state.root_dir, "twitter-image") {
-        if let Ok(bytes) = tokio::fs::read(path).await {
+        if let Ok(bytes) = crate::platform::fs::read(path).await {
             let mut headers = HeaderMap::new();
             headers.insert(header::CONTENT_TYPE, mime.parse().unwrap());
             return (StatusCode::OK, headers, bytes).into_response();
@@ -786,7 +807,7 @@ async fn zmp_app_config_handler(State(state): State<AppState>) -> impl IntoRespo
     for cand in &candidates {
         let p = state.root_dir.join(cand);
         if p.exists() {
-            if let Ok(content) = tokio::fs::read_to_string(&p).await {
+            if let Ok(content) = crate::platform::fs::read_to_string(&p).await {
                 if let Ok(mut json_val) = serde_json::from_str::<serde_json::Value>(&content) {
                     // Force full screen without header and preserve bottom safe area
                     if let Some(app_obj) = json_val.get_mut("app").and_then(|v| v.as_object_mut()) {
@@ -822,13 +843,13 @@ async fn zmp_hr_config_handler(State(state): State<AppState>) -> impl IntoRespon
     // 1. Check hrr.config.json or hr.config.json on disk
     let hrr_path = state.root_dir.join("hrr.config.json");
     if hrr_path.exists() {
-        if let Ok(content) = tokio::fs::read_to_string(&hrr_path).await {
+        if let Ok(content) = crate::platform::fs::read_to_string(&hrr_path).await {
             return (StatusCode::OK, headers, content).into_response();
         }
     }
     let hr_path = state.root_dir.join("hr.config.json");
     if hr_path.exists() {
-        if let Ok(content) = tokio::fs::read_to_string(&hr_path).await {
+        if let Ok(content) = crate::platform::fs::read_to_string(&hr_path).await {
             return (StatusCode::OK, headers, content).into_response();
         }
     }
@@ -839,7 +860,7 @@ async fn zmp_hr_config_handler(State(state): State<AppState>) -> impl IntoRespon
 
     let app_config_path = state.root_dir.join("app-config.json");
     if app_config_path.exists() {
-        if let Ok(content) = tokio::fs::read_to_string(&app_config_path).await {
+        if let Ok(content) = crate::platform::fs::read_to_string(&app_config_path).await {
             if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&content) {
                 if let Some(css_arr) = parsed.get("listCSS").and_then(|v| v.as_array()) {
                     for item in css_arr {
@@ -893,7 +914,7 @@ async fn zmp_css_handler(State(state): State<AppState>) -> impl IntoResponse {
     // If assets/app.css exists on disk, serve it
     let file_path = state.root_dir.join("assets/app.css");
     if file_path.exists() {
-        if let Ok(content) = tokio::fs::read_to_string(&file_path).await {
+        if let Ok(content) = crate::platform::fs::read_to_string(&file_path).await {
             return (StatusCode::OK, headers, content).into_response();
         }
     }
@@ -912,7 +933,7 @@ async fn zmp_js_handler(State(state): State<AppState>) -> impl IntoResponse {
     for cand in &["assets/app.js", "src/app.js", "src/app.ts", "app.js"] {
         let p = state.root_dir.join(cand);
         if p.exists() {
-            if let Ok(content) = tokio::fs::read_to_string(&p).await {
+            if let Ok(content) = crate::platform::fs::read_to_string(&p).await {
                 return (StatusCode::OK, headers, content).into_response();
             }
         }
@@ -1605,7 +1626,7 @@ async fn bundle_handler(
     let tsconfig = crate::resolver::TsConfig::load_from_dir(&state.root_dir);
 
     match crate::resolver::PathResolver::resolve_file_with_config(&state.root_dir, clean_path, &tsconfig) {
-        Some(resolved) => match tokio::fs::read_to_string(&resolved.absolute_path).await {
+        Some(resolved) => match crate::platform::fs::read_to_string(&resolved.absolute_path).await {
             Ok(content) => {
                 let mut js_headers = HeaderMap::new();
                 js_headers.insert(header::CONTENT_TYPE, "application/javascript; charset=utf-8".parse().unwrap());
@@ -1614,7 +1635,7 @@ async fn bundle_handler(
                 if crate::module_graph::rsc_enabled() {
                     // SWC (on a cache miss) and the cache lookup are CPU work: off the request threads
                     let (root, file) = (state.root_dir.clone(), resolved.absolute_path.clone());
-                    let compiled = tokio::task::spawn_blocking(move || {
+                    let compiled = crate::platform::spawn_blocking(move || {
                         crate::module_graph::compile(&root, &file, crate::resolver::Layer::Client, &content)
                             .map(|compiled| crate::resolver::ImportResolver::soften_remote_named_imports(&compiled.code))
                     })
@@ -2158,7 +2179,7 @@ async fn route_request(state: AppState, req: axum::extract::Request) -> impl Int
     let asset_stem = clean_path.split('.').next().unwrap_or("");
     if asset_stem == "icon" || asset_stem == "apple-icon" || asset_stem == "opengraph-image" || asset_stem == "twitter-image" {
         if let Some((asset_path, mime)) = crate::metadata::MetadataEngine::find_route_asset(&state.root_dir, asset_stem) {
-            if let Ok(bytes) = tokio::fs::read(asset_path).await {
+            if let Ok(bytes) = crate::platform::fs::read(asset_path).await {
                 let mut headers = HeaderMap::new();
                 headers.insert(header::CONTENT_TYPE, mime.parse().unwrap());
                 return (StatusCode::OK, headers, bytes).into_response();
@@ -2169,7 +2190,7 @@ async fn route_request(state: AppState, req: axum::extract::Request) -> impl Int
     // Try serving static assets
     let static_candidate = state.root_dir.join(clean_path);
     if static_candidate.exists() && static_candidate.is_file() {
-        if let Ok(bytes) = tokio::fs::read(static_candidate).await {
+        if let Ok(bytes) = crate::platform::fs::read(static_candidate).await {
             return (StatusCode::OK, bytes).into_response();
         }
     }

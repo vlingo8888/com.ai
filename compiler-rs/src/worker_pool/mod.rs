@@ -23,7 +23,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::process::{Child, ChildStdin, ChildStdout, Command};
+use crate::platform::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::{oneshot, Semaphore};
 
 const WORKER_SOURCE: &str = include_str!("worker.ts");

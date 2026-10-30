@@ -1,0 +1,23 @@
+[package]
+name = "com-compiler-wasm"
+version = "0.1.0"
+edition = "2021"
+description = "com-compiler.wasm: the com engine (compiler-rs) as a WASI reactor for the browser"
+
+# Not part of the native build: `cargo build --release` in compiler-rs never compiles this crate.
+# Build with `bun scripts/build-wasm.ts` (wasm32-wasip1, see .cargo/config.toml).
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+path = "src/lib.rs"
+
+[dependencies]
+compiler-rs = { path = ".." }
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

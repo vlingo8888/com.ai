@@ -36,7 +36,7 @@ function printHelp() {
     ${colors.green}migrate${colors.reset}  ${colors.sky}<sql|file>${colors.reset}  Execute SQL migration and auto-sync database schema
     ${colors.green}version | -v${colors.reset}          Display system, CLI, and runtime engine versions
     ${colors.green}push | save${colors.reset}           Save local changes to the Cloud (not published; --dry-run, --force)
-    ${colors.green}publish${colors.reset}       ${colors.sky}[viewId]${colors.reset}       Publish View to Production (Publish V2, like the web editor)
+    ${colors.green}publish${colors.reset}       ${colors.sky}[viewId]${colors.reset}       Build here and publish the View (static, like the web editor)
 
   ${colors.bold}${colors.white}OPTIONS:${colors.reset}
     ${colors.yellow}--watch, -w${colors.reset}            Watch files for changes and re-run tests

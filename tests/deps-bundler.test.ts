@@ -179,6 +179,24 @@ describe.each(BUNDLERS)("deps bundler: bundleDependency (%s)", (_name, bundler) 
     expect(statSync(second).ino).toBe(statSync(sharedFile).ino);
   });
 
+  it("links a shared bundle without running Bun.build (no probe build either)", async () => {
+    const sharedFile = join(dir, "shared/ui-probe@1.0.0/index.js");
+    await bundleDependency({ spec: "vf", outFile: join(dir, "projectA/.nata/deps/ui2.js"), sharedFile, resolveDir: dir, ...bundler });
+    const build = Bun.build;
+    let calls = 0;
+    (Bun as any).build = (...args: Parameters<typeof Bun.build>) => {
+      calls++;
+      return build(...args);
+    };
+    try {
+      const result = await bundleDependency({ spec: "vf", outFile: join(dir, "projectC/.nata/deps/ui2.js"), sharedFile, resolveDir: dir, ...bundler });
+      expect(result.shared).toBe(true);
+      expect(calls).toBe(0);
+    } finally {
+      (Bun as any).build = build;
+    }
+  });
+
   it("keeps bundles whose siblings depend on the project apart in the shared cache (kv with and without react-kv)", async () => {
     const sharedFile = join(dir, "shared/kv@1.0.0/index.js");
     await bundleDependency({ spec: "kv", outFile: join(dir, "projectA/kv.js"), sharedFile, resolveDir: dir, ...bundler });

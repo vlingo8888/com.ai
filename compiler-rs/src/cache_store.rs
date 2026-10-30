@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use redb::{Database, ReadableTable, TableDefinition};
+use crate::platform::redb::{Database, ReadableTable, TableDefinition};
 use serde::{Deserialize, Serialize};
 
 const TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("data_cache");

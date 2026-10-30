@@ -46,7 +46,7 @@ impl MetadataEngine {
         for cand in &static_candidates {
             let p = root.join(cand);
             if p.exists() && p.is_file() {
-                if let Ok(content) = tokio::fs::read(&p).await {
+                if let Ok(content) = crate::platform::fs::read(&p).await {
                     return (StatusCode::OK, headers, content);
                 }
             }
@@ -96,7 +96,7 @@ impl MetadataEngine {
         for cand in &static_candidates {
             let p = root.join(cand);
             if p.exists() && p.is_file() {
-                if let Ok(content) = tokio::fs::read(&p).await {
+                if let Ok(content) = crate::platform::fs::read(&p).await {
                     return (StatusCode::OK, headers, content);
                 }
             }
@@ -147,7 +147,7 @@ impl MetadataEngine {
         for cand in &static_candidates {
             let p = root.join(cand);
             if p.exists() && p.is_file() {
-                if let Ok(content) = tokio::fs::read(&p).await {
+                if let Ok(content) = crate::platform::fs::read(&p).await {
                     return (StatusCode::OK, headers, content);
                 }
             }

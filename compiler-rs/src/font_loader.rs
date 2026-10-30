@@ -216,7 +216,7 @@ async fn google_css(root: &Path, request: &FontRequest) -> Option<(String, Optio
     let mut css = filter_subsets(&css, &subsets);
     // Self-host every file
     let dir = root.join(".nata/fonts");
-    let _ = tokio::fs::create_dir_all(&dir).await;
+    let _ = crate::platform::fs::create_dir_all(&dir).await;
     let url_re = regex::Regex::new(r"url\((https://[^)]+)\)").unwrap();
     let urls: Vec<String> = url_re.captures_iter(&css).map(|c| c[1].to_string()).collect();
     for url in urls {
@@ -225,7 +225,7 @@ async fn google_css(root: &Path, request: &FontRequest) -> Option<(String, Optio
         let path = dir.join(&file);
         if !path.is_file() {
             let Some(bytes) = fetch(root, &url, Some(MODERN_UA)).await else { continue };
-            let _ = tokio::fs::write(&path, bytes).await;
+            let _ = crate::platform::fs::write(&path, bytes).await;
         }
         css = css.replace(&format!("url({url})"), &format!("url(/_nata/fonts/{file})"));
     }
@@ -285,7 +285,7 @@ pub async fn font_css(root: &Path, request: &FontRequest) -> String {
     }
     let disk = root.join(".nata/fonts").join(format!("{}.css", request.hash));
     if request.kind == "google" {
-        if let Ok(css) = tokio::fs::read_to_string(&disk).await {
+        if let Ok(css) = crate::platform::fs::read_to_string(&disk).await {
             generated().lock().unwrap().insert(request.hash.clone(), css.clone());
             return css;
         }
@@ -305,8 +305,8 @@ pub async fn font_css(root: &Path, request: &FontRequest) -> String {
     let css = format!("{faces}{}{}", fallback_face(request, metrics), class_rules(request));
     if complete {
         if request.kind == "google" {
-            let _ = tokio::fs::create_dir_all(disk.parent().unwrap()).await;
-            let _ = tokio::fs::write(&disk, &css).await;
+            let _ = crate::platform::fs::create_dir_all(disk.parent().unwrap()).await;
+            let _ = crate::platform::fs::write(&disk, &css).await;
         }
         generated().lock().unwrap().insert(request.hash.clone(), css.clone());
     }
@@ -336,7 +336,7 @@ pub async fn serve(root: &Path, path: &str) -> axum::response::Response {
         None => None,
     };
     let Some(file) = file else { return axum::http::StatusCode::NOT_FOUND.into_response() };
-    match tokio::fs::read(&file).await {
+    match crate::platform::fs::read(&file).await {
         Ok(bytes) => {
             let ext = file.extension().and_then(|e| e.to_str()).unwrap_or("");
             let mime = match ext {

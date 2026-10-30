@@ -135,10 +135,14 @@ pub fn optimize(source: &[u8], source_ext: &str, width: u32, quality: u32, webp:
         resizer.resize(&src, &mut dst, &options).ok()?;
         image::RgbaImage::from_raw(width, height, dst.into_vec())?
     };
+    // libwebp is C: the wasm engine answers in the source format
+    #[cfg(not(target_family = "wasm"))]
     if webp {
         let encoded = webp::Encoder::from_rgba(&resized, width, height).encode(quality as f32);
         return Some(Optimized { bytes: encoded.to_vec(), content_type: "image/webp" });
     }
+    #[cfg(target_family = "wasm")]
+    let _ = webp;
     let mut out = Cursor::new(Vec::new());
     match source_ext {
         "jpg" | "jpeg" => {
@@ -175,7 +179,7 @@ pub async fn handle(root: &Path, query: &str, accept: &str) -> Response {
     let (source, ext): (Vec<u8>, String) = if url.starts_with('/') && !url.starts_with("//") {
         let Some(file) = local_source(root, &url) else { return (StatusCode::NOT_FOUND, "The requested resource isn't a valid image.").into_response() };
         let ext = file.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
-        match tokio::fs::read(&file).await {
+        match crate::platform::fs::read(&file).await {
             Ok(bytes) => (bytes, ext),
             Err(_) => return (StatusCode::NOT_FOUND, "The requested resource isn't a valid image.").into_response(),
         }
@@ -209,14 +213,14 @@ pub async fn handle(root: &Path, query: &str, accept: &str) -> Response {
     let key = blake3::hash(format!("{url}|{width}|{quality}|{webp}|{}", blake3::hash(&source).to_hex()).as_bytes()).to_hex().to_string();
     let cache_dir = root.join(".nata/cache/images");
     let cache_file = cache_dir.join(format!("{}.{}", &key[..32], if webp { "webp" } else if matches!(ext.as_str(), "jpg" | "jpeg") { "jpg" } else { "png" }));
-    let optimized = match tokio::fs::read(&cache_file).await {
+    let optimized = match crate::platform::fs::read(&cache_file).await {
         Ok(bytes) => Some(Optimized { bytes, content_type: content_type(cache_file.extension().and_then(|e| e.to_str()).unwrap_or("png")) }),
         Err(_) => {
             let ext_for_encode = ext.clone();
-            let result = tokio::task::spawn_blocking(move || optimize(&source, &ext_for_encode, width, quality, webp)).await.ok().flatten();
+            let result = crate::platform::spawn_blocking(move || optimize(&source, &ext_for_encode, width, quality, webp)).await.ok().flatten();
             if let Some(o) = &result {
-                let _ = tokio::fs::create_dir_all(&cache_dir).await;
-                let _ = tokio::fs::write(&cache_file, &o.bytes).await;
+                let _ = crate::platform::fs::create_dir_all(&cache_dir).await;
+                let _ = crate::platform::fs::write(&cache_file, &o.bytes).await;
             }
             result
         }
@@ -244,7 +248,7 @@ async fn fetch_remote(root: &Path, url: &str) -> Option<Vec<u8>> {
 pub async fn media(root: &Path, rel: &str) -> Response {
     let file = root.join(rel);
     let ok = crate::rpc::canonicalize(&file).ok().zip(crate::rpc::canonicalize(&root).ok()).is_some_and(|(f, r)| f.starts_with(r)) && is_image(&file);
-    match (ok, tokio::fs::read(&file).await) {
+    match (ok, crate::platform::fs::read(&file).await) {
         (true, Ok(bytes)) => {
             let ext = file.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
             let mut response = Response::new(Body::from(bytes));

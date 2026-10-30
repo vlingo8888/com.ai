@@ -8,6 +8,9 @@
 //!   responses are compressed on the fly.
 //! - `/_nata/health`, graceful shutdown on SIGINT / SIGTERM (requests in flight finish).
 
+// `com start` only runs natively; on wasm its helpers stay compiled for `build`, unused
+#![cfg_attr(target_family = "wasm", allow(dead_code, unused_imports))]
+
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -19,6 +22,7 @@ use axum::body::{Body, Bytes};
 use axum::extract::{Path as UrlPath, State};
 use axum::http::{header, HeaderMap, HeaderValue, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
+#[cfg(not(target_family = "wasm"))]
 use tower_http::compression::Predicate;
 
 use crate::build::manifest::{self, BuildManifest, RouteKind};
@@ -32,6 +36,12 @@ pub fn active() -> bool {
     STARTED.get().is_some()
 }
 
+#[cfg(target_family = "wasm")]
+pub async fn run(_root: PathBuf, _port: u16, _hostname: String, _target: String) -> Result<(), String> {
+    Err("`com start` needs the native engine (Windows, macOS, Linux)".into())
+}
+
+#[cfg(not(target_family = "wasm"))]
 pub async fn run(root: PathBuf, port: u16, hostname: String, target: String) -> Result<(), String> {
     let root = crate::rpc::canonicalize(&root).unwrap_or(root);
     crate::mode::check_production_bun()?;
@@ -63,6 +73,7 @@ pub async fn run(root: PathBuf, port: u16, hostname: String, target: String) -> 
     Ok(())
 }
 
+#[cfg(not(target_family = "wasm"))]
 async fn shutdown_signal() {
     let ctrl_c = async {
         let _ = tokio::signal::ctrl_c().await;

@@ -110,14 +110,14 @@ pub fn in_store(path: &Path) -> bool {
 /// `com pkg add` for a package a project imports before installing it (the engine installs it like
 /// `bun add` used to); `None` when the CLI is unknown (`COM_CLI`, set by `com dev`): its `.ts`
 /// entry, run by Bun, or the standalone `com` executable, run as is
-pub fn add_command(root: &Path, specs: &[&str], dev: bool) -> Option<tokio::process::Command> {
+pub fn add_command(root: &Path, specs: &[&str], dev: bool) -> Option<crate::platform::process::Command> {
     let cli = std::env::var("COM_CLI").ok().filter(|p| Path::new(p).is_file())?;
     let mut cmd = if cli_is_script(&cli) {
         let mut cmd = crate::rpc::bun_command();
         cmd.arg(cli);
         cmd
     } else {
-        let mut cmd = tokio::process::Command::new(cli);
+        let mut cmd = crate::platform::process::Command::new(cli);
         // Run as the CLI, not as the Bun it embeds
         cmd.env_remove("BUN_BE_BUN");
         cmd

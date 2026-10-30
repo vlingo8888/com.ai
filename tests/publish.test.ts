@@ -2,33 +2,44 @@ import { describe, expect, it } from "bun:test";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
-import { publishCommand } from "../src/commands/publish";
+import { publishCommand, publishStatic } from "../src/commands/publish";
 import { getLocalViewConfig, saveLocalViewConfig } from "../src/core/config";
 import { NataApiClient } from "../src/core/api";
 
-describe("Publish Command - publishView (Publish V2)", () => {
-  it("posts { view_id } to /api/views/publish/v2", async () => {
-    const calls: Array<{ path: string; body: any }> = [];
+describe("Publish Command - static publish API", () => {
+  it("prepares with GET and uploads with POST to /api/views/:id/publish-static/browser", async () => {
+    const calls: Array<{ method: string; path: string; auth: string | null; body?: any }> = [];
     const server = Bun.serve({
       port: 0,
       async fetch(req) {
-        calls.push({ path: new URL(req.url).pathname, body: await req.json() });
-        return Response.json({ success: true, viewId: 42 });
+        const call = { method: req.method, path: new URL(req.url).pathname, auth: req.headers.get("authorization") };
+        if (req.method === "GET") {
+          calls.push(call);
+          return Response.json({ unchanged: true });
+        }
+        calls.push({ ...call, body: await req.json() });
+        return calls.length === 2 ? new Response("changed", { status: 409 }) : Response.json({ ok: true });
       },
     });
 
     try {
       const client = new NataApiClient(`http://localhost:${server.port}`, "test-token");
-      const res = await client.publishView(42);
-
-      expect(res.success).toBe(true);
-      expect(calls).toEqual([{ path: "/api/views/publish/v2", body: { view_id: 42 } }]);
+      expect((await client.prepareStaticPublish(42)).unchanged).toBe(true);
+      expect(await client.uploadStaticPublish(42, { ok: true, files: [] })).toEqual({ status: "conflict" });
+      expect((await client.uploadStaticPublish(42, { ok: true, files: [] })).status).toBe("ok");
+      const path = "/api/views/42/publish-static/browser";
+      expect(calls.map((c) => [c.method, c.path, c.auth])).toEqual([
+        ["GET", path, "Bearer test-token"],
+        ["POST", path, "Bearer test-token"],
+        ["POST", path, "Bearer test-token"],
+      ]);
+      expect(calls[1].body).toEqual({ ok: true, files: [] });
     } finally {
       server.stop();
     }
   });
 
-  it("reports a failed V2 publish instead of falling back to the V1 endpoints", async () => {
+  it("reports a failed prepare instead of falling back to the old publish", async () => {
     const paths: string[] = [];
     const server = Bun.serve({
       port: 0,
@@ -40,8 +51,8 @@ describe("Publish Command - publishView (Publish V2)", () => {
 
     try {
       const client = new NataApiClient(`http://localhost:${server.port}`, "test-token");
-      await expect(client.publishView(42)).rejects.toThrow("Failed to publish view (404)");
-      expect(paths).toEqual(["/api/views/publish/v2"]);
+      await expect(publishStatic(client, 42)).rejects.toThrow("Failed to prepare the publish (404)");
+      expect(paths).toEqual(["/api/views/42/publish-static/browser"]);
     } finally {
       server.stop();
     }
@@ -60,7 +71,9 @@ describe("Publish Command - publishCommand", () => {
           saves.push(await req.json());
           return Response.json({ success: true, id: 42, mode: "merge", updated_at: "2026-10-28T05:51:51Z" });
         }
-        if (pathname === "/api/views/publish/v2") return Response.json({ success: true, viewId: 42 });
+        if (pathname === "/api/views/publish/v2") throw new Error("the old publish must not be called");
+        // The published app already has this code: nothing to build
+        if (pathname === "/api/views/42/publish-static/browser") return Response.json({ unchanged: true });
         if (pathname === "/api/views/42") return Response.json({ id: 42, updated_at: "2026-10-28T05:51:53Z" });
         return new Response("not found", { status: 404 });
       },

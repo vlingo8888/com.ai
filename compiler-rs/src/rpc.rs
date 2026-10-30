@@ -1229,8 +1229,8 @@ fn bun_env() -> Option<(&'static str, &'static str)> {
 }
 
 /// A Bun process (`find_bun_bin`), whether Bun is installed or embedded in `com`
-pub fn bun_command() -> tokio::process::Command {
-    let mut cmd = tokio::process::Command::new(find_bun_bin());
+pub fn bun_command() -> crate::platform::process::Command {
+    let mut cmd = crate::platform::process::Command::new(find_bun_bin());
     cmd.envs(bun_env());
     cmd
 }

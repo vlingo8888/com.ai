@@ -317,7 +317,7 @@ pub fn prewarm(root: &Path) {
         }
         // next/og renders with Satori: install it when the app generates images
         let scan_root = root.clone();
-        if tokio::task::spawn_blocking(move || project_mentions(&scan_root, &["next/og", "ImageResponse"])).await.unwrap_or(false) {
+        if crate::platform::spawn_blocking(move || project_mentions(&scan_root, &["next/og", "ImageResponse"])).await.unwrap_or(false) {
             let _ = crate::deps::ensure_dev_packages(&root, &["satori"]).await;
         }
     });

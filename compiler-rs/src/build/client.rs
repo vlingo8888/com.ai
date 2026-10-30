@@ -254,7 +254,7 @@ pub async fn bundle(root: &Path, app: &Router, base: &str, entries: &[String]) -
 
     let out = out_dir.clone();
     let files = result.files.clone();
-    let sizes = tokio::task::spawn_blocking(move || precompress(&nata.join("cache/compressed"), &out, &files)).await.map_err(|e| e.to_string())??;
+    let sizes = crate::platform::spawn_blocking(move || precompress(&nata.join("cache/compressed"), &out, &files)).await.map_err(|e| e.to_string())??;
     let public = crate::build::manifest::STATIC_URL;
     result.gzip_sizes = sizes.into_iter().map(|(file, size)| (format!("{public}{file}"), size)).collect();
 

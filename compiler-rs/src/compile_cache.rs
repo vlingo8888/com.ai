@@ -10,8 +10,8 @@
 //! compiles hundreds of modules one commit each. A background thread makes them durable once writes
 //! pause (or every `FLUSH_EVERY` writes); a crash loses at most those entries, which recompile.
 
-use redb::{Database, Durability, ReadableTableMetadata, TableDefinition};
-use std::collections::HashMap;
+use crate::platform::redb::{self, Database, Durability, ReadableTableMetadata, TableDefinition};
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock, Weak};
@@ -44,6 +44,9 @@ pub struct CompileCache {
     last_write: Mutex<Instant>,
     /// Wakes the flusher after a write, so it sleeps for good while nothing is written
     wrote: Condvar,
+    /// In the browser the database is memory: its entries, oldest first, and their bytes, so the
+    /// oldest go once `max_bytes` is reached (a file's size bounds it natively)
+    entries: Mutex<(VecDeque<([u8; 32], u64)>, u64)>,
 }
 
 fn caches() -> &'static Mutex<HashMap<PathBuf, Option<Arc<CompileCache>>>> {
@@ -60,7 +63,9 @@ pub fn open_database(path: &Path) -> Option<Database> {
 }
 
 fn max_bytes() -> u64 {
-    std::env::var("COM_CACHE_MAX_MB").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(256) * 1024 * 1024
+    // In the browser the cache is the tab's memory
+    let default_mb = if cfg!(target_arch = "wasm32") { 32 } else { 256 };
+    std::env::var("COM_CACHE_MAX_MB").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(default_mb) * 1024 * 1024
 }
 
 fn enabled() -> bool {
@@ -91,7 +96,13 @@ impl CompileCache {
             let _ = std::fs::remove_file(&path);
         }
         let db = open_database(&path)?;
-        Some(CompileCache { db, pending: AtomicU64::new(0), last_write: Mutex::new(Instant::now()), wrote: Condvar::new() })
+        Some(CompileCache {
+            db,
+            pending: AtomicU64::new(0),
+            last_write: Mutex::new(Instant::now()),
+            wrote: Condvar::new(),
+            entries: Mutex::new((VecDeque::new(), 0)),
+        })
     }
 
     /// Cache key for one module; any change to the inputs produces a new key
@@ -117,6 +128,18 @@ impl CompileCache {
         {
             let Ok(mut table) = txn.open_table(TABLE) else { return };
             let _ = table.insert(key.as_slice(), compiled.as_bytes());
+            if cfg!(target_arch = "wasm32") {
+                let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+                let (order, bytes) = &mut *entries;
+                order.push_back((*key, compiled.len() as u64));
+                *bytes += compiled.len() as u64;
+                let max = max_bytes();
+                while *bytes > max && order.len() > 1 {
+                    let Some((old, len)) = order.pop_front() else { break };
+                    let _ = table.remove(old.as_slice());
+                    *bytes -= len;
+                }
+            }
         }
         if txn.commit().is_err() {
             return;

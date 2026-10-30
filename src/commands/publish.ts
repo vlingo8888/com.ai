@@ -4,6 +4,52 @@ import { getLocalViewConfig, saveLocalViewConfig } from "../core/config";
 import { logger, colors } from "../core/logger";
 import { compileAllEs5 } from "../core/es5";
 import { collectProjectFiles, computeDeleted, recordSave } from "./save";
+import { buildStaticApp, STAGE_PERCENT, type StaticPublishStage } from "../core/static-build";
+
+const STAGE_LABEL: Record<StaticPublishStage, string> = {
+  prepare: "Preparing",
+  compiler: "Loading the compiler",
+  packages: "Downloading npm packages",
+  bundle: "Bundling the app and its packages",
+  css: "Generating CSS (Tailwind)",
+  package: "Packaging the files",
+  upload: "Uploading",
+  done: "Done",
+};
+
+/**
+ * The static publish: builds the app on this machine, and the server only stores the files.
+ * Builds once more when the code changed on the server meanwhile (409). Resolves with true when
+ * the published app already has this code.
+ */
+export async function publishStatic(
+  client: NataApiClient,
+  viewId: number,
+  onProgress: (stage: StaticPublishStage, percent: number) => void = () => {}
+): Promise<boolean> {
+  const report = (stage: StaticPublishStage) => onProgress(stage, STAGE_PERCENT[stage]);
+  for (let attempt = 1; ; attempt++) {
+    report("prepare");
+    const prepared = await client.prepareStaticPublish(viewId);
+    if (prepared.unchanged) {
+      report("done");
+      return true;
+    }
+    const payload = await buildStaticApp(prepared, report);
+    if (!payload.ok) {
+      const errors = (payload.errors ?? [])
+        .slice(0, 10)
+        .map((e: any) => (e.file ? `${e.file}:${e.line}: ${e.text}` : e.text));
+      throw new Error(`Build failed:\n${errors.join("\n")}`);
+    }
+    report("upload");
+    const res = await client.uploadStaticPublish(viewId, payload);
+    if (res.status === "conflict" && attempt < 2) continue;
+    if (res.status === "conflict") throw new Error("The code changed on the server during the publish; run `com publish` again");
+    report("done");
+    return false;
+  }
+}
 
 export interface PublishOptions {
   dir?: string;
@@ -90,37 +136,39 @@ export async function publishCommand(options: PublishOptions = {}) {
     }
   }
 
-  // Step 2: Trigger publish endpoint
-  const pubSpinner = logger.spinner(`Publishing View #${viewId} on Com.AI.VN Cloud (${apiUrl})...`);
+  // Step 2: build here and upload the files (the server builds nothing)
+  if (options.domain) {
+    logger.warn("--domain is ignored: the publish keeps the view's domains (set them in the editor or the COM app)");
+  }
+  const pubSpinner = logger.spinner(`Publishing View #${viewId}...`);
   const startTime = Date.now();
 
   try {
-    const res = await client.publishView(viewId, {
-      domain: options.domain,
-    });
+    const unchanged = await publishStatic(client, viewId, (stage, percent) =>
+      pubSpinner.update(`Publishing View #${viewId} ${colors.bold}${percent}%${colors.reset} ${colors.darkGray}${STAGE_LABEL[stage]}${colors.reset}`)
+    );
 
     const elapsed = ((Date.now() - startTime) / 1000).toFixed(2);
-    pubSpinner.stop(true, `Successfully published View #${viewId} in ${elapsed}s`);
+    pubSpinner.stop(
+      true,
+      unchanged ? `View #${viewId} is already published with this code` : `Successfully published View #${viewId} in ${elapsed}s`
+    );
 
-    // Publishing bumps the view's `updated_at`: record it, or the next save reports a false conflict
-    // (re-read the config: the save above already updated it)
+    const details = await client.getViewDetails(viewId).catch(() => undefined);
+    // Record the server's `updated_at` after publishing, or the next save may report a false
+    // conflict (re-read the config: the save above already updated it)
     const latestConfig = getLocalViewConfig(targetDir);
     if (latestConfig) {
-      const remoteUpdatedAt = await client
-        .getViewDetails(viewId)
-        .then((v) => v.updated_at)
-        .catch(() => undefined);
       saveLocalViewConfig(targetDir, {
         ...latestConfig,
-        remoteUpdatedAt: remoteUpdatedAt ?? latestConfig.remoteUpdatedAt,
+        remoteUpdatedAt: details?.updated_at ?? latestConfig.remoteUpdatedAt,
         lastSyncedAt: new Date().toISOString(),
       });
     }
 
-    const domainDisplay = options.domain || `view-${viewId}.com.ai.vn`;
-    const liveUrl = options.domain 
-      ? `https://${options.domain}` 
-      : `${apiUrl}/api/views/${viewId}`;
+    const domains = details?.domains ?? [];
+    const domainDisplay = domains[0] || "(none yet: add one in the editor or the COM app)";
+    const liveUrl = domains[0] ? `https://${domains[0]}` : `${apiUrl}/api/views/${viewId}`;
 
     logger.card("PUBLISH SUMMARY", [
       { label: "View Name", value: localConfig?.name || `View #${viewId}`, color: colors.bold + colors.white },

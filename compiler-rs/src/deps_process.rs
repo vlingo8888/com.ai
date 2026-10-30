@@ -19,7 +19,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{Child, ChildStdin};
+use crate::platform::process::{Child, ChildStdin};
 use tokio::sync::oneshot;
 
 pub const ROLLDOWN_VERSION: &str = "1.2.13";
@@ -94,8 +94,12 @@ async fn spawn(root: &Path) -> Result<BundlerProcess, String> {
     // The bundler (~50MB) exits after `COM_DEPS_IDLE` seconds without work (default 5): a cold page asks
     // for its packages within a second or two, and a later request starts it again
     let idle_ms = std::env::var("COM_DEPS_IDLE").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(5) * 1000;
+    // Packages bundled at a time (`COM_DEPS_CONCURRENCY`): three in the browser, where every bundle
+    // holds esbuild-wasm's memory in the same tab (phones set one); four natively
+    let default_concurrency = if cfg!(target_arch = "wasm32") { 3 } else { 4 };
+    let concurrency = std::env::var("COM_DEPS_CONCURRENCY").ok().and_then(|v| v.parse::<u32>().ok()).filter(|n| *n > 0).unwrap_or(default_concurrency);
     let script = format!(
-        "import {{ serveBundler }} from {};\nawait serveBundler({{ idleMs: {idle_ms} }});\n",
+        "import {{ serveBundler }} from {};\nawait serveBundler({{ idleMs: {idle_ms}, concurrency: {concurrency} }});\n",
         serde_json::to_string(&crate::rpc::clean_path(root.join(".nata/deps_bundler.ts"))).unwrap_or_default()
     );
     let mut cmd = crate::rpc::bun_command();

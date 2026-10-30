@@ -1,4 +1,4 @@
-use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+use crate::platform::notify::{self, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashSet,
@@ -188,7 +188,9 @@ impl ProjectWatcher {
                         crate::next_config::load(&canon_root).await;
                     }
 
-                    let should_rescan_router = {
+                    // A big batch is rescanned whatever it holds: its files may sit in folders created
+                    // after the watch started (a project copied in), whose own events never came
+                    let should_rescan_router = files_to_notify.len() > Self::BULK_FILES || {
                         let r_guard = router.read().await;
                         Self::routes_changed(&canon_root, &r_guard, &files_to_notify)
                     };

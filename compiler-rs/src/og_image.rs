@@ -24,12 +24,12 @@ pub async fn default_font(root: &Path) -> Result<Vec<u8>, String> {
         "C:\\Windows\\Fonts\\arial.ttf",
     ];
     for path in SYSTEM {
-        if let Ok(bytes) = tokio::fs::read(path).await {
+        if let Ok(bytes) = crate::platform::fs::read(path).await {
             return Ok(bytes);
         }
     }
     let cached = root.join(".nata/fonts/og-default.ttf");
-    if let Ok(bytes) = tokio::fs::read(&cached).await {
+    if let Ok(bytes) = crate::platform::fs::read(&cached).await {
         return Ok(bytes);
     }
     let fetch = |url: String| async move {
@@ -41,8 +41,8 @@ pub async fn default_font(root: &Path) -> Result<Vec<u8>, String> {
     let css = String::from_utf8_lossy(&css).to_string();
     let url = regex::Regex::new(r"url\((https://[^)]+)\)").unwrap().captures(&css).map(|c| c[1].to_string()).ok_or("no font URL")?;
     let bytes = fetch(url).await.ok_or("font download failed")?;
-    let _ = tokio::fs::create_dir_all(cached.parent().unwrap()).await;
-    let _ = tokio::fs::write(&cached, &bytes).await;
+    let _ = crate::platform::fs::create_dir_all(cached.parent().unwrap()).await;
+    let _ = crate::platform::fs::write(&cached, &bytes).await;
     Ok(bytes)
 }
 

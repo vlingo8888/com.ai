@@ -1,3 +1,5 @@
+#[cfg(target_family = "wasm")]
+pub mod browser;
 pub mod build;
 pub mod bundler;
 pub mod cache_store;
@@ -19,6 +21,7 @@ pub mod module_server;
 pub mod next_config;
 pub mod next_shims;
 pub mod og_image;
+pub mod platform;
 pub mod prod;
 pub mod project;
 pub mod resolver;

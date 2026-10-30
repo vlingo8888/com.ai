@@ -27,6 +27,23 @@ const PRERENDER_CONCURRENCY: usize = 8;
 /// Routes prerendered at once (each renders up to `PRERENDER_CONCURRENCY` paths)
 const ROUTE_CONCURRENCY: usize = 4;
 
+/// Internal server the bundler reads modules from (and nothing else can reach); its base URL
+#[cfg(not(target_family = "wasm"))]
+async fn internal_server(app: axum::Router) -> Result<String, String> {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.map_err(|e| e.to_string())?;
+    let base = format!("http://{}", listener.local_addr().map_err(|e| e.to_string())?);
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    Ok(base)
+}
+
+/// The bundler and the prerenderer (Bun processes) fetch modules over HTTP: no socket in the browser
+#[cfg(target_family = "wasm")]
+async fn internal_server(_app: axum::Router) -> Result<String, String> {
+    Err("`com build` needs the native engine (Windows, macOS, Linux)".into())
+}
+
 pub async fn run(root: PathBuf, target: String) -> Result<(), String> {
     let started = Instant::now();
     crate::mode::check_production_bun()?;
@@ -41,14 +58,8 @@ pub async fn run(root: PathBuf, target: String) -> Result<(), String> {
     // React Server Components packages (installed on first use, like in development)
     crate::rsc::runtime_specifier(&root).await?;
 
-    // Internal server the bundler reads modules from (and nothing else can reach)
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.map_err(|e| e.to_string())?;
-    let base = format!("http://{}", listener.local_addr().map_err(|e| e.to_string())?);
     let app = DevServer::app(state.clone(), ServeMode::Build);
-    let server = app.clone();
-    tokio::spawn(async move {
-        let _ = axum::serve(listener, server).await;
-    });
+    let base = internal_server(app.clone()).await?;
 
     step("Compiling server components");
     let graph = client::discover(&root);

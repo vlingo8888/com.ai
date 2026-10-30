@@ -8,7 +8,8 @@
 //   ignored - noise from dev tooling and browsers  -> never shown
 // The overlay lives in a Shadow DOM so the app's CSS (Tailwind, globals.css) cannot restyle it.
 
-const INTERNAL_URL = /\/_hmr|\/_nata\/(hmr_version|logs|client\.js|overlay\.js)|eruda|@tailwindcss\/browser|cdn\.jsdelivr\.net\/npm\/eruda/;
+// `/__com/` is the in-browser runtime's own (bun-rust com.ts: the HMR long-poll, retried on failure)
+const INTERNAL_URL = /\/_hmr|\/__com\/|\/_nata\/(hmr_version|logs|client\.js|overlay\.js)|eruda|@tailwindcss\/browser|cdn\.jsdelivr\.net\/npm\/eruda/;
 const NETWORK_MESSAGE = /^(Load failed|Failed to fetch|NetworkError when attempting to fetch resource\.?|Network request failed|The network connection was lost\.?)$/i;
 const IGNORED_MESSAGE = /^Script error\.?$|ResizeObserver loop|^NEXT_REDIRECT|^NEXT_NOT_FOUND$/;
 // React recovering from a server render that showed a Suspense fallback (the server uses renderToString

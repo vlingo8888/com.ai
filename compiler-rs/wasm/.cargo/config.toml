@@ -1,0 +1,5 @@
+[build]
+target = "wasm32-wasip1"
+# Shares compiler-rs/target: the dependencies compiled for wasm by `cargo check --target wasm32-wasip1`
+# in compiler-rs are reused
+target-dir = "../target"

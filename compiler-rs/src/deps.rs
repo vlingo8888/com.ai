@@ -165,7 +165,7 @@ async fn install(root: &Path, name: &str, restart_worker: bool) -> Option<String
 
 /// `bun add` (`node_modules`), or `com pkg add` for a project on the shared store; `None` when the
 /// project is on the store and the CLI is unknown
-fn add_command(root: &Path, specs: &[&str], dev: bool) -> Option<tokio::process::Command> {
+fn add_command(root: &Path, specs: &[&str], dev: bool) -> Option<crate::platform::process::Command> {
     if crate::store::uses_store(root) {
         return crate::store::add_command(root, specs, dev);
     }
@@ -271,7 +271,20 @@ pub enum DepResult {
 }
 
 /// Produces the browser module for `spec`, building and caching it on first request
+/// A browser request for `/_nata/deps/<spec>` (see `resolve_with`)
 pub async fn resolve(root: &Path, spec: &str) -> DepResult {
+    resolve_with(root, spec, Request::Browser).await
+}
+
+/// Who asks for a bundle: the browser (first in the bundler's queue, may install the package, is
+/// remembered for the next start) or a prefetch (behind it, only packages already installed)
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Request {
+    Browser,
+    Prefetch,
+}
+
+async fn resolve_with(root: &Path, spec: &str, request: Request) -> DepResult {
     if !is_valid_specifier(spec) {
         return DepResult::Error(format!("Invalid package specifier: {spec}"));
     }
@@ -283,6 +296,8 @@ pub async fn resolve(root: &Path, spec: &str) -> DepResult {
         .flatten();
     let version = match &framework_dir {
         Some(_) => crate::framework_react::package_version(root, &name),
+        // A prefetch never installs: what a bundle imports but the project lacks waits for a request
+        None if request == Request::Prefetch => installed_version(root, &name),
         None => ensure_installed(root, &name).await,
     };
     let Some(version) = version else {
@@ -293,13 +308,23 @@ pub async fn resolve(root: &Path, spec: &str) -> DepResult {
     let cache_version = if node_env == "production" { format!("{version}-prod") } else { version.clone() };
     let out_file = cache_path(root, spec, &cache_version);
     if let Ok(code) = std::fs::read_to_string(&out_file) {
+        if request == Request::Browser {
+            remember_spec(root, spec);
+        }
+        prefetch_imports(root, spec, &code);
         return DepResult::Module { etag: content_etag(&code), code };
     }
 
     let started = std::time::Instant::now();
     let started_at = std::time::SystemTime::now();
     let shared_file = shared_cache_path(spec, &cache_version);
-    let mut input = serde_json::json!({ "spec": spec, "outFile": out_file, "sharedFile": shared_file, "nodeEnv": node_env });
+    let mut input = serde_json::json!({
+        "spec": spec,
+        "outFile": out_file,
+        "sharedFile": shared_file,
+        "nodeEnv": node_env,
+        "priority": request == Request::Browser,
+    });
     if let Some(dir) = framework_dir.as_ref().and_then(|d| d.parent()) {
         input["resolveDir"] = serde_json::json!(dir);
     } else if crate::store::uses_store(root) {
@@ -310,6 +335,10 @@ pub async fn resolve(root: &Path, spec: &str) -> DepResult {
     if let Some(module) = crate::deps_process::rolldown_module().await {
         input["rolldown"] = serde_json::json!(module);
     }
+    // A bundle can take seconds (minutes on a phone in the browser): say it started, with the
+    // progress of this session's bundles (`done/total`; prefetches add to the total as they are found)
+    let browser = (request == Request::Browser).then(|| BundleGuard::new());
+    crate::term::event(&format!("Bundling {spec}@{version} · {}", bundle_progress(false)));
     let errors = match bundle(root, &input).await {
         Ok(errors) => errors,
         Err(e) => {
@@ -321,16 +350,157 @@ pub async fn resolve(root: &Path, spec: &str) -> DepResult {
         Ok(code) => {
             // A link to the machine-wide copy keeps that copy's time: built earlier, by another project
             let reused = std::fs::metadata(&out_file).and_then(|m| m.modified()).is_ok_and(|t| t < started_at);
-            if !reused {
+            BUNDLES_DONE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            drop(browser);
+            let progress = bundle_progress(request == Request::Prefetch);
+            if reused {
+                crate::term::info(&format!("Reused {spec}@{version} from the shared cache · {progress}"));
+            } else {
                 crate::term::success(&format!(
-                    "Prebundled {spec}@{version} in {}",
-                    crate::term::format_ms(started.elapsed().as_secs_f64() * 1000.0)
+                    "Prebundled {spec}@{version} in {} · {}",
+                    crate::term::format_ms(started.elapsed().as_secs_f64() * 1000.0),
+                    progress
                 ));
             }
+            if request == Request::Browser {
+                remember_spec(root, spec);
+            }
+            prefetch_imports(root, spec, &code);
             DepResult::Module { etag: content_etag(&code), code }
         }
         Err(_) => DepResult::Error(format!("Could not bundle {spec}:\n{}", errors.trim())),
     }
+}
+
+/// The specs a bundle imports from other bundles (`/_nata/deps/<spec>`, spelled as `deps_handler` reads
+/// them): the requests the browser makes once it has this bundle
+pub fn imported_specs(code: &str) -> Vec<String> {
+    const PREFIX: &str = "/_nata/deps/";
+    let mut seen = HashSet::new();
+    let mut specs = Vec::new();
+    let mut rest = code;
+    while let Some(at) = rest.find(PREFIX) {
+        let after = &rest[at + PREFIX.len()..];
+        let end = after.find(|c: char| matches!(c, '"' | '\'' | '`' | '?' | '#') || c.is_whitespace()).unwrap_or(after.len());
+        let spec = after[..end].trim_end_matches(".js");
+        if is_valid_specifier(spec) && seen.insert(spec) {
+            specs.push(spec.to_string());
+        }
+        rest = &after[end..];
+    }
+    specs
+}
+
+/// Bundles finished in this session (built or linked), and browser requests bundling now
+static BUNDLES_DONE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static BROWSER_BUNDLING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Counts a browser request in BROWSER_BUNDLING while it bundles
+struct BundleGuard;
+
+impl BundleGuard {
+    fn new() -> Self {
+        BROWSER_BUNDLING.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        BundleGuard
+    }
+}
+
+impl Drop for BundleGuard {
+    fn drop(&mut self) {
+        BROWSER_BUNDLING.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// "done/total" of this session's bundles: finished, plus browser requests and prefetches still going
+/// (`finishing`: a prefetch that just finished, still listed until its task ends)
+fn bundle_progress(finishing: bool) -> String {
+    use std::sync::atomic::Ordering::Relaxed;
+    let done = BUNDLES_DONE.load(Relaxed);
+    let prefetching = prefetch_state().lock().unwrap_or_else(|e| e.into_inner()).1.len();
+    let pending = BROWSER_BUNDLING.load(Relaxed) + prefetching.saturating_sub(usize::from(finishing));
+    format!("{done}/{}", done + pending)
+}
+
+/// Prefetch bookkeeping: (root, spec) whose imports were already sent to prefetch, and (root, spec)
+/// being prefetched now
+type PrefetchState = (HashSet<(PathBuf, String)>, HashSet<(PathBuf, String)>);
+
+fn prefetch_state() -> &'static Mutex<PrefetchState> {
+    static STATE: OnceLock<Mutex<PrefetchState>> = OnceLock::new();
+    STATE.get_or_init(Default::default)
+}
+
+fn prefetch_enabled() -> bool {
+    !matches!(std::env::var("COM_DEPS_PREFETCH").as_deref(), Ok("0") | Ok("false") | Ok("off"))
+}
+
+/// Bundles what `code` (the bundle of `spec`) imports before the browser asks for it: a cold page
+/// otherwise discovers its dependencies one level at a time (a bundle, then what it imports…).
+/// Once per spec and root; each import is bundled in the background (`prefetch`).
+fn prefetch_imports(root: &Path, spec: &str, code: &str) {
+    if !prefetch_enabled() {
+        return;
+    }
+    let first = prefetch_state().lock().unwrap_or_else(|e| e.into_inner()).0.insert((root.to_path_buf(), spec.to_string()));
+    if first {
+        prefetch(root, imported_specs(code));
+    }
+}
+
+/// Bundles `specs` in the background (behind the browser's requests in the bundler's queue); a spec
+/// already being prefetched is skipped. Its own imports follow (`prefetch_imports`).
+pub fn prefetch(root: &Path, specs: Vec<String>) {
+    if !prefetch_enabled() {
+        return;
+    }
+    for spec in specs {
+        let key = (root.to_path_buf(), spec.clone());
+        if !prefetch_state().lock().unwrap_or_else(|e| e.into_inner()).1.insert(key.clone()) {
+            continue;
+        }
+        let root = root.to_path_buf();
+        // Boxed: `resolve_with` spawns this future, which runs `resolve_with`
+        let task: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> = Box::pin(async move {
+            let _ = resolve_with(&root, &spec, Request::Prefetch).await;
+            prefetch_state().lock().unwrap_or_else(|e| e.into_inner()).1.remove(&key);
+        });
+        tokio::spawn(task);
+    }
+}
+
+/// `.nata/deps/<format>/.specs`: the specs the browser asked for, one per line, bundled again first
+/// when `com dev` starts (`prewarm`)
+fn specs_file(root: &Path) -> PathBuf {
+    root.join(".nata").join("deps").join(BUNDLE_FORMAT).join(".specs")
+}
+
+/// Adds `spec` to `specs_file`, once per root and spec
+fn remember_spec(root: &Path, spec: &str) {
+    static KNOWN: OnceLock<Mutex<HashMap<PathBuf, HashSet<String>>>> = OnceLock::new();
+    let mut known = KNOWN.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner());
+    let set = known.entry(root.to_path_buf()).or_insert_with(|| {
+        std::fs::read_to_string(specs_file(root)).map(|s| s.lines().map(str::to_string).collect()).unwrap_or_default()
+    });
+    if set.insert(spec.to_string()) {
+        use std::io::Write;
+        let file = specs_file(root);
+        let _ = std::fs::create_dir_all(file.parent().unwrap_or(root));
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&file) {
+            let _ = writeln!(f, "{spec}");
+        }
+    }
+}
+
+/// When `com dev` starts: bundles in the background what the project's pages asked for before
+/// (`specs_file`) and React's entry points, so a page after a cache clear or an upgrade finds them
+pub fn prewarm(root: &Path) {
+    let mut specs: Vec<String> = ["react", "react/jsx-dev-runtime", "react-dom", "react-dom/client"].iter().map(|s| s.to_string()).collect();
+    if let Ok(saved) = std::fs::read_to_string(specs_file(root)) {
+        specs.extend(saved.lines().filter(|l| is_valid_specifier(l)).map(str::to_string));
+    }
+    let mut seen = HashSet::new();
+    specs.retain(|s| seen.insert(s.clone()));
+    prefetch(root, specs);
 }
 
 /// Runs `bundleDependency(input)`: in the project's bundler process (retried once, it may have just
@@ -357,6 +527,12 @@ async fn bundle(root: &Path, input: &serde_json::Value) -> Result<String, String
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn imported_specs_reads_the_bundle_s_dependency_urls() {
+        let code = "import React from \"/_nata/deps/react\";\nimport { a } from '/_nata/deps/@scope/pkg/sub.js';\nconst m = import(\"/_nata/deps/lazy-thing\");\nimport x from \"/_nata/deps/react\";\n\"/_nata/deps/../bad\"";
+        assert_eq!(imported_specs(code), vec!["react", "@scope/pkg/sub", "lazy-thing"]);
+    }
 
     #[test]
     fn splits_scoped_and_plain_specifiers() {

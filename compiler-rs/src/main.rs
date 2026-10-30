@@ -53,6 +53,10 @@ enum Commands {
     /// Compile files to CommonJS `es5` for the cloud runtime: JSON `[{path, content}]` on stdin,
     /// `[{path, es5, error?}]` on stdout
     Es5,
+    /// Compile a stylesheet with the native Tailwind CSS v4 (`com publish`): JSON
+    /// `{css, files: [{path, content}], minify}` on stdin (`css` with its `@import`s inlined, `files`
+    /// the code to scan for classes), `{css}` or `{error}` on stdout
+    Tailwind,
     /// Scan App Router structure
     Routes {
         /// Project root directory
@@ -74,6 +78,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if matches!(cli.command, Commands::Es5) {
         let input: Vec<compiler_rs::swc_compiler::cjs::Es5Input> = serde_json::from_reader(std::io::stdin().lock())?;
         let output = compiler_rs::swc_compiler::cjs::compile_all_cjs(input);
+        serde_json::to_writer(std::io::stdout().lock(), &output)?;
+        return Ok(());
+    }
+    if matches!(cli.command, Commands::Tailwind) {
+        #[derive(serde::Deserialize)]
+        struct Input {
+            css: String,
+            files: Vec<tailwind_rs::FileItem>,
+            #[serde(default)]
+            minify: bool,
+        }
+        let input: Input = serde_json::from_reader(std::io::stdin().lock())?;
+        let tokens: Vec<String> = input
+            .files
+            .iter()
+            .flat_map(|f| tailwind_rs::scanner::extract_file_candidates(&f.path, &f.content))
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        let output = match tailwind_rs::engine::compile_stylesheet(&input.css, &tokens, input.minify) {
+            Ok(css) => serde_json::json!({ "css": css }),
+            Err(error) => serde_json::json!({ "error": error }),
+        };
         serde_json::to_writer(std::io::stdout().lock(), &output)?;
         return Ok(());
     }
@@ -139,7 +166,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 std::process::exit(1);
             }
         }
-        Commands::Es5 => unreachable!("handled in main"),
+        Commands::Es5 | Commands::Tailwind => unreachable!("handled in main"),
         Commands::Routes { dir } => {
             let router = compiler_rs::router::AppRouter::scan(&dir);
             println!("\x1b[1;36m◆ DISCOVERED APP ROUTER ROUTES:\x1b[0m");

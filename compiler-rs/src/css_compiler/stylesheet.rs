@@ -146,7 +146,7 @@ pub async fn project_stylesheet(root: &Path) -> Stylesheet {
     if super::tailwind_native::enabled() {
         let (root_buf, entry_buf, input_buf) = (root.to_path_buf(), entry.clone(), input.clone());
         let minify = crate::mode::is_production();
-        let outcome = tokio::task::spawn_blocking(move || super::tailwind_native::compile(&root_buf, entry_buf.as_deref(), &input_buf, minify)).await;
+        let outcome = crate::platform::spawn_blocking(move || super::tailwind_native::compile(&root_buf, entry_buf.as_deref(), &input_buf, minify)).await;
         match outcome {
             Ok(super::tailwind_native::Outcome::Compiled(css)) => return Stylesheet::Compiled(css),
             Ok(super::tailwind_native::Outcome::Failed(err)) => {

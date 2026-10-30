@@ -152,7 +152,11 @@ export async function buildModel(input: RscInput) {
   else keys.splice(notFoundAt + 1);
 
   const nodes: unknown[] = [];
-  const lastSegment = notFoundAt ?? input.segments.length - 1;
+  // No folder matched and there is no root folder either (app/ missing, or not written yet): the
+  // default not-found page, in the document the root layout would have provided
+  const bareNotFound = notFoundAt !== null && input.segments.length === 0;
+  if (bareNotFound) keys.push("/_not-found");
+  const lastSegment = bareNotFound ? -1 : (notFoundAt ?? input.segments.length - 1);
   for (let i = 0; i <= lastSegment; i++) {
     const mods = segmentModules[i];
     // Boundaries read the key of the segment below them on the client (it changes while this layout
@@ -195,6 +199,7 @@ export async function buildModel(input: RscInput) {
     nodes.push(node);
   }
   if (input.segments.length === 0) nodes.push(h("html", { lang: "en" }, h("body", null, h(Outlet, { depth: 1 }))));
+  if (bareNotFound) nodes.push(h(DefaultFallback, { kind: input.fallback ?? "notFound" }));
 
   if (notFoundAt === null) await checkStaticParams(pageMod, segmentModules.map((m) => m.layout), input.params);
   applySegmentConfig([...segmentModules.map((m) => m.layout), pageMod]);
@@ -210,7 +215,7 @@ export async function buildModel(input: RscInput) {
     .slice(0, lastSegment + 1)
     .map((m) => m.layout)
     .filter(Boolean);
-  cascade.push(notFoundAt === null ? pageMod : segmentModules[notFoundAt][input.fallback ?? "notFound"]);
+  cascade.push(notFoundAt === null ? pageMod : segmentModules[notFoundAt]?.[input.fallback ?? "notFound"]);
   const { resolvedTitle, headHtml } = await resolveCascadeMetadata(cascade, {
     params: input.params,
     searchParams: dynamicProps({ ...input.searchParams }, "searchParams"),

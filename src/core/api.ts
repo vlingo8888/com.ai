@@ -1,4 +1,5 @@
 import { getGlobalConfig } from "./config";
+import type { StaticPrepared } from "./static-build";
 
 export interface ViewRawFilesResponse {
   id: number;
@@ -209,28 +210,34 @@ export class NataApiClient {
   }
 
   /**
-   * `com publish` is Publish V2, the same call as the web editor's "Publish" (publishViewV2):
-   * POST /api/views/publish/v2 with `{ view_id }`. There is no fallback to the V1 endpoints, so a
-   * failed V2 publish is reported instead of silently publishing the old way.
+   * `com publish` is the static publish, the same as the web's "Xuất bản tĩnh" and the COM app:
+   * the app is built on this machine (see static-build.ts) and the server only stores the files.
+   * There is no fallback to the old publishes (V1/V2).
+   *
+   * Step 1: the view's files, package versions and the builder to run (`unchanged` when the
+   * published app already has this source).
    */
-  async publishView(
-    viewId: number | string,
-    options: { domain?: string } = {}
-  ): Promise<{ success: boolean; viewId: number; message?: string }> {
-    const res = await fetch(`${this.apiUrl}/api/views/publish/v2`, {
+  async prepareStaticPublish(viewId: number | string): Promise<StaticPrepared> {
+    const res = await fetch(`${this.apiUrl}/api/views/${viewId}/publish-static/browser`, {
+      headers: this.getHeaders(),
+    });
+    if (!res.ok) {
+      throw new Error(`Failed to prepare the publish (${res.status}): ${await res.text()}`);
+    }
+    return await res.json();
+  }
+
+  /** Step 2: stores the built files. 409: the source changed since the prepare, build again. */
+  async uploadStaticPublish(viewId: number | string, payload: unknown): Promise<{ status: "conflict" } | { status: "ok"; body: any }> {
+    const res = await fetch(`${this.apiUrl}/api/views/${viewId}/publish-static/browser`, {
       method: "POST",
       headers: this.getHeaders(),
-      body: JSON.stringify({
-        view_id: Number(viewId),
-        ...(options.domain ? { domain: options.domain } : {}),
-      }),
+      body: JSON.stringify(payload),
     });
-
+    if (res.status === 409) return { status: "conflict" };
     if (!res.ok) {
-      const errorText = await res.text();
-      throw new Error(`Failed to publish view (${res.status}): ${errorText}`);
+      throw new Error(`Failed to publish view (${res.status}): ${await res.text()}`);
     }
-
-    return await res.json();
+    return { status: "ok", body: await res.json().catch(() => ({})) };
   }
 }

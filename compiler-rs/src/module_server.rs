@@ -27,7 +27,7 @@ async fn handle_call_inner(root: &Path, cmd: &str, input: &Value, _body: Vec<u8>
     match cmd {
         "load_module" => {
             let load_blocking = |root: PathBuf, input: Value| async move {
-                tokio::task::spawn_blocking(move || load(&root, &input))
+                crate::platform::spawn_blocking(move || load(&root, &input))
                     .await
                     .unwrap_or_else(|e| (json!({ "kind": "error", "message": e.to_string() }), Vec::new(), Vec::new()))
             };
