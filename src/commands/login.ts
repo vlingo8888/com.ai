@@ -7,6 +7,61 @@ export interface LoginOptions {
   authUrl?: string;
 }
 
+const PAGE_CSS = `
+  *{box-sizing:border-box;margin:0;padding:0}
+  :root{--bg:#fafafa;--card:#fff;--border:#eaeaea;--fg:#171717;--muted:#666;--subtle:#8f8f8f;--ok:#0a7d33;--okbg:#e9f9ee}
+  html,body{height:100%}
+  body{font-family:"Geist",-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;background:var(--bg);color:var(--fg);-webkit-font-smoothing:antialiased;display:flex;flex-direction:column;min-height:100vh}
+  header{height:64px;display:flex;align-items:center;padding:0 24px;border-bottom:1px solid var(--border);background:var(--card)}
+  .brand{display:flex;align-items:center;gap:10px;font-weight:600;font-size:15px;letter-spacing:-.01em}
+  .logo{width:22px;height:22px;border-radius:6px;background:var(--fg);color:#fff;display:grid;place-items:center;font-size:12px;font-weight:700}
+  main{flex:1;display:grid;place-items:center;padding:32px 16px}
+  .card{width:100%;max-width:420px;background:var(--card);border:1px solid var(--border);border-radius:12px;padding:40px 32px 32px;box-shadow:0 1px 2px rgba(0,0,0,.04);text-align:center;animation:in .35s ease-out}
+  @keyframes in{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+  .check{width:48px;height:48px;border-radius:50%;background:var(--okbg);display:grid;place-items:center;margin:0 auto 20px}
+  h1{font-size:22px;font-weight:600;letter-spacing:-.02em;margin-bottom:8px}
+  p{color:var(--muted);font-size:14px;line-height:1.6}
+  .user{margin-top:24px;display:flex;align-items:center;gap:12px;padding:12px;border:1px solid var(--border);border-radius:8px;text-align:left}
+  .avatar{width:32px;height:32px;border-radius:50%;background:#f2f2f2;display:grid;place-items:center;font-size:13px;font-weight:600;color:var(--muted);overflow:hidden;flex:none}
+  .avatar img{width:100%;height:100%;object-fit:cover}
+  .user b{display:block;font-size:14px;font-weight:500}
+  .user span{display:block;font-size:13px;color:var(--subtle);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .hint{margin-top:24px;padding-top:20px;border-top:1px solid var(--border);font-size:13px;color:var(--subtle)}
+  kbd{font-family:"Geist Mono",ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;background:#f5f5f5;border:1px solid var(--border);border-radius:4px;padding:1px 6px;color:var(--fg)}
+  .spin{width:20px;height:20px;border:2px solid var(--border);border-top-color:var(--fg);border-radius:50%;animation:r .7s linear infinite;margin:0 auto 16px}
+  @keyframes r{to{transform:rotate(360deg)}}
+  footer{padding:20px;text-align:center;font-size:12px;color:var(--subtle)}
+`;
+
+function esc(v: unknown): string {
+  return String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]!));
+}
+
+function pageShell(title: string, body: string): string {
+  return `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${title}</title><link rel="preconnect" href="https://fonts.googleapis.com"><link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono&display=swap" rel="stylesheet"><style>${PAGE_CSS}</style></head><body><header><div class="brand"><div class="logo">C</div>com.ai.vn</div></header><main>${body}</main><footer>© com.ai.vn · Center Auth</footer></body></html>`;
+}
+
+function successPage(user: any): string {
+  const name = user?.name || user?.displayName || "";
+  const email = user?.email || "";
+  const pic = user?.picture || user?.avatar || user?.avatarUrl || "";
+  const initial = esc((name || email || "?").trim().charAt(0).toUpperCase());
+  const userBlock = name || email
+    ? `<div class="user"><div class="avatar">${pic ? `<img src="${esc(pic)}" alt="" referrerpolicy="no-referrer">` : initial}</div><div style="min-width:0">${name ? `<b>${esc(name)}</b>` : ""}${email ? `<span>${esc(email)}</span>` : ""}</div></div>`
+    : "";
+  return pageShell(
+    "Signed in · com.ai.vn",
+    `<div class="card"><div class="check"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#0a7d33" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg></div><h1>You're signed in</h1><p>The com CLI is now connected to your account.<br>You can close this tab and return to your terminal.</p>${userBlock}<div class="hint">Next, run <kbd>com create</kbd> in your terminal</div></div>`
+  );
+}
+
+function processingPage(): string {
+  return pageShell(
+    "Signing in · com.ai.vn",
+    `<div class="card"><div class="spin"></div><h1>Signing you in…</h1><p>Verifying your session. This only takes a moment.</p></div><script>const h=location.hash.substring(1);if(h){const q=new URLSearchParams(h);const t=q.get('token')||q.get('access_token')||q.get('jwt');if(t)location.href='/callback?token='+encodeURIComponent(t);}</script>`
+  );
+}
+
 export async function loginCommand(options: LoginOptions = {}) {
   logger.hero();
   console.log(`\n  ${colors.bold}${colors.indigo}◆ AUTHENTICATING WITH COM.AI.VN${colors.reset}\n`);
@@ -44,107 +99,13 @@ export async function loginCommand(options: LoginOptions = {}) {
 
             if (queryToken) {
               receivedToken = queryToken;
-              return new Response(
-                `<!DOCTYPE html>
-                <html lang="en">
-                  <head>
-                    <meta charset="utf-8">
-                    <title>Com.AI.VN - Authentication Successful</title>
-                    <meta name="viewport" content="width=device-width, initial-scale=1">
-                    <style>
-                      * { box-sizing: border-box; margin: 0; padding: 0; }
-                      body {
-                        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-                        display: flex;
-                        align-items: center;
-                        justify-content: center;
-                        min-height: 100vh;
-                        background: radial-gradient(circle at 50% 0%, #1e1b4b 0%, #090d16 80%);
-                        color: #f8fafc;
-                      }
-                      .card {
-                        text-align: center;
-                        padding: 52px 40px;
-                        background: rgba(17, 24, 39, 0.8);
-                        backdrop-filter: blur(20px);
-                        border-radius: 24px;
-                        box-shadow: 0 25px 60px rgba(0,0,0,0.6), 0 0 50px rgba(99, 102, 241, 0.15);
-                        border: 1px solid rgba(255, 255, 255, 0.12);
-                        max-width: 460px;
-                        width: 90%;
-                        animation: slideUp 0.4s ease-out;
-                      }
-                      @keyframes slideUp {
-                        from { opacity: 0; transform: translateY(20px); }
-                        to { opacity: 1; transform: translateY(0); }
-                      }
-                      .icon-check {
-                        width: 64px;
-                        height: 64px;
-                        background: linear-gradient(135deg, #10b981, #059669);
-                        border-radius: 50%;
-                        display: inline-flex;
-                        align-items: center;
-                        justify-content: center;
-                        font-size: 32px;
-                        margin-bottom: 20px;
-                        box-shadow: 0 0 30px rgba(16, 185, 129, 0.3);
-                      }
-                      h1 {
-                        font-size: 24px;
-                        font-weight: 700;
-                        background: linear-gradient(135deg, #38bdf8, #818cf8);
-                        -webkit-background-clip: text;
-                        -webkit-text-fill-color: transparent;
-                        margin-bottom: 12px;
-                      }
-                      p { color: #94a3b8; font-size: 15px; line-height: 1.6; }
-                      .badge {
-                        display: inline-block;
-                        margin-top: 28px;
-                        padding: 8px 20px;
-                        background: rgba(56, 189, 248, 0.1);
-                        border: 1px solid rgba(56, 189, 248, 0.3);
-                        color: #38bdf8;
-                        border-radius: 9999px;
-                        font-size: 13px;
-                        font-weight: 600;
-                        letter-spacing: 0.5px;
-                      }
-                    </style>
-                  </head>
-                  <body>
-                    <div class="card">
-                      <div class="icon-check">✓</div>
-                      <h1>Authentication Successful</h1>
-                      <p>Center Auth has granted access. You may now close this browser tab and return to your terminal.</p>
-                      <div class="badge">COM.AI.VN CLI CONNECTED</div>
-                    </div>
-                  </body>
-                </html>`,
+              return new Response(successPage(receivedUser),
                 { headers: { "Content-Type": "text/html; charset=utf-8" } }
               );
             }
 
             // Fallback for OAuth hash fragments (#token=... or #access_token=...)
-            return new Response(
-              `<!DOCTYPE html>
-              <html>
-                <head><title>Processing Authentication...</title></head>
-                <body style="background:#090d16;color:#fff;font-family:sans-serif;text-align:center;padding-top:60px;">
-                  <p>Processing token verification...</p>
-                  <script>
-                    const hash = window.location.hash.substring(1);
-                    if (hash) {
-                      const params = new URLSearchParams(hash);
-                      const t = params.get('token') || params.get('access_token') || params.get('jwt');
-                      if (t) {
-                        window.location.href = '/callback?token=' + encodeURIComponent(t);
-                      }
-                    }
-                  </script>
-                </body>
-              </html>`,
+            return new Response(processingPage(),
               { headers: { "Content-Type": "text/html; charset=utf-8" } }
             );
           }
