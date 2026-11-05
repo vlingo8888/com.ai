@@ -35,7 +35,7 @@ function printHelp() {
     ${colors.green}db search${colors.reset} ${colors.sky}<query>${colors.reset}    Search database tables and columns by keyword
     ${colors.green}migrate${colors.reset}  ${colors.sky}<sql|file>${colors.reset}  Execute SQL migration and auto-sync database schema
     ${colors.green}version | -v${colors.reset}          Display system, CLI, and runtime engine versions
-    ${colors.green}push | save${colors.reset}           Save local changes to the Cloud (not published; --dry-run, --force)
+    ${colors.green}push | save${colors.reset}           Save local changes to the Cloud (not published; --dry-run, --force, --code-only)
     ${colors.green}publish${colors.reset}       ${colors.sky}[viewId]${colors.reset}       Build here and publish the View (static, like the web editor)
 
   ${colors.bold}${colors.white}OPTIONS:${colors.reset}
@@ -575,6 +575,7 @@ async function main() {
       let token: string | undefined;
       let dryRun = false;
       let force = false;
+      let codeOnly = false;
 
       for (let i = 1; i < args.length; i++) {
         if ((args[i] === "--dir" || args[i] === "-d") && args[i + 1]) {
@@ -589,10 +590,12 @@ async function main() {
           dryRun = true;
         } else if (args[i] === "--force" || args[i] === "-f") {
           force = true;
+        } else if (args[i] === "--code-only") {
+          codeOnly = true;
         }
       }
 
-      await (await import("../src/commands/save")).saveCommand({ dir, api, token, viewId, dryRun, force });
+      await (await import("../src/commands/save")).saveCommand({ dir, api, token, viewId, dryRun, force, codeOnly });
       break;
     }
 

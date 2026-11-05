@@ -13,6 +13,8 @@ export interface SaveOptions {
   message?: string;
   dryRun?: boolean;
   force?: boolean;
+  /** Upload only code files (what the publish builds); the others stay as they are on the server */
+  codeOnly?: boolean;
 }
 
 const IGNORED_DIRS = new Set([
@@ -28,6 +30,7 @@ const IGNORED_DIRS = new Set([
   ".vercel",
   ".idea",
   ".vscode",
+  ".playwright-mcp", // browser snapshots/logs from the Playwright MCP
 ]);
 
 const IGNORED_FILES = new Set([
@@ -48,6 +51,7 @@ const IGNORED_EXTENSIONS = new Set([
   ".gz",
   ".exe",
   ".bin",
+  ".tsbuildinfo", // TypeScript incremental build cache
 ]);
 
 /** Assets the server stores as text; uploading them through `readFileSync(..., "utf-8")` corrupts them. */
@@ -57,6 +61,14 @@ const BINARY_EXTENSIONS = new Set([
   ".mp3", ".mp4", ".webm", ".wav",
   ".pdf",
 ]);
+
+/**
+ * What the static publish builds: code it bundles, stylesheets and SVG (the only text asset).
+ * Same list as `is_build_file` in publisher-static-rs; the publisher ignores every other file.
+ */
+const CODE_EXTENSIONS = new Set([".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".json", ".css", ".svg"]);
+
+export const isCodeFile = (path: string) => CODE_EXTENSIONS.has(extname(path).toLowerCase());
 
 const MAX_FILE_BYTES = 2 * 1024 * 1024;
 
@@ -85,11 +97,15 @@ export interface ScannedFile {
   size: number;
 }
 
-/** Files to upload. Binary and oversized files go to `skipped` and stay as they are on the server. */
+/**
+ * Files to upload. Binary and oversized files go to `skipped` and stay as they are on the server;
+ * with `codeOnly` (publish), so do files that are not code (.md, .sql, lockfiles…).
+ */
 export function collectProjectFiles(
   dir: string,
   baseDir: string = dir,
-  skipped: string[] = []
+  skipped: string[] = [],
+  codeOnly = false
 ): ScannedFile[] {
   const result: ScannedFile[] = [];
   if (!existsSync(dir)) return result;
@@ -102,12 +118,16 @@ export function collectProjectFiles(
 
     if (entry.isDirectory()) {
       if (IGNORED_DIRS.has(entry.name)) continue;
-      result.push(...collectProjectFiles(fullPath, baseDir, skipped));
+      result.push(...collectProjectFiles(fullPath, baseDir, skipped, codeOnly));
     } else if (entry.isFile()) {
       if (IGNORED_FILES.has(entry.name)) continue;
       // Never push environment secrets to cloud
       if (entry.name === ".env" || entry.name.startsWith(".env.")) continue;
       if (IGNORED_EXTENSIONS.has(extname(entry.name).toLowerCase())) continue;
+      if (codeOnly && !isCodeFile(entry.name)) {
+        skipped.push(relPath);
+        continue;
+      }
 
       try {
         const stats = statSync(fullPath);
@@ -194,7 +214,7 @@ export async function saveCommand(options: SaveOptions = {}) {
   // Step 1: Scan local source files
   const spinner = logger.spinner("Scanning and packaging local source tree...");
   const skipped: string[] = [];
-  const files = collectProjectFiles(targetDir, targetDir, skipped);
+  const files = collectProjectFiles(targetDir, targetDir, skipped, options.codeOnly);
   const totalBytes = files.reduce((acc, f) => acc + f.size, 0);
   const sentPaths = new Set(files.map((f) => f.path));
   const deleted = computeDeleted(targetDir, localConfig?.files, sentPaths);
@@ -208,7 +228,7 @@ export async function saveCommand(options: SaveOptions = {}) {
   spinner.stop(true, `Packaged ${files.length} files (${(totalBytes / 1024).toFixed(1)} KB)`);
 
   if (skipped.length > 0) {
-    logger.info(`${skipped.length} binary/large file(s) not uploaded (any copy already on the server is kept unchanged):`);
+    logger.info(`${skipped.length} ${options.codeOnly ? "non-code/binary/large" : "binary/large"} file(s) not uploaded (any copy already on the server is kept unchanged):`);
     for (const p of skipped) {
       console.log(`    ${colors.darkGray}○ ${p}${colors.reset}`);
     }

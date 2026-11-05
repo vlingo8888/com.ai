@@ -9,7 +9,9 @@ export type StudioEvent =
   /** The link the Zalo QR code encodes (open the mini app on a phone) */
   | { type: "zalo-qr"; url: string; appId: string; clientIp: string }
   /** A tunnel reconnected on a new public URL: links printed before it no longer work */
-  | { type: "tunnel-url-changed"; label: string; url: string; previous: string };
+  | { type: "tunnel-url-changed"; label: string; url: string; previous: string }
+  /** `com publish`: a build stage started (`percent` is where it starts on the 0–100 bar) */
+  | { type: "publish-progress"; stage: string; percent: number };
 
 export const inStudio = () => process.env.COM_STUDIO === "1";
 

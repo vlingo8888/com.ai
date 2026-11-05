@@ -3,6 +3,7 @@ import { NataApiClient, SaveConflictError } from "../core/api";
 import { getLocalViewConfig, saveLocalViewConfig } from "../core/config";
 import { logger, colors } from "../core/logger";
 import { compileAllEs5 } from "../core/es5";
+import { studioEvent } from "../core/studio";
 import { collectProjectFiles, computeDeleted, recordSave } from "./save";
 import { buildStaticApp, STAGE_PERCENT, type StaticPublishStage } from "../core/static-build";
 
@@ -92,7 +93,8 @@ export async function publishCommand(options: PublishOptions = {}) {
   // Step 1: Save/sync latest code to Cloud before publishing (unless --skip-save)
   if (!options.skipSave) {
     const spinner = logger.spinner("Packaging and syncing latest changes to Cloud before publishing...");
-    const files = collectProjectFiles(targetDir);
+    // Only code: the publish builds nothing else, and other files stay as they are on the server
+    const files = collectProjectFiles(targetDir, targetDir, [], true);
     const deleted = computeDeleted(targetDir, localConfig?.files, new Set(files.map((f) => f.path)));
     if (files.length > 0 || deleted.length > 0) {
       try {
@@ -144,9 +146,10 @@ export async function publishCommand(options: PublishOptions = {}) {
   const startTime = Date.now();
 
   try {
-    const unchanged = await publishStatic(client, viewId, (stage, percent) =>
-      pubSpinner.update(`Publishing View #${viewId} ${colors.bold}${percent}%${colors.reset} ${colors.darkGray}${STAGE_LABEL[stage]}${colors.reset}`)
-    );
+    const unchanged = await publishStatic(client, viewId, (stage, percent) => {
+      studioEvent({ type: "publish-progress", stage, percent });
+      pubSpinner.update(`Publishing View #${viewId} ${colors.bold}${percent}%${colors.reset} ${colors.darkGray}${STAGE_LABEL[stage]}${colors.reset}`);
+    });
 
     const elapsed = ((Date.now() - startTime) / 1000).toFixed(2);
     pubSpinner.stop(

@@ -1,6 +1,12 @@
 import { getGlobalConfig } from "./config";
 import type { StaticPrepared } from "./static-build";
 
+/** How long `com save` waits for the cloud to answer one request. Override with COM_SAVE_TIMEOUT_MS. */
+export function saveTimeoutMs(): number {
+  const v = Number(process.env.COM_SAVE_TIMEOUT_MS);
+  return Number.isFinite(v) && v > 0 ? v : 180_000;
+}
+
 export interface ViewRawFilesResponse {
   id: number;
   /** Server version of the files; sent back as `baseUpdatedAt` on save. */
@@ -157,6 +163,17 @@ export class NataApiClient {
     files: Array<{ path: string; content: string; es5?: string }>,
     options: SaveViewOptions = {}
   ): Promise<SaveViewResponse> {
+    const timeoutMs = saveTimeoutMs();
+    const post = (url: string, method: string, body: string) =>
+      fetch(url, { method, headers: this.getHeaders(), body, signal: AbortSignal.timeout(timeoutMs) }).catch((err) => {
+        if (err?.name === "TimeoutError" || err?.name === "AbortError") {
+          throw new Error(
+            `The cloud did not answer within ${Math.round(timeoutMs / 1000)}s (${(body.length / 1e6).toFixed(1)} MB sent to ${url}). ` +
+              "The server may be busy or rejecting large uploads; try again, or set COM_SAVE_TIMEOUT_MS to wait longer."
+          );
+        }
+        throw err;
+      });
     const rawFilesUrl = `${this.apiUrl}/api/views/${viewId}/raw_files`;
     const payload = {
       files,
@@ -169,31 +186,19 @@ export class NataApiClient {
       force: options.force,
     };
 
+    const body = JSON.stringify(payload);
+
     // 1. Try POST /api/views/:id/raw_files
-    let res = await fetch(rawFilesUrl, {
-      method: "POST",
-      headers: this.getHeaders(),
-      body: JSON.stringify(payload),
-    });
+    let res = await post(rawFilesUrl, "POST", body);
 
     // 2. If endpoint not found (404/405), fallback to POST /api/views/:id/save
     if (!res.ok && (res.status === 404 || res.status === 405)) {
-      const saveUrl = `${this.apiUrl}/api/views/${viewId}/save`;
-      res = await fetch(saveUrl, {
-        method: "POST",
-        headers: this.getHeaders(),
-        body: JSON.stringify(payload),
-      });
+      res = await post(`${this.apiUrl}/api/views/${viewId}/save`, "POST", body);
     }
 
     // 3. Fallback to standard PUT /api/views/:id
     if (!res.ok && (res.status === 404 || res.status === 405)) {
-      const updateUrl = `${this.apiUrl}/api/views/${viewId}`;
-      res = await fetch(updateUrl, {
-        method: "PUT",
-        headers: this.getHeaders(),
-        body: JSON.stringify(payload),
-      });
+      res = await post(`${this.apiUrl}/api/views/${viewId}`, "PUT", body);
     }
 
     if (res.status === 409) {

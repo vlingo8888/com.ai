@@ -33,11 +33,16 @@ describe("Save Command - collectProjectFiles", () => {
       writeFileSync(join(tempDir, ".env"), 'DATABASE_URL="postgres://..."');
       writeFileSync(join(tempDir, ".env.local"), 'SECRET="xyz"');
       writeFileSync(join(tempDir, ".DS_Store"), "ds-store-binary");
+      writeFileSync(join(tempDir, "tsconfig.tsbuildinfo"), '{"program":{}}');
+      mkdirSync(join(tempDir, ".playwright-mcp"), { recursive: true });
+      writeFileSync(join(tempDir, ".playwright-mcp", "page-1.yml"), "- generic");
 
       const files = collectProjectFiles(tempDir);
       const paths = files.map((f) => f.path);
 
       expect(paths).toContain("app/page.tsx");
+      expect(paths).not.toContain("tsconfig.tsbuildinfo");
+      expect(paths).not.toContain(".playwright-mcp/page-1.yml");
       expect(paths).toContain("package.json");
       expect(paths).toContain("README.md");
 
@@ -213,6 +218,48 @@ describe("Save Command - recordSave", () => {
       expect(config?.files.map((f) => f.path)).toEqual(["keep.ts", "new.ts"]);
     } finally {
       rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("Save Command - cloud timeout", () => {
+  it("fails with a clear error instead of hanging when the server never answers", async () => {
+    const mockServer = Bun.serve({
+      port: 0,
+      fetch() {
+        return new Promise<Response>(() => {}); // never answers
+      },
+    });
+    const prev = process.env.COM_SAVE_TIMEOUT_MS;
+    process.env.COM_SAVE_TIMEOUT_MS = "300";
+    try {
+      const client = new NataApiClient(`http://localhost:${mockServer.port}`, "test-token");
+      await expect(
+        client.saveViewRawFiles(1, [{ path: "a.ts", content: "x" }], { mode: "merge" })
+      ).rejects.toThrow(/did not answer within/);
+    } finally {
+      if (prev === undefined) delete process.env.COM_SAVE_TIMEOUT_MS;
+      else process.env.COM_SAVE_TIMEOUT_MS = prev;
+      mockServer.stop(true);
+    }
+  });
+});
+
+describe("collectProjectFiles codeOnly", () => {
+  it("keeps code, styles and svg; reports other files as skipped", () => {
+    const dir = mkdtempSync(join(tmpdir(), "com-codeonly-"));
+    try {
+      mkdirSync(join(dir, "app"));
+      for (const p of ["app/page.tsx", "app/globals.css", "package.json", "public.svg", "AGENTS.md", "schema.sql", "bun.lock", ".gitignore"]) {
+        writeFileSync(join(dir, p), "x");
+      }
+      const skipped: string[] = [];
+      const files = collectProjectFiles(dir, dir, skipped, true).map((f) => f.path);
+      expect(files).toEqual(["app/globals.css", "app/page.tsx", "package.json", "public.svg"]);
+      expect(skipped).toEqual([".gitignore", "AGENTS.md", "bun.lock", "schema.sql"]);
+      expect(collectProjectFiles(dir).length).toBe(8);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 });
