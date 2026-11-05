@@ -19,8 +19,8 @@ function printHelp() {
     ${colors.green}clone${colors.reset}  ${colors.sky}<viewId>${colors.reset}       Download project source code by View ID
     ${colors.green}dev${colors.reset}                   Start local development server with Hot Reload
     ${colors.green}tunnel${colors.reset}                Expose local port to the internet via tunnel-rs
-    ${colors.green}build${colors.reset}                 Production build (.nata/build) or Zalo Mini App package
-    ${colors.green}start${colors.reset}                 Serve the production build (after com build)
+    ${colors.green}build${colors.reset}                 Production build (.nata/build) or Zalo Mini App package; --standalone, --bundle-com
+    ${colors.green}start | serve${colors.reset}         Serve the production build (after com build); --standalone
     ${colors.green}lint${colors.reset}  ${colors.sky}[paths]${colors.reset}        Lint with oxlint (React + Next.js rules); --fix, --types
     ${colors.green}typecheck${colors.reset}             Type check the project (tsc --noEmit)
     ${colors.green}doctor${colors.reset}                Check Bun, engine, port, env and unsupported config
@@ -234,7 +234,8 @@ async function main() {
       break;
     }
 
-    case "start": {
+    case "start":
+    case "serve": {
       let dir: string | undefined;
       let port: string | undefined;
       let hostname: string | undefined;
@@ -243,7 +244,8 @@ async function main() {
         else if (args[i] === "--dir" && args[i + 1]) dir = args[++i];
         else if ((args[i] === "--hostname" || args[i] === "-H") && args[i + 1]) hostname = args[++i];
       }
-      await (await import("../src/commands/start")).startCommand({ dir, port, hostname });
+      const standalone = args.includes("--standalone");
+      await (await import("../src/commands/start")).startCommand({ dir, port, hostname, standalone });
       break;
     }
 
@@ -321,6 +323,7 @@ async function main() {
       let dir: string | undefined;
       let target: "web" | "zalo" | undefined;
       let outDir: string | undefined;
+      let standaloneOut: string | undefined;
       for (let i = 1; i < args.length; i++) {
         if (args[i] === "--dir" && args[i + 1]) {
           dir = args[++i];
@@ -329,9 +332,13 @@ async function main() {
           if (val === "zalo" || val === "web") target = val;
         } else if ((args[i] === "--out" || args[i] === "-o") && args[i + 1]) {
           outDir = args[++i];
+        } else if (args[i] === "--standalone-out" && args[i + 1]) {
+          standaloneOut = args[++i];
         }
       }
-      await (await import("../src/commands/build")).buildCommand({ dir, target, outDir });
+      const bundleCom = args.includes("--bundle-com");
+      const standalone = args.includes("--standalone") || bundleCom || !!standaloneOut;
+      await (await import("../src/commands/build")).buildCommand({ dir, target, outDir, standalone, standaloneOut, bundleCom });
       break;
     }
 
