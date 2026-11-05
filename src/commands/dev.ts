@@ -573,6 +573,9 @@ export async function devCommand(options: DevOptions = {}) {
     ...(options.start && options.start.startsWith("/") ? { COM_ZALO_START: options.start } : {}),
     ...(options.zmpMock ? { COM_ZMP_MOCK: "1" } : {}),
     NEXT_PUBLIC_API_URL: effectiveBackendUrl,
+    // The CLI's own @pglite/core: the worker falls back to it when the project's copy has no native
+    // addon for this platform (npm @pglite/core ships none for Windows; COM Studio bundles one)
+    ...(process.env.COM_PGLITE_MODULE ? {} : cliPgliteModule()),
   };
   // Without tunnels to supervise, this process would only wait for the engine: let the engine take it
   // over instead of keeping a Bun runtime (~55MB) alive for the whole session
@@ -585,4 +588,13 @@ export async function devCommand(options: DevOptions = {}) {
   });
 
   await proc.exited;
+}
+
+/** `{ COM_PGLITE_MODULE }` with the entry of the CLI's @pglite/core, or nothing when it has none */
+function cliPgliteModule(): { COM_PGLITE_MODULE?: string } {
+  try {
+    return { COM_PGLITE_MODULE: require.resolve("@pglite/core") };
+  } catch {
+    return {};
+  }
 }

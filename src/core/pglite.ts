@@ -28,6 +28,9 @@ export function loadPGliteClass(projectDir: string): any | null {
 }
 
 function pgliteCore(pkg: any): any {
+  // A copy without a native addon for this platform (npm's has none for Windows) throws only when
+  // constructed: skip it so the next candidate is tried
+  if (pkg.isNativeAvailable?.() === false) return null;
   return pkg.PGLite || pkg.PGLiteNative;
 }
 

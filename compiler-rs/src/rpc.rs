@@ -270,10 +270,17 @@ function createDbInstance(): Kysely<any> {
 
     // @pglite/core (what `com create` installs) first, like the CLI's runtime, then @electric-sql/pglite
     let PGlite: any = null;
+    // A copy whose native addon does not load for this platform throws only when constructed: skip it
+    const usable = (native: any) => (native.isNativeAvailable?.() === false ? null : native.PGLite || native.PGLiteNative);
     try {
-      const native = require("@pglite/core");
-      PGlite = native.PGLite || native.PGLiteNative;
+      PGlite = usable(require("@pglite/core"));
     } catch {}
+    // The CLI's copy (COM_PGLITE_MODULE, set by `com dev`): the project's has no addon for this platform
+    if (!PGlite && process.env.COM_PGLITE_MODULE) {
+      try {
+        PGlite = usable(require(process.env.COM_PGLITE_MODULE));
+      } catch {}
+    }
     PGlite ??= require("@electric-sql/pglite").PGlite;
     // Created on the first query: loading PGlite's WASM costs tens of MB, and many requests never query
     let pgliteInstance: any = null;
