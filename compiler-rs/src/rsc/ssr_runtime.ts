@@ -68,16 +68,24 @@ function documentStream(html: ReadableStream<Uint8Array>, flight: ReadableStream
 
       let buffered = "";
       let timer: ReturnType<typeof setTimeout> | null = null;
-      const flush = () => {
+      const flush = (last = false) => {
         timer = null;
         let out = buffered;
         buffered = "";
         if (!headInjected) {
           const head = out.match(/<head(\s[^>]*)?>/i);
-          if (!head) {
+          if (!head && last) {
+            // React wrote no document (a root layout without <html>): one around it, rather than
+            // dropping the whole page
+            out = `<!DOCTYPE html><html><head>${headStart}</head><body>` + out;
+            headInjected = true;
+          } else if (!head) {
             buffered = out;
             return;
           }
+        }
+        if (!headInjected) {
+          const head = out.match(/<head(\s[^>]*)?>/i)!;
           const at = head.index! + head[0].length;
           out = out.slice(0, at) + headStart + out.slice(at);
           headInjected = true;
@@ -95,7 +103,7 @@ function documentStream(html: ReadableStream<Uint8Array>, flight: ReadableStream
       buffered += decoder.decode();
       if (timer) clearTimeout(timer);
       await flightDone;
-      flush();
+      flush(true);
       controller.enqueue(encoder.encode("</body></html>"));
       controller.close();
     },

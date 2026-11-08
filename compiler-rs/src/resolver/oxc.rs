@@ -75,7 +75,10 @@ impl LayerResolvers {
         let intl_config = ["i18n/request.ts", "src/i18n/request.ts", "i18n/request.js", "src/i18n/request.js", "i18n.ts", "src/i18n.ts"]
             .iter()
             .map(|p| root.join(p))
-            .find(|p| p.is_file());
+            .find(|p| p.is_file())
+            // None in the project: the engine's default (next-intl's own file throws "Couldn't find
+            // next-intl config file" in every server render of NextIntlClientProvider)
+            .or_else(|| Some(root.join(".nata/next-intl-config.ts")).filter(|p| p.is_file()));
         let mut alias = intl_config
             .map(|p| vec![("next-intl/config$".to_string(), vec![AliasValue::Path(path_str(p))])])
             .unwrap_or_default();

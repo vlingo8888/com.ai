@@ -56,6 +56,7 @@ impl RpcExecutor {
         nata_dir.join("core.ts").is_file()
             && nata_dir.join("next/request.ts").is_file()
             && nata_dir.join("next-intl-server.ts").is_file()
+            && nata_dir.join("next-intl-config.ts").is_file()
             && (crate::project::project_core(root).is_some() || crate::store::packages_dir(root).join("core/index.js").is_file())
             && (crate::project::has_real_next(root) || crate::store::packages_dir(root).join("next/package.json").is_file())
     }
@@ -83,6 +84,8 @@ impl RpcExecutor {
   PostgresAdapter,
   PostgresIntrospector,
   PostgresQueryCompiler,
+  PostgresDialect,
+  createFunctionModule,
   type Driver,
   type DatabaseConnection,
   type QueryResult as KyselyQueryResult,
@@ -234,10 +237,13 @@ let dbInstance: Kysely<any> | null = null;
 
 function createDbInstance(): Kysely<any> {
   const dbUrl = process.env.DATABASE_URL || process.env.POSTGRES_URL;
+  // Why DATABASE_URL was not used, for the warning when everything else fails too
+  let pgError = "";
   if (dbUrl) {
     try {
       const { Pool } = require("pg");
-      const { PostgresDialect } = require("kysely");
+      // Imported, not required: kysely 0.29 is ES modules only, and the browser runtime (bun-rust)
+      // cannot require() an ES module synchronously (the pg path failed silently into the mock driver)
       const baseDialect = new PostgresDialect({
         pool: new Pool({
           connectionString: dbUrl,
@@ -255,7 +261,9 @@ function createDbInstance(): Kysely<any> {
           createIntrospector: (d) => baseDialect.createIntrospector(d),
         },
       });
-    } catch {}
+    } catch (err: any) {
+      pgError = `DATABASE_URL is set but pg failed: ${err?.message || err}. `;
+    }
   }
 
   try {
@@ -398,7 +406,7 @@ function createDbInstance(): Kysely<any> {
       },
     });
   } catch (err: any) {
-    console.warn("\x1b[33m[NATA Core] No database driver: set DATABASE_URL (with pg installed) or install @pglite/core (bun add @pglite/core). Queries return no rows.\x1b[0m", err?.message || err);
+    console.warn("\x1b[33m[NATA Core] No database driver: set DATABASE_URL (with pg installed) or install @pglite/core (bun add @pglite/core). Queries return no rows.\x1b[0m", pgError + (err?.message || err));
     class MockDriver implements Driver {
       async init(): Promise<void> {}
       async acquireConnection(): Promise<DatabaseConnection> {
@@ -434,7 +442,6 @@ export const db = new Proxy({} as Kysely<any>, {
     if (prop === "fn") {
       if (!functionModule) {
         try {
-          const { createFunctionModule } = require("kysely");
           functionModule = createFunctionModule();
         } catch {}
       }
@@ -672,6 +679,8 @@ export default {
         // nothing outside `.nata/` is written for it, the resolver aliases reach the framework modules
         let real_next = crate::project::has_real_next(root);
         let own_core = crate::project::project_core(root).is_some();
+        // Inside the project's core/, "core" is the platform (no import cycle through core/index.ts)
+        crate::project::write_core_tsconfig(root);
 
         // 2-3. next/headers, next/server, next/navigation, next/cache: compiler-rs/src/next/
         crate::next_shims::write(root);
@@ -681,6 +690,8 @@ export default {
 
         // next-intl/server: compiler-rs/src/next/intl-server.ts
         crate::next_shims::write_if_changed(nata_dir.join("next-intl-server.ts"), include_str!("next/intl-server.ts"));
+        // next-intl/config for projects without i18n/request.ts: compiler-rs/src/next/intl-config.ts
+        crate::next_shims::write_if_changed(nata_dir.join("next-intl-config.ts"), include_str!("next/intl-config.ts"));
 
         // 4. Ensure node_modules/core has canonical NATA package files (overriding any broken ancient core package)
         let packages = crate::store::packages_dir(root);
@@ -1346,6 +1357,19 @@ mod tests {
         assert!(root.join("node_modules/core/package.json").is_file());
         assert!(root.join("node_modules/next/package.json").is_file());
         assert!(root.join("node_modules/next/headers.js").is_file());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn next_intl_config_defaults_to_the_engine() {
+        // No i18n/request.ts: next-intl's own `next-intl/config` throws in every server render
+        let root = project("intl");
+        RpcExecutor::ensure_runtime_env(&root);
+        let page = root.join("app/page.tsx");
+        let resolved = crate::resolver::oxc::resolvers(&root)
+            .resolve(crate::resolver::types::Layer::Rsc, &page, "next-intl/config")
+            .expect("next-intl/config resolves");
+        assert!(resolved.path.ends_with(".nata/next-intl-config.ts"), "{:?}", resolved.path);
         let _ = std::fs::remove_dir_all(&root);
     }
 

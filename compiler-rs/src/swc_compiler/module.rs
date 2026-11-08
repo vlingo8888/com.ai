@@ -357,7 +357,15 @@ impl ImportRewriter<'_> {
         // Shared by both layers and loaded natively by Bun: one database connection per worker. The
         // project's own `core/` (comx builds) by path, `.nata/core.ts` through node_modules/core
         if clean == "core" {
-            return crate::project::project_core(self.root).map(|p| p.to_string_lossy().replace('\\', "/"));
+            let own = crate::project::project_core(self.root)?;
+            // Files of that core/ itself mean the platform (core/db.ts re-exports its db): .nata/core.ts
+            if self.file.starts_with(self.root.join("core")) {
+                let platform = self.root.join(".nata/core.ts");
+                if platform.is_file() {
+                    return Some(platform.to_string_lossy().replace('\\', "/"));
+                }
+            }
+            return Some(own.to_string_lossy().replace('\\', "/"));
         }
         // next-intl's server API, for `[locale]` routes (works with or without the next-intl package)
         if clean == "next-intl/server" {

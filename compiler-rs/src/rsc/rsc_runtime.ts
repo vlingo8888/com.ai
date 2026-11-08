@@ -29,6 +29,29 @@ export { decodeAction, decodeFormState, decodeReply };
 
 const h = React.createElement;
 
+const CLIENT_REFERENCE = Symbol.for("react.client.reference");
+const documentLayouts = new WeakMap<Function, Function>();
+
+/**
+ * The root layout inside the document it must render: a layout returning something other than <html>
+ * (apps exported for the NATA cloud, which renders into a container) gets <html><body> around it, like
+ * the default document without a root layout. Without it the SSR stream never met a <head> and the page
+ * came out as just "</body></html>" (a blank page, no error). Client layouts are rendered as they are.
+ */
+function withDocument(Layout: any) {
+  if (typeof Layout !== "function" || Layout.$$typeof === CLIENT_REFERENCE) return Layout;
+  let wrapped = documentLayouts.get(Layout);
+  if (!wrapped) {
+    wrapped = async function RootDocument(props: any) {
+      const out = await Layout(props);
+      return out && typeof out === "object" && out.type === "html" ? out : h("html", { lang: "en" }, h("body", null, out));
+    };
+    Object.defineProperty(wrapped, "name", { value: Layout.name || "RootLayout" });
+    documentLayouts.set(Layout, wrapped);
+  }
+  return wrapped;
+}
+
 interface SegmentInput {
   key: string;
   layout?: string | null;
@@ -189,7 +212,7 @@ export async function buildModel(input: RscInput) {
     // Parallel routes: each slot is a prop of the layout (`@team` → `team`)
     const slotProps: Record<string, unknown> = {};
     for (const slot of input.segments[i].slots ?? []) slotProps[slot.name] = await buildSlot(slot, params);
-    let node: any = Layout ? h(Layout, { params, ...slotProps }, inner) : inner;
+    let node: any = Layout ? h(i === 0 ? withDocument(Layout) : Layout, { params, ...slotProps }, inner) : inner;
     if (i === 0) {
       // A root layout renders <html>; without one, provide the document like Next's default
       if (!Layout) node = h("html", { lang: "en" }, h("body", null, node));
