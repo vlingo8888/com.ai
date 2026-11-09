@@ -85,13 +85,14 @@ export function rewriteSiblingImports(code: string, siblings: Map<string, string
  * The file Bun.build picks for `spec` with browser conditions (package `exports`, `browser`, `module`
  * fields), found by letting Bun resolve it from a probe entry and recording the first file it loads.
  */
-async function resolveForBrowser(spec: string, probe: string): Promise<string | null> {
+async function resolveForBrowser(spec: string, probe: string, nodeEnv: string): Promise<string | null> {
   writeFileSync(probe, `export * from ${JSON.stringify(spec)};\n`);
   let resolved: string | null = null;
   await Bun.build({
     entrypoints: [probe],
     target: "browser",
     format: "esm",
+    conditions: envConditions(nodeEnv),
     plugins: [
       {
         name: "nata-probe",
@@ -205,6 +206,16 @@ function cjsExportNames(file: string, nodeEnv: string, seen = new Set<string>())
  * so a module shared by two entries (use-intl's React context, imported by `use-intl` and `use-intl/react`)
  * exists once in the browser instead of once per bundle.
  */
+/**
+ * The `development` / `production` export condition for `nodeEnv`, given to Bun.build explicitly: Bun in
+ * the browser (bun-rust) picked the `default` (production) files in development, while packageEntries
+ * listed the development ones, so use-intl's React context was inlined into both `use-intl` and
+ * `use-intl/react` and next-intl's `useTranslations` never found NextIntlClientProvider's context
+ */
+function envConditions(nodeEnv: string): string[] {
+  return [nodeEnv === "production" ? "production" : "development"];
+}
+
 export function packageEntries(spec: string, resolveDir: string, nodeEnv: string): Map<string, string> {
   const entries = new Map<string, string>();
   const parts = spec.split("/");
@@ -219,24 +230,35 @@ export function packageEntries(spec: string, resolveDir: string, nodeEnv: string
   }
   if (!exports || typeof exports !== "object" || Array.isArray(exports)) return entries;
   const conditions = new Set(["browser", "import", "module", nodeEnv === "production" ? "production" : "development", "default"]);
-  const pick = (target: unknown): string | null => {
+  // The other environment's file of each entry too (when no other entry claims it): whichever file a
+  // bundler resolves, a module shared by two entries still stays one module in the browser
+  const other = new Set(["browser", "import", "module", nodeEnv === "production" ? "development" : "production", "default"]);
+  const pickWith = (set: Set<string>, target: unknown): string | null => {
     if (typeof target === "string") return target;
-    if (Array.isArray(target)) return target.map(pick).find((t) => t !== null) ?? null;
+    if (Array.isArray(target)) return target.map((t) => pickWith(set, t)).find((t) => t !== null) ?? null;
     if (target && typeof target === "object") {
       for (const [key, value] of Object.entries(target)) {
-        if (conditions.has(key)) {
-          const picked = pick(value);
+        if (set.has(key)) {
+          const picked = pickWith(set, value);
           if (picked !== null) return picked;
         }
       }
     }
     return null;
   };
+  const pick = (target: unknown) => pickWith(conditions, target);
   // `exports: { "import": ..., "default": ... }` is the package root alone
   const map = Object.keys(exports).every((k) => k.startsWith(".")) ? (exports as Record<string, unknown>) : { ".": exports };
   const wildcards: [string, string][] = [];
+  const alternates: [string, string][] = [];
   for (const [subpath, target] of Object.entries(map)) {
     if (subpath === "./package.json") continue;
+    const alt = pickWith(other, target);
+    if (alt && /\.[mc]?js$/.test(alt) && !subpath.includes("*")) {
+      try {
+        alternates.push([realpathSync(join(pkgDir, alt)), subpath === "." ? name : name + subpath.slice(1)]);
+      } catch {}
+    }
     const file = pick(target);
     if (!file || !/\.[mc]?js$/.test(file)) continue;
     if (subpath.includes("*")) {
@@ -247,6 +269,7 @@ export function packageEntries(spec: string, resolveDir: string, nodeEnv: string
       entries.set(realpathSync(join(pkgDir, file)), subpath === "." ? name : name + subpath.slice(1));
     } catch {}
   }
+  for (const [file, specifier] of alternates) if (!entries.has(file)) entries.set(file, specifier);
   if (wildcards.length > 0) addWildcardEntries(entries, name, pkgDir, resolveDir, wildcards);
   return entries;
 }
@@ -397,7 +420,7 @@ export async function bundleDependency(input: {
       }
     }
 
-    const resolved = (await resolveForBrowser(spec, probe)) ?? direct;
+    const resolved = (await resolveForBrowser(spec, probe, nodeEnv)) ?? direct;
     const esm = resolved !== null && isEsmModule(resolved);
     const target = resolved !== null && resolved === direct ? direct : spec;
     const siblings = esm ? packageEntries(spec, resolveDir, nodeEnv) : new Map<string, string>();
@@ -590,6 +613,7 @@ async function buildWithBun(b: BuildInput): Promise<string> {
     // Whitespace is kept so emitted import statements start at line beginnings (see BARE_STATIC_IMPORT)
     minify: { syntax: true, identifiers: true, whitespace: false },
     define: { "process.env.NODE_ENV": JSON.stringify(nodeEnv) },
+    conditions: envConditions(nodeEnv),
     plugins: [
       {
         name: "nata-external-deps",
